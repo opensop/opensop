@@ -450,11 +450,11 @@ one of two closed vocabularies:
 
 | Kind | Names | Satisfied when |
 |---|---|---|
-| Event-type requirement | Any of the event types in the `event` enum of `schemas/execution-event-0.1.json` (`session_started`, `agent_created`, `agent_terminated`, `task_received`, `intent`, `tool_call`, `tool_result`, `uncertainty`, `handoff`, `error`) | A structurally sound event of that type — its base envelope intact — is present in the trace. |
+| Event-type requirement | Any of the event types in the `event` enum of `schemas/execution-event-0.5.json` (`session_started`, `agent_created`, `agent_terminated`, `task_received`, `intent`, `tool_call`, `tool_result`, `uncertainty`, `handoff`, `error`) | A structurally sound event of that type — its base envelope intact — is present in the trace. |
 | Field-level requirement | `effective_prompt` — the only field-level name in v0.1 | The `session_started` event's `effective_prompt` carries a non-empty `body`, or a `uri` that resolves. A `hash`-only `effective_prompt` does NOT satisfy this requirement: a hash proves integrity, not retrievability. |
 
 This spec does not restate the event schema's field-level structure here; see
-`schemas/execution-event-0.1.json` for the full shape each event type MUST
+`schemas/execution-event-0.5.json` for the full shape each event type MUST
 have to be considered structurally sound.
 
 Both vocabularies are **closed**. A requirement name that is not an event
@@ -487,7 +487,7 @@ compares a process definition against a trace of one execution of it,
 strictly after the fact — the same boundary that keeps `sop` (§2.8) out of
 execution, applied here to a field that is inherently retrospective rather
 than merely advisory. A reference conformance checker implementing this
-grammar against `schemas/execution-event-0.1.json` ships at
+grammar against `schemas/execution-event-0.5.json` ships at
 `adapters/conformance.py`; its design rationale and worked examples live in
 `adapters/EVIDENCE-CONTRACT.md`.
 
@@ -531,7 +531,7 @@ agent_contract:
 
 | Field | Required | Description |
 |---|---|---|
-| `kind` | No | `planner` or `worker`. Exactly two values, closed. A worker writes code (or otherwise produces the artifact); a planner owns and decomposes scope. Matches the `agent.kind` enum in `schemas/execution-event-0.1.json`. |
+| `kind` | No | `planner` or `worker`. Exactly two values, closed. A worker writes code (or otherwise produces the artifact); a planner owns and decomposes scope. Matches the `agent.kind` enum in `schemas/execution-event-0.5.json`. |
 | `owns` | No | Free-text label for the unit of scope this agent is responsible for (e.g. `task`, `epic`). |
 | `may_spawn` | No | Boolean. Whether this agent may create subordinate agents. |
 | `lateral_communication` | No | `forbidden` or `permitted`. Whether this agent may communicate directly with sibling agents, rather than only through its parent or children. |
@@ -577,7 +577,7 @@ uses it — and the text that actually reaches a model is a *composition*
 (this prompt plus tool definitions, task context, and harness-injected
 material) that the process file never sees and has no way to represent. That
 composition is what `session_started.effective_prompt` in
-`schemas/execution-event-0.1.json` records, at execution time, in the event
+`schemas/execution-event-0.5.json` records, at execution time, in the event
 stream — not here. `prompt` names and versions the reusable input; the event
 stream is the only place the actual, composed output of that input is ever
 recorded.
@@ -2181,6 +2181,39 @@ spec itself:
   rendering inputs into prompts or shell commands.
 - Rate limiting and DDoS protection on the `/sop/*` API.
 
+### 11.7 Execution-trace provenance
+
+A harness execution trace (`schemas/execution-event-*.json`) is evidence, not
+narration. This section states the one rule that keeps it honest.
+
+Provenance describes how a fact was established, never who established it. An event or field MUST NOT be labeled `observed` unless the fact it asserts — including any cross-reference to another event — was mechanically witnessed at the time it occurred; a value or link reconstructed after the fact is `inferred` regardless of the emitter's authority, and MUST carry `inferred_by` and `inference_basis`. When a reconstructed value cannot be stated with its basis, omit it: an absent field is honest evidence of a gap; a wrong label is a forgery of certainty.
+
+An emitter with stronger first-party standing than the process it is reconstructing from — for example a harness that spawned the subprocess whose transcript it is now parsing — does not get a lighter labeling rule. Custody over how a fact was obtained can make a reconstruction more *reliable*; it cannot make the reconstruction stop being a reconstruction. That distinction is recorded in `inference_basis`, never by upgrading the label.
+
+**The three labels:**
+
+| Label | Meaning |
+|---|---|
+| `observed` | Captured mechanically, with zero agent cooperation and no opportunity for the agent to shade it. |
+| `declared` | Asserted by the agent itself, in real time — contemporaneous, but true only insofar as the agent is honest and complete. |
+| `inferred` | Reconstructed after the fact by an adapter or harness from something else; the weakest of the three, and MUST carry `inferred_by` + `inference_basis`. |
+
+**Per-field overrides.** An event's top-level `provenance` is the label its own envelope facts carry. A single field may have been established differently than the rest of the event — most often a cross-reference or derived value bound by adapter-side inference inside an otherwise mechanically-observed event. `field_provenance` is a sparse object, keyed by field name, that overrides the label for just that field:
+
+```json
+"field_provenance": {
+  "patch": { "provenance": "inferred",
+             "inferred_by": "codex-adapter/0.5",
+             "inference_basis": "ordinal-window adjacency" }
+}
+```
+
+A field absent from `field_provenance` inherits the event-level label. Overrides run in both directions: a field on an otherwise-`observed` event may be `inferred` (an adapter-bound cross-reference inside a mechanically-captured event), and, symmetrically, a field may carry a stronger label than the event's own — a single override never raises the *event* above its event-level label, only the one fact it names.
+
+**Conformance.** A conformance checker MUST take, as an event's effective provenance for any fact it relies on, the weakest label touching that fact — the weaker of the event-level `provenance` and any `field_provenance` override that names it — and MUST report accordingly rather than defaulting to the event-level label alone. `adapters/conformance.py` is the reference checker.
+
+Normative shape: `schemas/execution-event-0.5.json`. Background and the reference evidence-requirement mechanism this feeds: `adapters/EVIDENCE-CONTRACT.md`, `adapters/conformance.py`.
+
 ---
 
 ## 12. Roadmapped Features
@@ -2320,7 +2353,8 @@ process:
 | 0.7.x (additive) | Optional `recipe` object (§2.8), a Process field: `recipe.source` (canonical origin), `recipe.install` (one-line install hint), `recipe.tags` (discovery tags). Distribution metadata only — ignored by the execution engine, additive and non-breaking; ignored by v0.7.x-capable parsers (older strict parsers may not recognize it — a known compatibility boundary). No HTTP API change. No CLI parsing required for MVP (later slice). |
 | 0.7.x (rename) | `recipe` object renamed to `sop` (§2.8): `sop.source`, `sop.install`, `sop.tags`, same semantics as the fields above. `recipe` is retained as a deprecated alias — conforming parsers MUST still accept it, and `sop` wins if both are present. Distribution metadata only, still ignored by the execution engine. Non-breaking. No HTTP API change. |
 | 0.7.x (additive) | Optional `effects` field (§3.2), a Step field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence, not content, is the signal that a step is irreversible and must not be silently auto-retried. Additive and non-breaking; process-level effects are derived (union of step `effects`), not a separate stored field. Enforced by the CLI's `opensop heal --apply`, which refuses to re-run a step declaring `effects` unless `--force-effects` is passed. No HTTP API change. |
-| 0.7.x (additive) | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.1.json`; checked post-hoc by a separate conformance checker (reference implementation: `adapters/conformance.py`, design doc: `adapters/EVIDENCE-CONTRACT.md`), never by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.1.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
+| 0.7.x (additive) | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.5.json`; checked post-hoc by a separate conformance checker (reference implementation: `adapters/conformance.py`, design doc: `adapters/EVIDENCE-CONTRACT.md`), never by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.5.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
+| 0.7.x (additive) | §11.7 execution-trace provenance principle (provenance describes how a fact was established, never who established it) plus execution-event schema 0.5's `field_provenance` sparse per-field override map. Execution-event schemas (`schemas/execution-event-*.json`) version independently of this process-format spec version. Additive and non-breaking: `field_provenance` is optional on every event; existing 0.4-shaped events remain valid. No HTTP API change. |
 
 ## Appendix B — Flat vs. wrapped envelope quick reference
 
