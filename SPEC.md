@@ -150,6 +150,10 @@ versions continue to parse and run unchanged — this spec is additive.
 | `on_error` | No | `{notify: {channel, target}, retry_policy}`. |
 | `access` | No | `{start: [], view: [], advance: [], admin: []}`. |
 | `sop` | No | Distribution metadata: origin, install hint, discovery tags. See §2.8. Ignored by the execution engine. `recipe` is accepted as a deprecated alias. |
+| `evidence` | No | Declares what a trace of this process's execution MUST contain for a conformance claim about it to be checkable. See §2.9.1. Ignored by the execution engine. |
+| `agent_contract` | No | Declares the role an agent executing this process fills, and the boundaries it operates within. See §2.9.2. Ignored by the execution engine. |
+| `prompt` | No | A reference to the versioned prompt an agent executing this process was given — never the prompt text itself. See §2.9.3. Ignored by the execution engine. |
+| `isolation` | No | Declares the execution substrate a conforming runtime should provide (e.g. an independent checkout). See §2.9.4. Advisory; ignored by the execution engine. |
 
 ---
 
@@ -404,6 +408,205 @@ applies to the object itself. Older or strict parsers that predate the v0.7.x
 boundary, not a conformance violation — this metadata is advisory and safe to
 drop. This clause establishes no general rule about other unknown keys; it
 governs `sop` and its `recipe` alias only.
+
+---
+
+### 2.9 Agent-work fields (additive, v0.7.x)
+
+Sections 2–11 describe what a process *does*: steps, triggers, inputs and
+outputs. The four optional Process fields below describe a different axis —
+what an *agent* executing this process is, and what must have been recorded
+about that execution for a claim about it to be checkable at all. All four
+are Process fields (siblings of `name`, `steps`, `sop`), all optional, and
+none of them are read by the execution engine: a conforming engine MUST
+parse and then ignore all four when running a process, the same way §2.8
+requires it to ignore `sop`. Omitting any or all of them changes nothing —
+every process definition written before this section existed remains valid
+and runs unchanged.
+
+---
+
+#### 2.9.1 `evidence`
+
+The rest of this spec describes what a process's execution *does*. `evidence`
+inverts that: it declares what MUST have been recorded for a claim about this
+process's execution to be checkable at all. It is the `effects` mechanism
+(§3.2) pointed at traces instead of at the world — `effects` is a declared
+field a tool refuses to ignore when deciding whether to retry; `evidence` is
+a declared field a conformance checker refuses to ignore when deciding
+whether to certify a run.
+
+```yaml
+evidence:
+  required:
+    - session_started
+    - effective_prompt
+    - task_received
+    - handoff
+```
+
+`evidence.required` is an array of requirement names. Each name is drawn from
+one of two closed vocabularies:
+
+| Kind | Names | Satisfied when |
+|---|---|---|
+| Event-type requirement | Any of the event types in the `event` enum of `schemas/execution-event-0.1.json` (`session_started`, `agent_created`, `agent_terminated`, `task_received`, `intent`, `tool_call`, `tool_result`, `uncertainty`, `handoff`, `error`) | A structurally sound event of that type — its base envelope intact — is present in the trace. |
+| Field-level requirement | `effective_prompt` — the only field-level name in v0.1 | The `session_started` event's `effective_prompt` carries a non-empty `body`, or a `uri` that resolves. A `hash`-only `effective_prompt` does NOT satisfy this requirement: a hash proves integrity, not retrievability. |
+
+This spec does not restate the event schema's field-level structure here; see
+`schemas/execution-event-0.1.json` for the full shape each event type MUST
+have to be considered structurally sound.
+
+Both vocabularies are **closed**. A requirement name that is not an event
+type from the schema's `event` enum and not `effective_prompt` MUST be
+treated as an error by a conformance checker — never as a silently-passed
+requirement. Extending either vocabulary (a new event type, a new
+field-level name) is a coordinated spec change, made alongside the schema it
+draws from, not something an adopter can introduce informally by writing a
+new name into a process file.
+
+**SOPs with no `evidence` block, or an empty one.** A process with no
+`evidence` field is **vacuously conformant** — nothing was required, so
+nothing can be missing. This mirrors how §3.2 treats a step with no
+`effects` field as side-effect-free: absence is a meaningful, valid state,
+not an error, and it is what makes this field purely additive — no process
+written before `evidence` existed retroactively fails a conformance check it
+never declared. A checker MUST state the vacuous case explicitly (e.g. "no
+`evidence` block declared — nothing required, vacuously conformant") rather
+than printing an unqualified pass, so a vacuous pass is never visually
+indistinguishable from a pass that actually checked something.
+`evidence: {required: []}` is the same outcome — vacuously conformant — but
+is a distinct, deliberate input from omitting the block entirely, and a
+checker SHOULD word the two differently for an operator scanning output.
+
+**This is a conformance concern, not an execution concern.** A conforming
+execution engine MUST ignore `evidence` when running a process: it MUST NOT
+affect step dispatch, retries, timeouts, outputs, or any other execution
+behavior. `evidence` is checked only by a separate conformance checker that
+compares a process definition against a trace of one execution of it,
+strictly after the fact — the same boundary that keeps `sop` (§2.8) out of
+execution, applied here to a field that is inherently retrospective rather
+than merely advisory. A reference conformance checker implementing this
+grammar against `schemas/execution-event-0.1.json` ships at
+`adapters/conformance.py`; its design rationale and worked examples live in
+`adapters/EVIDENCE-CONTRACT.md`.
+
+**Worked example.** An SOP that requires a session to have started with a
+retrievable prompt, a task to have been formally received, and a handoff to
+close it out:
+
+```json
+{
+  "name": "extract-action-items",
+  "version": "1.0",
+  "description": "Extract action items from a transcript",
+  "steps": [
+    { "id": "extract", "type": "automated", "run": "steps/extract.sh" }
+  ],
+  "evidence": {
+    "required": ["session_started", "effective_prompt", "task_received", "handoff"]
+  }
+}
+```
+
+Checked against a trace missing a `handoff` event, a conformance checker
+reports that requirement missing and the process non-conformant, while every
+other declared requirement is reported present — presence is evaluated
+per-requirement, not as an all-or-nothing bundle.
+
+---
+
+#### 2.9.2 `agent_contract`
+
+Declares the role an agent executing this process fills, and the boundaries
+it operates within.
+
+```yaml
+agent_contract:
+  kind: worker          # planner | worker — exactly two, closed
+  owns: task
+  may_spawn: false
+  lateral_communication: forbidden
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `kind` | No | `planner` or `worker`. Exactly two values, closed. A worker writes code (or otherwise produces the artifact); a planner owns and decomposes scope. Matches the `agent.kind` enum in `schemas/execution-event-0.1.json`. |
+| `owns` | No | Free-text label for the unit of scope this agent is responsible for (e.g. `task`, `epic`). |
+| `may_spawn` | No | Boolean. Whether this agent may create subordinate agents. |
+| `lateral_communication` | No | `forbidden` or `permitted`. Whether this agent may communicate directly with sibling agents, rather than only through its parent or children. |
+
+**The vocabulary is deliberately minimal.** This spec mints no roles beyond
+`planner` and `worker` — no reviewer, judge, integrator, or coordinator —
+because those responsibilities already have a home elsewhere in this spec: a
+judgment call is a `judgment` step (§3.9) or an `approval` step (§3.7);
+review and integration are what planners and workers already do for each
+other through ordinary handoffs, not a third kind of agent. A third `kind`
+value would be a coordinated, closed-vocabulary change, not something an
+adopter introduces by writing a new string into a process file — the same
+discipline `evidence`'s closed vocabulary (§2.9.1) follows.
+
+`agent_contract` is declarative. A conforming execution engine MUST ignore
+it: it does not gate step dispatch, and the local engine does not verify
+that the agent actually running a process matches the declared contract. An
+orchestrating harness MAY use it to configure or constrain the agent it
+launches; that enforcement, like `evidence`'s conformance check, happens
+outside the execution engine.
+
+---
+
+#### 2.9.3 `prompt`
+
+A reference to the versioned prompt an agent executing this process was
+given — never the prompt text itself.
+
+```yaml
+prompt:
+  id: software-worker
+  version: "2.4"
+```
+
+| Field | Required (if `prompt` present) | Description |
+|---|---|---|
+| `id` | Yes | Identifier of the prompt. |
+| `version` | Yes | Version of that prompt (e.g. semver-style, or any identifier the prompt's own versioning scheme uses). |
+
+**Why a reference, never the text.** A prompt embedded in a process file
+cannot be versioned, diffed, or reviewed independently of the process that
+uses it — and the text that actually reaches a model is a *composition*
+(this prompt plus tool definitions, task context, and harness-injected
+material) that the process file never sees and has no way to represent. That
+composition is what `session_started.effective_prompt` in
+`schemas/execution-event-0.1.json` records, at execution time, in the event
+stream — not here. `prompt` names and versions the reusable input; the event
+stream is the only place the actual, composed output of that input is ever
+recorded.
+
+Ignored by the execution engine, for the same reason `sop` (§2.8) is: it
+identifies something about the process as an artifact without affecting how
+the process runs.
+
+---
+
+#### 2.9.4 `isolation`
+
+Declares the execution substrate a conforming runtime should provide for an
+agent executing this process.
+
+```yaml
+isolation:
+  repository: independent-checkout
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `repository` | No | Repository isolation the runtime should provide (e.g. `independent-checkout` — a dedicated clone or worktree, not a working copy shared with other concurrent work). |
+
+`isolation` is advisory. A conforming runtime SHOULD provide the declared
+substrate, but the local execution engine (§5) does not verify it and a
+process lacking the declared isolation still runs — this field documents an
+expectation of the environment around execution, not a precondition the
+engine checks before running.
 
 ---
 
@@ -2117,6 +2320,7 @@ process:
 | 0.7.x (additive) | Optional `recipe` object (§2.8), a Process field: `recipe.source` (canonical origin), `recipe.install` (one-line install hint), `recipe.tags` (discovery tags). Distribution metadata only — ignored by the execution engine, additive and non-breaking; ignored by v0.7.x-capable parsers (older strict parsers may not recognize it — a known compatibility boundary). No HTTP API change. No CLI parsing required for MVP (later slice). |
 | 0.7.x (rename) | `recipe` object renamed to `sop` (§2.8): `sop.source`, `sop.install`, `sop.tags`, same semantics as the fields above. `recipe` is retained as a deprecated alias — conforming parsers MUST still accept it, and `sop` wins if both are present. Distribution metadata only, still ignored by the execution engine. Non-breaking. No HTTP API change. |
 | 0.7.x (additive) | Optional `effects` field (§3.2), a Step field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence, not content, is the signal that a step is irreversible and must not be silently auto-retried. Additive and non-breaking; process-level effects are derived (union of step `effects`), not a separate stored field. Enforced by the CLI's `opensop heal --apply`, which refuses to re-run a step declaring `effects` unless `--force-effects` is passed. No HTTP API change. |
+| 0.7.x (additive) | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.1.json`; checked post-hoc by a separate conformance checker (reference implementation: `adapters/conformance.py`, design doc: `adapters/EVIDENCE-CONTRACT.md`), never by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.1.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
 
 ## Appendix B — Flat vs. wrapped envelope quick reference
 
