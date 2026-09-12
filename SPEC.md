@@ -553,6 +553,29 @@ orchestrating harness MAY use it to configure or constrain the agent it
 launches; that enforcement, like `evidence`'s conformance check, happens
 outside the execution engine.
 
+**Enforcement is optional, but half-enforcement is not.** A harness that
+elects to enforce `agent_contract` and cannot back a given declaration MUST
+refuse the run rather than execute it unenforced. A trace of an unenforced
+run is indistinguishable from a trace of an enforced one, so silently
+proceeding produces a record that overstates its own evidence — the failure
+§11.7 exists to prevent. Where a harness does enforce, the constraint the
+agent actually ran under is recorded in `session_started.permission_envelope`
+(required by `schemas/execution-event-0.5.json`), which is where an auditor
+looks to tell *could not have* from *was asked not to*.
+
+This spec deliberately does not say *how* a declaration is to be enforced.
+The mapping from a `kind` to a sandbox, an allow-list, or an isolation
+mechanism is a property of a harness and its backend, not of this format,
+and no such mapping can be stated neutrally while only one enforcing
+implementation exists.
+
+**`lateral_communication` is the exception, and the limit is structural.** A
+conformance checker MUST NOT report `lateral_communication: forbidden` as
+verified from an execution trace. A trace can show that a spawn tree is
+well-formed; it can never show that a side channel was absent. Enforcement
+of this field is by construction — by what the harness makes possible — and
+a trace is silent on it, not affirmative.
+
 ---
 
 #### 2.9.3 `prompt`
@@ -2353,7 +2376,7 @@ process:
 | 0.7.x (additive) | Optional `recipe` object (§2.8), a Process field: `recipe.source` (canonical origin), `recipe.install` (one-line install hint), `recipe.tags` (discovery tags). Distribution metadata only — ignored by the execution engine, additive and non-breaking; ignored by v0.7.x-capable parsers (older strict parsers may not recognize it — a known compatibility boundary). No HTTP API change. No CLI parsing required for MVP (later slice). |
 | 0.7.x (rename) | `recipe` object renamed to `sop` (§2.8): `sop.source`, `sop.install`, `sop.tags`, same semantics as the fields above. `recipe` is retained as a deprecated alias — conforming parsers MUST still accept it, and `sop` wins if both are present. Distribution metadata only, still ignored by the execution engine. Non-breaking. No HTTP API change. |
 | 0.7.x (additive) | Optional `effects` field (§3.2), a Step field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence, not content, is the signal that a step is irreversible and must not be silently auto-retried. Additive and non-breaking; process-level effects are derived (union of step `effects`), not a separate stored field. Enforced by the CLI's `opensop heal --apply`, which refuses to re-run a step declaring `effects` unless `--force-effects` is passed. No HTTP API change. |
-| 0.7.x (additive) | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.5.json`; checked post-hoc by a separate conformance checker (reference implementation: `adapters/conformance.py`, design doc: `adapters/EVIDENCE-CONTRACT.md`), never by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.5.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
+| 0.7.x (additive) | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.5.json`; checked post-hoc by a separate conformance checker (reference implementation: `adapters/conformance.py`, design doc: `adapters/EVIDENCE-CONTRACT.md`), never by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. Enforcement is optional and external to the engine, but a harness that elects to enforce a declaration it cannot back MUST refuse the run rather than execute it unenforced; and `lateral_communication: forbidden` MUST NOT be reported as verified from a trace, since a trace can show a spawn tree well-formed but never show a side channel absent. No enforcement *mechanism* is specified — that mapping belongs to a harness and its backend, not to this format. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.5.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
 | 0.7.x (additive) | §11.7 execution-trace provenance principle (provenance describes how a fact was established, never who established it) plus execution-event schema 0.5's `field_provenance` sparse per-field override map. Execution-event schemas (`schemas/execution-event-*.json`) version independently of this process-format spec version. Additive and non-breaking: `field_provenance` is optional on every event; existing 0.4-shaped events remain valid. No HTTP API change. |
 
 ## Appendix B — Flat vs. wrapped envelope quick reference
