@@ -1,4 +1,5 @@
 {
+  "opensop": "0.8",
   "name": "customer-onboarding",
   "version": "1.0.0",
   "description": "Collect new customer details via form, gate on a kickoff go/no-go approval, then emit a structured onboarding checklist.",

@@ -1,40 +1,18 @@
 # OpenSOP roadmap
 
-OpenSOP is Process as Infrastructure for agentic processes. The CLI (v0.8.0) is local-first: `opensop run/list/search` execute locally against `.sop.json` with no server; remote is opt-in via `--remote`. The SPEC is at v0.6. This roadmap keeps the public repo honest about what ships next.
+OpenSOP is Process as Infrastructure for agentic processes. The CLI (v0.9.0) is local-first: `opensop run/list/search` execute locally against `.sop.json` with no server; remote is opt-in via `--remote`. The spec is at v0.8. This roadmap keeps the public repo honest about what ships next.
 
 ## Shipped
 
-- YAML process parser (SPEC v0.6; accepts 0.1/0.2 for legacy)
-- Instance executor with 10 step-type executors
-- REST API under `/sop/`
-- Admin UI (Hotwire + Tailwind + ViewComponent)
-- RSpec coverage
-- Real step execution for `form`, `automated`, `shell`, `noop`, `webhook`, `llm`, `loop`
-- Modeled state transitions for `judgment`, `approval`, `subprocess`, and `wait`
-- CLI v0.8.0 — local-first default, `--remote` opt-in, `--local` deprecated no-op
+- SPEC 0.8 — agent-work Process fields (`evidence`, `agent_contract`, `prompt`, `isolation`) and trace provenance, plus bare-form `opensop schema validate`
+- CLI 0.9.0 — local-first execution against `.sop.json`, `--remote` opt-in
+- `sops/` — a library of example SOPs to fork and run
 
-## Next
+## Next — harness graduation gates
 
-- Real outbound webhook delivery (HTTParty + ActiveJob background call)
-- LLM-backed `judgment` steps with confidence thresholds and escalation
-- Human approval UI for `approval` steps
-- Real `subprocess` execution (child instance spawn + parent pause)
-- Real `notification` delivery (email, Slack, SMS)
-- Process metrics and run dashboards
-- Example SOP library for common ops and engineering workflows
-- More agent-harness examples: PR review, dependency bumping, CI re-runs, release notes
+An experimental execution-event harness exists as scaffolding, not wired into the CLI. It ships as a separate companion, not inside `cli/`, and only once it earns graduation:
 
-## Later
-
-- Process Designer UI
-- Version diff/replay UI
-- Runtime adapters for other execution backends
-- Hosted playground for trying OpenSOP without local setup
-- Compatibility tooling for importing runbooks from Markdown, Notion, or Confluence
-
-## Good first issues
-
-- Improve error messages for invalid field references
-- Add screenshots or GIFs to the README quickstart
-- Document how to run OpenSOP behind a reverse proxy
-- Add an example agent workflow that writes receipts without side effects
+1. The event schema unchanged across two consecutive milestones.
+2. The delta list worked off, and a second trial clean.
+3. The adapter survives a real vendor CLI version bump, with ingest failing loudly rather than degrading into a thin trace that still looks authoritative.
+4. An explicit packaging decision.

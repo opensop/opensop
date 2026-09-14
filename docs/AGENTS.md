@@ -60,7 +60,7 @@ cp /tmp/opensop/cli/bin/opensop /usr/local/bin/opensop && chmod +x /usr/local/bi
 Verify:
 
 ```bash
-opensop --version    # opensop 0.8.0
+opensop --version    # opensop 0.9.0
 opensop help         # full command reference
 ```
 
@@ -125,7 +125,7 @@ Search first. Write new only when:
 
 ## 3. Run
 
-v0.8.0 is local-first. `opensop run` runs on-machine with no server required.
+v0.9.0 is local-first. `opensop run` runs on-machine with no server required.
 
 ### Start a run
 
@@ -282,7 +282,7 @@ Process files are JSON (`.sop.json`). Minimal skeleton:
 
 ```json
 {
-  "opensop": "0.6",
+  "opensop": "0.8",
   "name": "extract-action-items",
   "version": "1.0",
   "description": "Extract action items and owners from meeting notes.",
@@ -307,7 +307,7 @@ Process files are JSON (`.sop.json`). Minimal skeleton:
 ```
 
 Key rules:
-- `"opensop": "0.6"` required.
+- `"opensop"` is optional in this bare form, but if present must be an allowlisted version — `0.8` for new files. (The wrapped/server form requires it.)
 - `name` and step `id` must match `^[a-z0-9][a-z0-9_-]*$`.
 - `"version"` is a quoted string.
 - Step `id` values must be unique.
@@ -420,7 +420,7 @@ Problems:
 
 ```json
 {
-  "opensop": "0.6",
+  "opensop": "0.8",
   "name": "extract-action-items",
   "version": "1.0",
   "description": "Extract action items, owners, and due dates from meeting notes. Returns a typed JSON array.",
@@ -552,7 +552,7 @@ The mineralization tiers (m0–m6), transition rules, and lineage annotation con
 Run through these before committing or running a process. The engine rejects processes that fail format checks; the rest are authoring best practices.
 
 ### Format (engine enforced)
-- [ ] `"opensop": "0.6"` at the top.
+- [ ] `"opensop": "0.8"` at the top.
 - [ ] `"version"` is a quoted string, not a bare number.
 - [ ] Every `name` and `id` matches `^[a-z0-9][a-z0-9_-]*$`.
 - [ ] Step `id` values are unique within the process.
@@ -582,7 +582,7 @@ Run through these before committing or running a process. The engine rejects pro
 
 ## 9. Common mistakes
 
-**`run:` path doesn't resolve.** In server mode, `run:` is relative to the `processes/` library root, not to the process file. A YAML at `processes/examples/my-process.sop.yaml` must write `run: "./examples/steps/my-script.rb"`, not `"./steps/my-script.rb"`.
+**`run:` path doesn't resolve.** In server mode, `run:` is relative to the `sops/` library root, not to the process file. A YAML at `sops/examples/my-process.sop.yaml` must write `run: "./examples/steps/my-script.rb"`, not `"./steps/my-script.rb"`.
 
 **Condition always true/false.** The evaluator treats missing identifiers as `null`, which compares false to almost everything. Check the exact output key name on the upstream step.
 

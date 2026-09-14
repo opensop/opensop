@@ -725,7 +725,7 @@ annotate|append a policy event to a skill's lineage history|annotate <skill> <ev
 lineage|print a skill's lineage entry (status, metadata, history)|lineage <skill>|cells|local
 fork|copy an ancestor cell's skill into the active cell|fork <name> [--from <cell>]|cells|local
 register|POST a .sop.yaml to /sop/processes/register|register <process.yaml>|authoring|remote
-schema validate|client-side YAML lint — no server round-trip|schema validate <file.yaml>|authoring|local
+schema validate|validate a .sop.json (or wrapped .sop.yaml) process — no server round-trip|schema validate <file>|authoring|local
 instances|list runs — local by default, paginated server list with --remote|instances [--state X] [--process Y]|admin|dual
 config|show or set remote server config (url and token)|config [set url <URL>; set token <TOKEN>]|config|local
 upgrade|upgrade the installed opensop CLI to the latest (or a pinned) release|upgrade [--pin X.Y.Z]|config|local
@@ -960,7 +960,7 @@ EX
     schema)
       cat <<'EX'
   opensop --remote schema lead-qualification    # show full process definition
-  opensop schema validate ./my.sop.yaml         # client-side YAML lint (no server)
+  opensop schema validate ./my.sop.json         # validate a process file (no server)
 EX
       ;;
     ps)
