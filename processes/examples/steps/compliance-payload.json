@@ -1,4 +1,0 @@
-{
-  "entity": "${business_record.legal_name}",
-  "country": "${process.inputs.country}"
-}

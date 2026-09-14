@@ -1,5 +1,0 @@
-╭──────────────────────────────────────────╮
-│  OpenSOP is booting                      │
-│  · Environment: production               │
-│  · Database: postgres                    │
-╰──────────────────────────────────────────╯

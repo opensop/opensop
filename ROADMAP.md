@@ -34,7 +34,6 @@ OpenSOP is Process as Infrastructure for agentic processes. The CLI (v0.8.0) is 
 
 ## Good first issues
 
-- Add another example `.sop.yaml` under `processes/examples/`
 - Improve error messages for invalid field references
 - Add screenshots or GIFs to the README quickstart
 - Document how to run OpenSOP behind a reverse proxy

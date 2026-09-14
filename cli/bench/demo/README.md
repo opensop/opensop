@@ -70,8 +70,4 @@ run `opensop bench` live and capture a fresh cast directly.
 | `demo.sh` | The driver script — deterministic, no API calls, replays recorded data |
 | `comparison.cast` | Asciinema v2 cast file (source of truth for the recording) |
 | `comparison.gif` | Rendered GIF (~406 KB; re-generate with `make demo`) |
-| `comparison.mp4` | MP4 version for embeds (~783 KB; regenerable via `make demo`) |
-| `frames/frame03.png` | Still: title / Act 1 start (~10 KB) |
-| `frames/frame17.png` | Still: Act 2 (openSOP runs) (~16 KB) |
-| `frames/frame_end.png` | Still: Scoreboard (~36 KB) |
 | `Makefile` | `make demo` re-renders cast → GIF → MP4 → frames |
