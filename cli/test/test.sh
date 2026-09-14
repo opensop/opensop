@@ -9275,6 +9275,125 @@ echo "$both_out" | jq -e '
   || { echo "FAIL: opensop info did not prefer 'sop' over the deprecated 'recipe' alias when both present: $both_out"; exit 1; }
 echo "PASS: sop + recipe both present — 'sop' wins over the deprecated 'recipe' alias"
 
+# --------------------------------------------------------------------------- #
+# SPEC 0.8: envelope version allowlist, --version dual-clock, onboard stamp,
+# and bare-form (flat/local) shape dispatch in `schema validate`.
+# --------------------------------------------------------------------------- #
+spec08_dir="$(mktemp -d)"
+
+# (a) an envelope version outside the allowlist is rejected with the
+#     unsupported-version error naming the SPEC_VERSIONS allowlist.
+cat > "$spec08_dir/banana.sop.json" <<'JSON'
+{"opensop": "banana", "process": {"name": "x", "version": "1.0", "description": "d", "inputs": [], "steps": []}}
+JSON
+set +e
+banana_out="$("$cli" schema validate "$spec08_dir/banana.sop.json" --json 2>&1)"; banana_rc=$?
+set -e
+[ "$banana_rc" -ne 0 ] \
+  || { echo "FAIL: SPEC08-a schema validate should reject an unsupported opensop version, got rc=$banana_rc"; exit 1; }
+echo "$banana_out" | jq -e '.errors[]?.message == "unsupported opensop version '"'"'banana'"'"' (supported: 0.1, 0.2, 0.6, 0.7, 0.8)"' >/dev/null \
+  || { echo "FAIL: SPEC08-a expected exact unsupported-version error message, got: $banana_out"; exit 1; }
+echo "PASS: SPEC08-a — unsupported envelope version 'banana' rejected with the allowlist error"
+
+# (b) "opensop": "0.8" is accepted.
+cat > "$spec08_dir/v08.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1.0", "description": "d", "inputs": [], "steps": []}}
+JSON
+v08_out="$("$cli" schema validate "$spec08_dir/v08.sop.json" --json 2>&1)"
+echo "$v08_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-b schema validate should accept opensop 0.8, got: $v08_out"; exit 1; }
+echo "PASS: SPEC08-b — envelope version 0.8 accepted"
+
+# (c) a file emitted by `onboard` (no arg → scaffolds in cwd) passes
+#     `schema validate` end-to-end, and is stamped with the max SPEC_VERSIONS.
+onboard_dir="$spec08_dir/onboard"
+mkdir -p "$onboard_dir"
+( cd "$onboard_dir" && OPENSOP_LOCAL_HOME="$onboard_dir/.home" "$cli" onboard --stub --json >/dev/null 2>&1 )
+[ -f "$onboard_dir/my-process.sop.json" ] \
+  || { echo "FAIL: SPEC08-c onboard did not scaffold my-process.sop.json"; exit 1; }
+jq -e '.opensop == "0.8"' "$onboard_dir/my-process.sop.json" >/dev/null \
+  || { echo "FAIL: SPEC08-c onboard should stamp opensop with the max supported version (0.8), got: $(jq -c '.opensop' "$onboard_dir/my-process.sop.json")"; exit 1; }
+onboard_sv_out="$("$cli" schema validate "$onboard_dir/my-process.sop.json" --json 2>&1)"
+echo "$onboard_sv_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-c onboard-emitted file should pass schema validate, got: $onboard_sv_out"; exit 1; }
+echo "PASS: SPEC08-c — onboard-emitted process file stamped 0.8 and passes schema validate"
+
+# (d) --version prints both clocks: the CLI version and the supported SPEC list.
+version_out="$("$cli" --version 2>&1)"
+echo "$version_out" | grep -q "opensop 0.9.0" \
+  || { echo "FAIL: SPEC08-d --version should print the CLI version 0.9.0, got: $version_out"; exit 1; }
+echo "$version_out" | grep -q "0.1, 0.2, 0.6, 0.7, 0.8" \
+  || { echo "FAIL: SPEC08-d --version should print the supported SPEC version list, got: $version_out"; exit 1; }
+echo "PASS: SPEC08-d — --version prints both the CLI version and the supported SPEC versions"
+
+# (e) a real shipped bare-form library SOP (no envelope, no 'process' wrapper)
+#     passes schema validate, dispatched as the bare form.
+bare_sop="$here/../sops/opensop/release-checklist/release-checklist.sop.json"
+[ -f "$bare_sop" ] || { echo "FAIL: SPEC08-e fixture missing: $bare_sop"; exit 1; }
+bare_out="$("$cli" schema validate "$bare_sop" --json 2>&1)"
+echo "$bare_out" | jq -e '.valid == true and .form == "bare"' >/dev/null \
+  || { echo "FAIL: SPEC08-e shipped bare-form SOP should pass schema validate as bare form, got: $bare_out"; exit 1; }
+echo "PASS: SPEC08-e — shipped bare-form library SOP (release-checklist) passes schema validate"
+
+# (f) a minimal wrapped file carrying ONLY the SPEC.md §2.2-required fields
+#     (name, version, description, steps) passes schema validate — inputs
+#     (and every other optional field) is optional and must not false-positive.
+cat > "$spec08_dir/min-required-only.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}]}}
+JSON
+min_req_out="$("$cli" schema validate "$spec08_dir/min-required-only.sop.json" --json 2>&1)"
+echo "$min_req_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-f minimal required-only file (no inputs) should pass schema validate, got: $min_req_out"; exit 1; }
+echo "PASS: SPEC08-f — minimal wrapped file with only §2.2-required fields (no inputs) passes schema validate"
+
+# (g) agent_contract.kind / .lateral_communication: index(.) inside a piped
+#     literal array must not crash (jq evaluates the arg against the array,
+#     not the document) — positive case validates clean, and the negative
+#     control proves an out-of-vocabulary value is a validation FAILURE
+#     (exit 1), never a jq crash (exit 5).
+cat > "$spec08_dir/ac-good.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "agent_contract": {"kind": "worker", "lateral_communication": "forbidden"}}}
+JSON
+ac_good_out="$("$cli" schema validate "$spec08_dir/ac-good.sop.json" --json 2>&1)"; ac_good_rc=$?
+[ "$ac_good_rc" -eq 0 ] \
+  || { echo "FAIL: SPEC08-g agent_contract {kind:worker, lateral_communication:forbidden} should validate clean, got rc=$ac_good_rc: $ac_good_out"; exit 1; }
+echo "$ac_good_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-g agent_contract positive case should be valid, got: $ac_good_out"; exit 1; }
+
+cat > "$spec08_dir/ac-bad.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "agent_contract": {"kind": "reviewer"}}}
+JSON
+set +e
+ac_bad_out="$("$cli" schema validate "$spec08_dir/ac-bad.sop.json" --json 2>&1)"; ac_bad_rc=$?
+set -e
+[ "$ac_bad_rc" -eq 1 ] \
+  || { echo "FAIL: SPEC08-g agent_contract.kind=reviewer must fail as a validation error (rc=1), NOT crash (rc=5) — got rc=$ac_bad_rc: $ac_bad_out"; exit 1; }
+echo "$ac_bad_out" | jq -e '.errors[]?.message | test("planner or worker")' >/dev/null 2>&1 \
+  || { echo "FAIL: SPEC08-g agent_contract.kind=reviewer error should name the closed vocabulary (planner/worker), got: $ac_bad_out"; exit 1; }
+echo "PASS: SPEC08-g — agent_contract.kind/lateral_communication: valid case clean, out-of-vocabulary kind fails as validation error (not a jq crash)"
+
+# (h) evidence.required vocabulary matches schemas/execution-event-0.5.json's
+#     event enum (12 entries) + effective_prompt (field-level) = 13 names.
+#     handoff_created is valid; the old (wrong) "handoff" name is rejected.
+cat > "$spec08_dir/ev-good.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "evidence": {"required": ["handoff_created"]}}}
+JSON
+ev_good_out="$("$cli" schema validate "$spec08_dir/ev-good.sop.json" --json 2>&1)"
+echo "$ev_good_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-h evidence.required:[handoff_created] should be accepted, got: $ev_good_out"; exit 1; }
+
+cat > "$spec08_dir/ev-bad.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "evidence": {"required": ["handoff"]}}}
+JSON
+set +e
+ev_bad_out="$("$cli" schema validate "$spec08_dir/ev-bad.sop.json" --json 2>&1)"
+set -e
+echo "$ev_bad_out" | jq -e '.valid == false and (.errors[]?.message | test("unknown requirement") and test("handoff"))' >/dev/null 2>&1 \
+  || { echo "FAIL: SPEC08-h evidence.required:[handoff] (not in schema 0.5 enum) should be rejected as unknown, got: $ev_bad_out"; exit 1; }
+echo "PASS: SPEC08-h — evidence.required vocabulary matches schema 0.5's event enum + effective_prompt; stale 'handoff' name rejected"
+
+rm -rf "$spec08_dir"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

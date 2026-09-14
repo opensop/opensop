@@ -1,12 +1,12 @@
-# OpenSOP — Specification v0.7
+# OpenSOP — Specification v0.8
 
-**Date:** 2026-08-05
+**Date:** 2026-09-14
 **Authors:** Chosen9115 + Claude (digital twin)
 **Status:** Current — authoritative cross-repo contract
 **Domain:** opensop.ai
 **License:** Apache 2.0
 
-> This document supersedes SPEC.md v0.6.
+> This document supersedes SPEC.md v0.7.
 > All content from prior versions has been folded in and reconciled against the
 > running code. Where the prior documents said one thing and the code does
 > another, the code governs — discrepancies are noted inline.
@@ -14,7 +14,11 @@
 > **v0.7 adds:** process status model (§9), reliability metrics contract (§10),
 > and a security model (§11). The `/sop/*` HTTP API contract is unchanged.
 > Stream protocol, self-heal semantics, and scheduler-trigger promotion are
-> reserved for v0.7.x — they land with their respective implementations (A2, D2, A3).
+> reserved — not yet implemented; they land with their respective implementations (A2, D2, A3).
+>
+> **0.8 adds:** the agent-work Process fields (§2.9 — `evidence`, `agent_contract`,
+> `prompt`, `isolation`), the execution-trace provenance principle (§11.7), and
+> bare-form `schema validate`. The `/sop/*` HTTP API contract is still unchanged.
 
 **This is the OpenSOP specification.** It defines the process definition format,
 step-type semantics, local execution backend, and HTTP API surface that any
@@ -60,9 +64,11 @@ and both are canonical. The parser accepts either form.
 ```json
 {
   "name": "greet",
+  "version": "1.0",
+  "description": "Print a greeting for the given name",
   "inputs": { "name": "World" },
   "steps": [
-    { "id": "say-hello", "type": "shell", "run": "echo Hello $( jq -r .name <<<"$OSL_CONTEXT" )" }
+    { "id": "say-hello", "type": "shell", "run": "echo Hello $( jq -r .name <<<\"$OSL_CONTEXT\" )" }
   ]
 }
 ```
@@ -73,7 +79,7 @@ The CLI accepts this by default — no server required.
 **Wrapped envelope (standard — for server registration and YAML files):**
 
 ```yaml
-opensop: "0.6"
+opensop: "0.8"
 
 process:
   name: lead-qualification
@@ -127,9 +133,19 @@ requires the wrapped form for registration.
 | `"0.2"` | Server parser, CLI `schema validate` |
 | `"0.6"` | Server parser, CLI `schema validate` |
 | `"0.7"` | Server parser, CLI `schema validate` |
+| `"0.8"` | Server parser, CLI `schema validate` |
+| any other value | Rejected by CLI `schema validate` |
 
-New process files should declare `opensop: "0.7"`. Files declared at earlier
+New process files should declare `opensop: "0.8"`. Files declared at earlier
 versions continue to parse and run unchanged — this spec is additive.
+
+`schema validate` accepts both serializations from §2.1: the wrapped form (a
+`process` key is present; the `opensop` envelope key is REQUIRED and checked
+against the allowlist above) and the flat form (the whole document is the
+process body, with no `process` wrapper; the `opensop` envelope key is
+optional there, and checked against the same allowlist when present) — it is
+a shape check against that allowlist, not deep contract verification, which
+is the separate conformance checker's job.
 
 ---
 
@@ -150,6 +166,10 @@ versions continue to parse and run unchanged — this spec is additive.
 | `on_error` | No | `{notify: {channel, target}, retry_policy}`. |
 | `access` | No | `{start: [], view: [], advance: [], admin: []}`. |
 | `sop` | No | Distribution metadata: origin, install hint, discovery tags. See §2.8. Ignored by the execution engine. `recipe` is accepted as a deprecated alias. |
+| `evidence` | No | Declares what a trace of this process's execution MUST contain for a conformance claim about it to be checkable. See §2.9.1. Ignored by the execution engine. |
+| `agent_contract` | No | Declares the role an agent executing this process fills, and the boundaries it operates within. See §2.9.2. Ignored by the execution engine. |
+| `prompt` | No | A reference to the versioned prompt an agent executing this process was given — never the prompt text itself. See §2.9.3. Ignored by the execution engine. |
+| `isolation` | No | Declares the execution substrate a conforming runtime should provide (e.g. an independent checkout). See §2.9.4. Advisory; ignored by the execution engine. |
 
 ---
 
@@ -404,6 +424,227 @@ applies to the object itself. Older or strict parsers that predate the v0.7.x
 boundary, not a conformance violation — this metadata is advisory and safe to
 drop. This clause establishes no general rule about other unknown keys; it
 governs `sop` and its `recipe` alias only.
+
+---
+
+### 2.9 Agent-work fields (additive, 0.8)
+
+Sections 2–11 describe what a process *does*: steps, triggers, inputs and
+outputs. The four optional Process fields below describe a different axis —
+what an *agent* executing this process is, and what must have been recorded
+about that execution for a claim about it to be checkable at all. All four
+are Process fields (siblings of `name`, `steps`, `sop`), all optional, and
+none of them are read by the execution engine: a conforming engine MUST
+parse and then ignore all four when running a process, the same way §2.8
+requires it to ignore `sop`. Omitting any or all of them changes nothing —
+every process definition written before this section existed remains valid
+and runs unchanged.
+
+---
+
+#### 2.9.1 `evidence`
+
+The rest of this spec describes what a process's execution *does*. `evidence`
+inverts that: it declares what MUST have been recorded for a claim about this
+process's execution to be checkable at all. It is the `effects` mechanism
+(§3.2) pointed at traces instead of at the world — `effects` is a declared
+field a tool refuses to ignore when deciding whether to retry; `evidence` is
+a declared field a conformance checker refuses to ignore when deciding
+whether to certify a run.
+
+```yaml
+evidence:
+  required:
+    - session_started
+    - effective_prompt
+    - task_received
+    - handoff_created
+```
+
+`evidence.required` is an array of requirement names. Each name is drawn from
+one of two closed vocabularies:
+
+| Kind | Names | Satisfied when |
+|---|---|---|
+| Event-type requirement | Any of the event types in the `event` enum of `schemas/execution-event-0.5.json` (`session_started`, `agent_created`, `agent_terminated`, `task_created`, `task_received`, `intent`, `tool_call`, `tool_result`, `uncertainty`, `handoff_created`, `handoff_received`, `error`) | A structurally sound event of that type — its base envelope intact — is present in the trace. |
+| Field-level requirement | `effective_prompt` — the only field-level name in v0.1 | The `session_started` event's `effective_prompt` carries a non-empty `body`, or a `uri` that resolves. A `hash`-only `effective_prompt` does NOT satisfy this requirement: a hash proves integrity, not retrievability. |
+
+This spec does not restate the event schema's field-level structure here; see
+`schemas/execution-event-0.5.json` for the full shape each event type MUST
+have to be considered structurally sound.
+
+Both vocabularies are **closed**. A requirement name that is not an event
+type from the schema's `event` enum and not `effective_prompt` MUST be
+treated as an error by a conformance checker — never as a silently-passed
+requirement. Extending either vocabulary (a new event type, a new
+field-level name) is a coordinated spec change, made alongside the schema it
+draws from, not something an adopter can introduce informally by writing a
+new name into a process file.
+
+**SOPs with no `evidence` block, or an empty one.** A process with no
+`evidence` field is **vacuously conformant** — nothing was required, so
+nothing can be missing. This mirrors how §3.2 treats a step with no
+`effects` field as side-effect-free: absence is a meaningful, valid state,
+not an error, and it is what makes this field purely additive — no process
+written before `evidence` existed retroactively fails a conformance check it
+never declared. A checker MUST state the vacuous case explicitly (e.g. "no
+`evidence` block declared — nothing required, vacuously conformant") rather
+than printing an unqualified pass, so a vacuous pass is never visually
+indistinguishable from a pass that actually checked something.
+`evidence: {required: []}` is the same outcome — vacuously conformant — but
+is a distinct, deliberate input from omitting the block entirely, and a
+checker SHOULD word the two differently for an operator scanning output.
+
+**This is a conformance concern, not an execution concern.** A conforming
+execution engine MUST ignore `evidence` when running a process: it MUST NOT
+affect step dispatch, retries, timeouts, outputs, or any other execution
+behavior. `evidence` is checked only by a separate conformance checker that
+compares a process definition against a trace of one execution of it,
+strictly after the fact — the same boundary that keeps `sop` (§2.8) out of
+execution, applied here to a field that is inherently retrospective rather
+than merely advisory. A reference conformance checker implementing this
+grammar against `schemas/execution-event-0.5.json` exists, with its design
+rationale and worked examples documented separately.
+
+**Worked example.** An SOP that requires a session to have started with a
+retrievable prompt, a task to have been formally received, and a handoff to
+close it out:
+
+```json
+{
+  "name": "extract-action-items",
+  "version": "1.0",
+  "description": "Extract action items from a transcript",
+  "steps": [
+    { "id": "extract", "type": "automated", "run": "steps/extract.sh" }
+  ],
+  "evidence": {
+    "required": ["session_started", "effective_prompt", "task_received", "handoff_created"]
+  }
+}
+```
+
+Checked against a trace missing a `handoff_created` event, a conformance checker
+reports that requirement missing and the process non-conformant, while every
+other declared requirement is reported present — presence is evaluated
+per-requirement, not as an all-or-nothing bundle.
+
+---
+
+#### 2.9.2 `agent_contract`
+
+Declares the role an agent executing this process fills, and the boundaries
+it operates within.
+
+```yaml
+agent_contract:
+  kind: worker          # planner | worker — exactly two, closed
+  owns: task
+  may_spawn: false
+  lateral_communication: forbidden
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `kind` | No | `planner` or `worker`. Exactly two values, closed. A worker writes code (or otherwise produces the artifact); a planner owns and decomposes scope. Matches the `agent.kind` enum in `schemas/execution-event-0.5.json`. |
+| `owns` | No | Free-text label for the unit of scope this agent is responsible for (e.g. `task`, `epic`). |
+| `may_spawn` | No | Boolean. Whether this agent may create subordinate agents. |
+| `lateral_communication` | No | `forbidden` or `permitted`. Whether this agent may communicate directly with sibling agents, rather than only through its parent or children. |
+
+**The vocabulary is deliberately minimal.** This spec mints no roles beyond
+`planner` and `worker` — no reviewer, judge, integrator, or coordinator —
+because those responsibilities already have a home elsewhere in this spec: a
+judgment call is a `judgment` step (§3.9) or an `approval` step (§3.7);
+review and integration are what planners and workers already do for each
+other through ordinary handoffs, not a third kind of agent. A third `kind`
+value would be a coordinated, closed-vocabulary change, not something an
+adopter introduces by writing a new string into a process file — the same
+discipline `evidence`'s closed vocabulary (§2.9.1) follows.
+
+`agent_contract` is declarative. A conforming execution engine MUST ignore
+it: it does not gate step dispatch, and the local engine does not verify
+that the agent actually running a process matches the declared contract. An
+orchestrating harness MAY use it to configure or constrain the agent it
+launches; that enforcement, like `evidence`'s conformance check, happens
+outside the execution engine.
+
+**Enforcement is optional, but half-enforcement is not.** A harness that
+elects to enforce `agent_contract` and cannot back a given declaration MUST
+refuse the run rather than execute it unenforced. A trace of an unenforced
+run is indistinguishable from a trace of an enforced one, so silently
+proceeding produces a record that overstates its own evidence — the failure
+§11.7 exists to prevent. Where a harness does enforce, the constraint the
+agent actually ran under is recorded in `session_started.permission_envelope`
+(required by `schemas/execution-event-0.5.json`), which is where an auditor
+looks to tell *could not have* from *was asked not to*.
+
+This spec deliberately does not say *how* a declaration is to be enforced.
+The mapping from a `kind` to a sandbox, an allow-list, or an isolation
+mechanism is a property of a harness and its backend, not of this format,
+and no such mapping can be stated neutrally while only one enforcing
+implementation exists.
+
+**`lateral_communication` is the exception, and the limit is structural.** A
+conformance checker MUST NOT report `lateral_communication: forbidden` as
+verified from an execution trace. A trace can show that a spawn tree is
+well-formed; it can never show that a side channel was absent. Enforcement
+of this field is by construction — by what the harness makes possible — and
+a trace is silent on it, not affirmative.
+
+---
+
+#### 2.9.3 `prompt`
+
+A reference to the versioned prompt an agent executing this process was
+given — never the prompt text itself.
+
+```yaml
+prompt:
+  id: software-worker
+  version: "2.4"
+```
+
+| Field | Required (if `prompt` present) | Description |
+|---|---|---|
+| `id` | Yes | Identifier of the prompt. |
+| `version` | Yes | Version of that prompt (e.g. semver-style, or any identifier the prompt's own versioning scheme uses). |
+
+**Why a reference, never the text.** A prompt embedded in a process file
+cannot be versioned, diffed, or reviewed independently of the process that
+uses it — and the text that actually reaches a model is a *composition*
+(this prompt plus tool definitions, task context, and harness-injected
+material) that the process file never sees and has no way to represent. That
+composition is what `session_started.effective_prompt` in
+`schemas/execution-event-0.5.json` records, at execution time, in the event
+stream — not here. `prompt` names and versions the reusable input; the event
+stream is the only place the actual, composed output of that input is ever
+recorded.
+
+Ignored by the execution engine, for the same reason `sop` (§2.8) is: it
+identifies something about the process as an artifact without affecting how
+the process runs.
+
+---
+
+#### 2.9.4 `isolation`
+
+Declares the execution substrate a conforming runtime should provide for an
+agent executing this process.
+
+```yaml
+isolation:
+  repository: independent-checkout
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `repository` | No | Repository isolation the runtime should provide (e.g. `independent-checkout` — a dedicated clone or worktree, not a working copy shared with other concurrent work). |
+
+`isolation` is advisory. A conforming runtime SHOULD provide the declared
+substrate, but the local execution engine (§5) does not verify it and a
+process lacking the declared isolation still runs — this field documents an
+expectation of the environment around execution, not a precondition the
+engine checks before running.
 
 ---
 
@@ -1626,7 +1867,7 @@ A process has exactly one of these states at any moment:
 | State | Meaning |
 |---|---|
 | `open` | Declared and available on-demand; no active scheduler is watching it. Starts when called explicitly (`opensop run`, `POST /sop/:name/start`, or a webhook trigger). A process with a trigger configured but no active scheduler is also `open` (see derivation rules below). |
-| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: the Rails dispatcher is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved for v0.7.x) is active and watching the process. |
+| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: the Rails dispatcher is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved — not yet implemented) is active and watching the process. |
 | `running` | One or more instances are currently active (state `running` per §4.3). A process can be both `scheduled` and `running` simultaneously; when displaying, `running` takes precedence as the visible state. |
 
 A process with an `interval` or cron trigger declared in its definition but **no active scheduler** must be reported as `open`, not `scheduled`. Implementations may surface the configured trigger as an informational field (e.g. `"configured_trigger": "interval"` / `null`) alongside the `open` state so that tooling can distinguish "open with no trigger" from "open with a trigger pending a scheduler."
@@ -1640,7 +1881,7 @@ A process with an `interval` or cron trigger declared in its definition but **no
 
 **State derivation rules (server, `GET /sop/processes/status`):**
 
-Reserved for v0.7.x — lands with G1 (the server observability terminal). The
+Reserved — not yet implemented; lands with G1 (the server observability terminal). The
 endpoint shape is specified in §9.4 below; the implementation is not yet shipped.
 
 ### 9.3 Rollup fields
@@ -1671,7 +1912,7 @@ populated by the dispatcher when the process is `scheduled`. See §9.4.
 
 ### 9.4 `GET /sop/processes/status` — process status rollup
 
-**Reserved for v0.7.x — not yet implemented. The shape below is the contract;
+**Reserved — not yet implemented. The shape below is the contract;
 implementation lands with G1.**
 
 Returns one entry per registered process with its current state and rollup
@@ -1709,7 +1950,7 @@ Authentication: `X-SOP-Token` required (same as all `/sop/*` endpoints).
 
 ### 9.5 `opensop ps` — local process status
 
-**Reserved for v0.7.x — not yet implemented (A1).** The description below is
+**Reserved — not yet implemented (A1).** The description below is
 the intended contract; the command does not exist in the current CLI.
 
 `opensop ps` will surface the process status model locally without requiring a
@@ -1808,7 +2049,7 @@ event; analysis tools may sum both segments for total active time across a pause
 **Note:** this is a CLI-local receipt contract. A server implementation
 tracks step timing separately in `sop_llm_calls` and step records; the exact
 server-side API for resumed-completion metrics is part of the observability
-terminal (G1/A2, reserved for v0.7.x).
+terminal (G1/A2, reserved — not yet implemented).
 
 **result_hash and PII:** `result_hash` is a digest, not the data, so it exposes
 no personal data. The `output` object it hashes is written verbatim (not a
@@ -1838,7 +2079,7 @@ as `null` rather than an absurd epoch-0–derived value.
   "started_at": "...", "started_at_ms": 1754352000123, "ended_at": "...", "duration_ms": 4210 }
 ```
 
-**Reserved for v0.7.x (not yet implemented):** an aggregated `metrics` block —
+**Reserved — not yet implemented:** an aggregated `metrics` block —
 `{ total_tokens_in, total_tokens_out, llm_step_count }` summed across the run's
 `llm` steps — lands with `opensop bench` (C1b). Until then, consumers that need
 per-run token totals aggregate them from the per-step `tokens_in`/`tokens_out`
@@ -1849,7 +2090,7 @@ fields (§10.2). Do not rely on a `manifest.metrics` object on current receipts.
 The Rails reference server already captures `model`, `input_tokens`,
 `output_tokens`, and timing in `sop_llm_calls`. Conforming servers must expose
 these fields on the instance event stream once §10 is implemented. The exact
-server API for querying per-run metrics is reserved for v0.7.x — it lands with
+server API for querying per-run metrics is reserved — not yet implemented; it lands with
 the observability terminal (G1/A2).
 
 ### 10.5 Reproducibility comparison
@@ -1944,8 +2185,8 @@ the process operates on personal data.
    `opensop heal --share`), a conforming implementation must provide a
    redaction mechanism. The **field-level annotations that drive redaction**
    (e.g. marking a process input as personal data, or declaring a `format`)
-   are **not yet part of the §2.2 process schema** — they are specified in
-   v0.7.x together with the fault/heal work (D2). Until then, treat entire
+   are **not yet part of the §2.2 process schema** — they are reserved, not yet
+   implemented, and land together with the fault/heal work (D2). Until then, treat entire
    fault records as sensitive.
 3. Until the redaction mechanism ships, the implementation must warn the user
    before writing a fault record that contains input data, and keep such
@@ -1960,7 +2201,7 @@ When a server exposes a streaming endpoint (e.g. SSE for live instance events):
 - The server must not expose instance inputs or step outputs on an
   unauthenticated stream channel.
 
-**Reserved for v0.7.x:** the specific SSE endpoint shape (`GET
+**Reserved — not yet implemented:** the specific SSE endpoint shape (`GET
 /sop/instances/stream`) lands with G1/A2. The authentication requirement stated
 here applies to any conforming implementation that exposes a stream.
 
@@ -1978,6 +2219,39 @@ spec itself:
   rendering inputs into prompts or shell commands.
 - Rate limiting and DDoS protection on the `/sop/*` API.
 
+### 11.7 Execution-trace provenance
+
+A harness execution trace (`schemas/execution-event-*.json`) is evidence, not
+narration. This section states the one rule that keeps it honest.
+
+Provenance describes how a fact was established, never who established it. An event or field MUST NOT be labeled `observed` unless the fact it asserts — including any cross-reference to another event — was mechanically witnessed at the time it occurred; a value or link reconstructed after the fact is `inferred` regardless of the emitter's authority, and MUST carry `inferred_by` and `inference_basis`. When a reconstructed value cannot be stated with its basis, omit it: an absent field is honest evidence of a gap; a wrong label is a forgery of certainty.
+
+An emitter with stronger first-party standing than the process it is reconstructing from — for example a harness that spawned the subprocess whose transcript it is now parsing — does not get a lighter labeling rule. Custody over how a fact was obtained can make a reconstruction more *reliable*; it cannot make the reconstruction stop being a reconstruction. That distinction is recorded in `inference_basis`, never by upgrading the label.
+
+**The three labels:**
+
+| Label | Meaning |
+|---|---|
+| `observed` | Captured mechanically, with zero agent cooperation and no opportunity for the agent to shade it. |
+| `declared` | Asserted by the agent itself, in real time — contemporaneous, but true only insofar as the agent is honest and complete. |
+| `inferred` | Reconstructed after the fact by an adapter or harness from something else; the weakest of the three, and MUST carry `inferred_by` + `inference_basis`. |
+
+**Per-field overrides.** An event's top-level `provenance` is the label its own envelope facts carry. A single field may have been established differently than the rest of the event — most often a cross-reference or derived value bound by adapter-side inference inside an otherwise mechanically-observed event. `field_provenance` is a sparse object, keyed by field name, that overrides the label for just that field:
+
+```json
+"field_provenance": {
+  "patch": { "provenance": "inferred",
+             "inferred_by": "codex-adapter/0.5",
+             "inference_basis": "ordinal-window adjacency" }
+}
+```
+
+A field absent from `field_provenance` inherits the event-level label. Overrides run in both directions: a field on an otherwise-`observed` event may be `inferred` (an adapter-bound cross-reference inside a mechanically-captured event), and, symmetrically, a field may carry a stronger label than the event's own — a single override never raises the *event* above its event-level label, only the one fact it names.
+
+**Conformance.** A conformance checker MUST take, as an event's effective provenance for any fact it relies on, the weakest label touching that fact — the weaker of the event-level `provenance` and any `field_provenance` override that names it — and MUST report accordingly rather than defaulting to the event-level label alone.
+
+Normative shape: `schemas/execution-event-0.5.json`. Background and the reference evidence-requirement mechanism this feeds are documented separately, alongside the reference conformance checker itself.
+
 ---
 
 ## 12. Roadmapped Features
@@ -1990,21 +2264,21 @@ profile. The server parser rejects them unless noted.
 | `subprocess` fan-out (`fan_out:` modifier) | Phase 4 |
 | `post_review:` process hook | Phase 5 |
 | Inter-instance shared state (`shared_state_writes:`, `instance.shared_state.<key>`) | Phase 5 |
-| `trigger.type: schedule` (cron) | Reserved for v0.7.x — lands with A3; parser rejects today |
-| `trigger.type: interval` scheduler consumption | Reserved for v0.7.x — lands with A3; parser stores `interval_seconds` but no scheduler runs yet |
-| `trigger.at: [...]` (multi-time daily) | Reserved for v0.7.x — lands with A3; parser rejects today |
+| `trigger.type: schedule` (cron) | Reserved — not yet implemented; lands with A3; parser rejects today |
+| `trigger.type: interval` scheduler consumption | Reserved — not yet implemented; lands with A3; parser stores `interval_seconds` but no scheduler runs yet |
+| `trigger.at: [...]` (multi-time daily) | Reserved — not yet implemented; lands with A3; parser rejects today |
 | Webhook `response_mode: poll` | Not yet implemented; executor raises StepFailure |
 | Subprocess actual child instance creation | Currently stubbed |
 | Notification actual delivery | Currently stubbed |
 | `judgment` LLM router | Currently stubbed; all judgments escalate to human |
 | `async: true` on steps | Deferred to v0.3 |
 | Template `extends:` | Deferred to v0.3 |
-| `GET /sop/processes/status` server rollup | Reserved for v0.7.x — lands with G1 (§9.4) |
-| Instance stream / SSE (`GET /sop/instances/stream`) | Reserved for v0.7.x — lands with G1/A2 (§11.5) |
-| Fault semantics + `opensop heal` | Reserved for v0.7.x — lands with D2 (§11.4) |
-| Run-level metrics API (server) | Reserved for v0.7.x — lands with G1/A2 (§10.4) |
-| `opensop ps` — local process status command | Reserved for v0.7.x — not yet implemented (A1); spec shape in §9.5 |
-| `opensop serve` — local scheduler daemon | Reserved for v0.7.x — not yet implemented (A3); required before local processes report `scheduled` state |
+| `GET /sop/processes/status` server rollup | Reserved — not yet implemented; lands with G1 (§9.4) |
+| Instance stream / SSE (`GET /sop/instances/stream`) | Reserved — not yet implemented; lands with G1/A2 (§11.5) |
+| Fault semantics + `opensop heal` | Reserved — not yet implemented; lands with D2 (§11.4) |
+| Run-level metrics API (server) | Reserved — not yet implemented; lands with G1/A2 (§10.4) |
+| `opensop ps` — local process status command | Reserved — not yet implemented (A1); spec shape in §9.5 |
+| `opensop serve` — local scheduler daemon | Reserved — not yet implemented (A3); required before local processes report `scheduled` state |
 
 ---
 
@@ -2117,6 +2391,8 @@ process:
 | 0.7.x (additive) | Optional `recipe` object (§2.8), a Process field: `recipe.source` (canonical origin), `recipe.install` (one-line install hint), `recipe.tags` (discovery tags). Distribution metadata only — ignored by the execution engine, additive and non-breaking; ignored by v0.7.x-capable parsers (older strict parsers may not recognize it — a known compatibility boundary). No HTTP API change. No CLI parsing required for MVP (later slice). |
 | 0.7.x (rename) | `recipe` object renamed to `sop` (§2.8): `sop.source`, `sop.install`, `sop.tags`, same semantics as the fields above. `recipe` is retained as a deprecated alias — conforming parsers MUST still accept it, and `sop` wins if both are present. Distribution metadata only, still ignored by the execution engine. Non-breaking. No HTTP API change. |
 | 0.7.x (additive) | Optional `effects` field (§3.2), a Step field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence, not content, is the signal that a step is irreversible and must not be silently auto-retried. Additive and non-breaking; process-level effects are derived (union of step `effects`), not a separate stored field. Enforced by the CLI's `opensop heal --apply`, which refuses to re-run a step declaring `effects` unless `--force-effects` is passed. No HTTP API change. |
+| 0.8 | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.5.json`; checked post-hoc by a separate conformance checker, documented separately, not by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. Enforcement is optional and external to the engine, but a harness that elects to enforce a declaration it cannot back MUST refuse the run rather than execute it unenforced; and `lateral_communication: forbidden` MUST NOT be reported as verified from a trace, since a trace can show a spawn tree well-formed but never show a side channel absent. No enforcement *mechanism* is specified — that mapping belongs to a harness and its backend, not to this format. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.5.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
+| 0.8 | §11.7 execution-trace provenance principle (provenance describes how a fact was established, never who established it) plus execution-event schema 0.5's `field_provenance` sparse per-field override map. Execution-event schemas (`schemas/execution-event-*.json`) version independently of this process-format spec version. Additive and non-breaking: `field_provenance` is optional on every event; existing 0.4-shaped events remain valid. No HTTP API change. |
 
 ## Appendix B — Flat vs. wrapped envelope quick reference
 
@@ -2131,4 +2407,4 @@ FLAT (local shorthand):                     WRAPPED (server / YAML):
 ```
 
 The local engine reads both. The server requires the wrapped form for registration.
-`opensop schema validate` checks the wrapped form only.
+`opensop schema validate` checks either form — see the version-policy discussion in §2.1.

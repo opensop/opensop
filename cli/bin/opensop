@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# opensop — thin CLI client for OpenSOP runtimes
+# opensop — local-first execution engine for OpenSOP processes
 #
-# Talks to any OpenSOP server's /sop/* HTTP API. Stateless except for a
-# small local cache that maps instance IDs back to process names so most
-# commands can take just an id.
+# Runs .sop.json files directly on this machine — no server, no network, no
+# account. This CLI is the primary execution surface; a server is opt-in via
+# --remote / --server <url>.
 #
 # Usage:  opensop <command> [args]
 # Help:   opensop help
@@ -17,6 +17,9 @@ set -euo pipefail
 # --------------------------------------------------------------------------- #
 
 readonly OPENSOP_CLI_VERSION="0.9.0"
+# Single source of truth for supported opensop envelope (SPEC) versions.
+# `schema validate`, `--version`, and `onboard`'s stamped envelope all derive from this.
+readonly SPEC_VERSIONS="0.1 0.2 0.6 0.7 0.8"
 readonly OPENSOP_HOME="${OPENSOP_HOME:-$HOME/.opensop}"
 readonly CONFIG_FILE="$OPENSOP_HOME/config"
 readonly CACHE_FILE="$OPENSOP_HOME/instances.tsv"
@@ -1469,6 +1472,7 @@ cmd_upgrade() {
 
 cmd_version() {
   echo "opensop $OPENSOP_CLI_VERSION"
+  echo "supported opensop spec versions: ${SPEC_VERSIONS// /, }"
 }
 
 # --------------------------------------------------------------------------- #
@@ -2835,62 +2839,118 @@ cmd_schema_validate() {
   # Helper: add an error.
   add_error() { errors+=("$1"); }
 
-  # 1. Top-level opensop field.
-  local opensop_ver; opensop_ver=$(echo "$doc" | jq -r '.opensop // empty')
-  [[ -z "$opensop_ver" ]] && add_error "missing top-level 'opensop' version field"
-
-  # 2. process object.
+  # Shape dispatch (SPEC.md §2.1): a document with a top-level "process" key is
+  # the wrapped envelope (opensop version REQUIRED); one without it IS the
+  # process body directly — the flat/bare local form (opensop version OPTIONAL,
+  # but allowlisted when present, same as wrapped). Both forms run the exact
+  # same body checks below against $body — this is dispatch, not two paths.
   local has_process; has_process=$(echo "$doc" | jq 'has("process")')
-  if [[ "$has_process" != "true" ]]; then
-    add_error "missing top-level 'process' object"
-  else
-    for key in name version description; do
-      local kval; kval=$(echo "$doc" | jq -r --arg k "$key" '.process[$k] // empty')
-      [[ -z "$kval" ]] && add_error "process.$key is required but missing or empty"
-    done
-
-    # inputs array.
-    local inputs_type; inputs_type=$(echo "$doc" | jq -r '.process.inputs | type')
-    if [[ "$inputs_type" != "array" ]]; then
-      add_error "process.inputs must be an array (got: $inputs_type)"
-    else
-      # Each input must have name + type.
-      local bad_inputs
-      bad_inputs=$(echo "$doc" | jq -r '
-        .process.inputs | to_entries[] |
-        select((.value.name == null) or (.value.type == null)) |
-        "  input[\(.key)]: missing name or type"
-      ')
-      [[ -n "$bad_inputs" ]] && while IFS= read -r ln; do add_error "$ln"; done <<< "$bad_inputs"
-    fi
-
-    # steps array.
-    local steps_type; steps_type=$(echo "$doc" | jq -r '.process.steps | type')
-    if [[ "$steps_type" != "array" ]]; then
-      add_error "process.steps must be an array (got: $steps_type)"
-    else
-      local known_types='["form","automated","judgment","approval","webhook","notification","subprocess","loop","llm","wait"]'
-      # Each step: must have id + type; type must be known.
-      # Webhook steps additionally require response_mode (no silent default).
-      local bad_steps
-      bad_steps=$(echo "$doc" | jq -r \
-        --argjson known "$known_types" '
-        .process.steps | to_entries[] |
-        . as $e | $e.value as $s |
-        (
-          (if $s.id == null then "  step[\($e.key)]: missing id" else "" end),
-          (if $s.type == null then "  step[\($e.key)]: missing type" else "" end),
-          (if $s.type != null and ([$known[] | . == $s.type] | any | not) then
-            "  step \($s.id // $e.key): unknown type \"\($s.type)\" (valid: \($known | join(", ")))"
-          else "" end),
-          (if $s.type == "webhook" and (($s.webhook.response_mode // "") == "") then
-            "  step \($s.id // $e.key): webhook step is missing required field: webhook.response_mode (sync|callback|poll)"
-          else "" end)
-        ) | select(length > 0)
-      ')
-      [[ -n "$bad_steps" ]] && while IFS= read -r ln; do add_error "$ln"; done <<< "$bad_steps"
-    fi
+  local form="bare" body="$doc"
+  if [[ "$has_process" == "true" ]]; then
+    form="wrapped"; body=$(echo "$doc" | jq -c '.process')
   fi
+
+  # 1. Top-level opensop envelope version, allowlisted against $SPEC_VERSIONS.
+  local opensop_ver; opensop_ver=$(echo "$doc" | jq -r '.opensop // empty')
+  if [[ -z "$opensop_ver" ]]; then
+    [[ "$form" == "wrapped" ]] && add_error "missing top-level 'opensop' version field"
+  else
+    case " $SPEC_VERSIONS " in
+      *" $opensop_ver "*) ;;
+      *) add_error "unsupported opensop version '$opensop_ver' (supported: ${SPEC_VERSIONS// /, })" ;;
+    esac
+  fi
+
+  # 2. Body checks (process.name/version/description, inputs, steps) — same
+  #    path for wrapped ($body == .process) and bare ($body == whole doc).
+  for key in name version description; do
+    local kval; kval=$(echo "$body" | jq -r --arg k "$key" '.[$k] // empty')
+    [[ -z "$kval" ]] && add_error "process.$key is required but missing or empty"
+  done
+
+  # inputs: array of typed defs (wrapped/server form) OR flat name->default
+  # object (flat local form, SPEC.md §2.1) — both are valid.
+  local inputs_type; inputs_type=$(echo "$body" | jq -r '.inputs | type')
+  if [[ "$inputs_type" != "array" && "$inputs_type" != "object" && "$inputs_type" != "null" ]]; then
+    add_error "process.inputs must be an array or object (got: $inputs_type)"
+  elif [[ "$inputs_type" == "array" ]]; then
+    # Each input must have name + type.
+    local bad_inputs
+    bad_inputs=$(echo "$body" | jq -r '
+      .inputs | to_entries[] |
+      select((.value.name == null) or (.value.type == null)) |
+      "  input[\(.key)]: missing name or type"
+    ')
+    [[ -n "$bad_inputs" ]] && while IFS= read -r ln; do add_error "$ln"; done <<< "$bad_inputs"
+  fi
+
+  # steps array.
+  local steps_type; steps_type=$(echo "$body" | jq -r '.steps | type')
+  if [[ "$steps_type" != "array" ]]; then
+    add_error "process.steps must be an array (got: $steps_type)"
+  else
+    # SPEC §3.1's 10 step types plus the 2 local-only extensions (shell, noop).
+    local known_types='["form","automated","judgment","approval","webhook","notification","subprocess","loop","llm","wait","shell","noop"]'
+    # Each step: must have id + type; type must be known.
+    # Webhook steps additionally require response_mode (no silent default).
+    local bad_steps
+    bad_steps=$(echo "$body" | jq -r \
+      --argjson known "$known_types" '
+      .steps | to_entries[] |
+      . as $e | $e.value as $s |
+      (
+        (if $s.id == null then "  step[\($e.key)]: missing id" else "" end),
+        (if $s.type == null then "  step[\($e.key)]: missing type" else "" end),
+        (if $s.type != null and ([$known[] | . == $s.type] | any | not) then
+          "  step \($s.id // $e.key): unknown type \"\($s.type)\" (valid: \($known | join(", ")))"
+        else "" end),
+        (if $s.type == "webhook" and (($s.webhook.response_mode // "") == "") then
+          "  step \($s.id // $e.key): webhook step is missing required field: webhook.response_mode (sync|callback|poll)"
+        else "" end)
+      ) | select(length > 0)
+    ')
+    [[ -n "$bad_steps" ]] && while IFS= read -r ln; do add_error "$ln"; done <<< "$bad_steps"
+  fi
+
+  # 2.9 shallow shape-check (agent-work Process fields, additive v0.7.x):
+  # presence-gated type + closed-vocab checks ONLY, where SPEC actually closes
+  # the vocabulary — no deep contract/conformance verification (see scope line
+  # in the output below).
+  local sec29_errors
+  sec29_errors=$(echo "$body" | jq -r '
+    def bad(f): if has(f) and ((.[f]|type) != "object") then ["\(f) must be an object"] else [] end;
+    (bad("evidence")) +
+    (if has("evidence") and ((.evidence|type) == "object") then
+      (.evidence.required // []) as $r |
+      (if ($r|type) != "array" then ["evidence.required must be an array"]
+       else [ $r[] as $req | select(([ "session_started","agent_created","agent_terminated",
+              "task_created","task_received","intent","tool_call","tool_result","uncertainty",
+              "handoff_created","handoff_received","error","effective_prompt" ]
+              | index($req)) == null) | "evidence.required: unknown requirement \"\($req)\"" ] end)
+     else [] end) +
+    (bad("agent_contract")) +
+    (if has("agent_contract") and ((.agent_contract|type) == "object") then
+      (.agent_contract.kind // null) as $kind |
+      (.agent_contract.lateral_communication // null) as $lc |
+      (.agent_contract.may_spawn // null) as $spawn |
+      [ (if $kind != null and ([ "planner","worker" ] | index($kind)) == null
+         then "agent_contract.kind must be planner or worker (got: \($kind))" else empty end),
+        (if $lc != null and ([ "forbidden","permitted" ] | index($lc)) == null
+         then "agent_contract.lateral_communication must be forbidden or permitted (got: \($lc))" else empty end),
+        (if $spawn != null and (($spawn|type) != "boolean")
+         then "agent_contract.may_spawn must be a boolean (got: \($spawn|type))" else empty end)
+      ]
+     else [] end) +
+    (bad("prompt")) +
+    (if has("prompt") and ((.prompt|type) == "object") then
+      [ (if (.prompt.id // "") == "" then "prompt.id is required but missing or empty" else empty end),
+        (if (.prompt.version // "") == "" then "prompt.version is required but missing or empty" else empty end)
+      ]
+     else [] end) +
+    (bad("isolation"))
+    | .[]
+  ')
+  [[ -n "$sec29_errors" ]] && while IFS= read -r ln; do add_error "$ln"; done <<< "$sec29_errors"
 
   # 3. Validate from: reference strings — must match steps.X.outputs.Y or process.inputs.Y.
   local bad_refs
@@ -2904,8 +2964,13 @@ cmd_schema_validate() {
   local valid=true
   (( ${#errors[@]} > 0 )) && valid=false
 
+  # Scope MUST be stated, not implied — declares which form was checked and
+  # that this is a structural check only, never silent about what it skipped.
+  local scope_msg="validated as $form form — structural/type + closed-vocab checks only (incl. evidence/agent_contract/prompt/isolation shape); deep contract/conformance verification is out of scope"
+
   if is_tty && [[ "$OUTPUT_MODE" != "json" ]]; then
     printf '%sschema validate:%s %s\n' "$C_BOLD" "$C_RESET" "$file"
+    printf '%sscope:%s %s\n' "$C_DIM" "$C_RESET" "$scope_msg"
     if [[ "$valid" == "true" ]]; then
       ok "valid"
     else
@@ -2924,9 +2989,11 @@ cmd_schema_validate() {
     local valid_bool; valid_bool=$( [[ "$valid" == "true" ]] && echo 'true' || echo 'false')
     jq -nc \
       --arg file "$file" \
+      --arg form "$form" \
+      --arg scope "$scope_msg" \
       --argjson valid "$valid_bool" \
       --argjson errors "$errors_json" \
-      '{file: $file, valid: $valid, errors: $errors}'
+      '{file: $file, form: $form, scope: $scope, valid: $valid, errors: $errors}'
   fi
 
   [[ "$valid" == "false" ]] && exit 1
@@ -6802,8 +6869,9 @@ cmd_bench() {
 
 # _onboard_scaffold_template — emit a starter .sop.json JSON string.
 _onboard_scaffold_template() {
-  jq -n '{
-    "opensop": "0.6",
+  local spec_max; spec_max=$(tr ' ' '\n' <<< "$SPEC_VERSIONS" | sort -V | tail -1)
+  jq -n --arg v "$spec_max" '{
+    "opensop": $v,
     "name": "my-process",
     "version": "1.0",
     "description": "Describe what this process does and what it produces.",
