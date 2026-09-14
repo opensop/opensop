@@ -2871,7 +2871,7 @@ cmd_schema_validate() {
   # inputs: array of typed defs (wrapped/server form) OR flat name->default
   # object (flat local form, SPEC.md §2.1) — both are valid.
   local inputs_type; inputs_type=$(echo "$body" | jq -r '.inputs | type')
-  if [[ "$inputs_type" != "array" && "$inputs_type" != "object" ]]; then
+  if [[ "$inputs_type" != "array" && "$inputs_type" != "object" && "$inputs_type" != "null" ]]; then
     add_error "process.inputs must be an array or object (got: $inputs_type)"
   elif [[ "$inputs_type" == "array" ]]; then
     # Each input must have name + type.
@@ -2923,19 +2923,22 @@ cmd_schema_validate() {
     (if has("evidence") and ((.evidence|type) == "object") then
       (.evidence.required // []) as $r |
       (if ($r|type) != "array" then ["evidence.required must be an array"]
-       else [ $r[] | select(([ "session_started","agent_created","agent_terminated","task_received",
-              "intent","tool_call","tool_result","uncertainty","handoff","error","effective_prompt" ]
-              | index(.)) == null) | "evidence.required: unknown requirement \"\(.)\"" ] end)
+       else [ $r[] as $req | select(([ "session_started","agent_created","agent_terminated",
+              "task_created","task_received","intent","tool_call","tool_result","uncertainty",
+              "handoff_created","handoff_received","error","effective_prompt" ]
+              | index($req)) == null) | "evidence.required: unknown requirement \"\($req)\"" ] end)
      else [] end) +
     (bad("agent_contract")) +
     (if has("agent_contract") and ((.agent_contract|type) == "object") then
-      [ (if (.agent_contract.kind // null) != null and ([ "planner","worker" ] | index(.agent_contract.kind)) == null
-         then "agent_contract.kind must be planner or worker (got: \(.agent_contract.kind))" else empty end),
-        (if (.agent_contract.lateral_communication // null) != null
-            and ([ "forbidden","permitted" ] | index(.agent_contract.lateral_communication)) == null
-         then "agent_contract.lateral_communication must be forbidden or permitted (got: \(.agent_contract.lateral_communication))" else empty end),
-        (if (.agent_contract.may_spawn // null) != null and ((.agent_contract.may_spawn|type) != "boolean")
-         then "agent_contract.may_spawn must be a boolean (got: \(.agent_contract.may_spawn|type))" else empty end)
+      (.agent_contract.kind // null) as $kind |
+      (.agent_contract.lateral_communication // null) as $lc |
+      (.agent_contract.may_spawn // null) as $spawn |
+      [ (if $kind != null and ([ "planner","worker" ] | index($kind)) == null
+         then "agent_contract.kind must be planner or worker (got: \($kind))" else empty end),
+        (if $lc != null and ([ "forbidden","permitted" ] | index($lc)) == null
+         then "agent_contract.lateral_communication must be forbidden or permitted (got: \($lc))" else empty end),
+        (if $spawn != null and (($spawn|type) != "boolean")
+         then "agent_contract.may_spawn must be a boolean (got: \($spawn|type))" else empty end)
       ]
      else [] end) +
     (bad("prompt")) +

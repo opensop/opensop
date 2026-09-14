@@ -1,12 +1,12 @@
-# OpenSOP — Specification v0.7
+# OpenSOP — Specification v0.8
 
-**Date:** 2026-08-05
+**Date:** 2026-09-14
 **Authors:** Chosen9115 + Claude (digital twin)
 **Status:** Current — authoritative cross-repo contract
 **Domain:** opensop.ai
 **License:** Apache 2.0
 
-> This document supersedes SPEC.md v0.6.
+> This document supersedes SPEC.md v0.7.
 > All content from prior versions has been folded in and reconciled against the
 > running code. Where the prior documents said one thing and the code does
 > another, the code governs — discrepancies are noted inline.
@@ -14,7 +14,11 @@
 > **v0.7 adds:** process status model (§9), reliability metrics contract (§10),
 > and a security model (§11). The `/sop/*` HTTP API contract is unchanged.
 > Stream protocol, self-heal semantics, and scheduler-trigger promotion are
-> reserved for v0.7.x — they land with their respective implementations (A2, D2, A3).
+> reserved — not yet implemented; they land with their respective implementations (A2, D2, A3).
+>
+> **0.8 adds:** the agent-work Process fields (§2.9 — `evidence`, `agent_contract`,
+> `prompt`, `isolation`), the execution-trace provenance principle (§11.7), and
+> bare-form `schema validate`. The `/sop/*` HTTP API contract is still unchanged.
 
 **This is the OpenSOP specification.** It defines the process definition format,
 step-type semantics, local execution backend, and HTTP API surface that any
@@ -60,9 +64,11 @@ and both are canonical. The parser accepts either form.
 ```json
 {
   "name": "greet",
+  "version": "1.0",
+  "description": "Print a greeting for the given name",
   "inputs": { "name": "World" },
   "steps": [
-    { "id": "say-hello", "type": "shell", "run": "echo Hello $( jq -r .name <<<"$OSL_CONTEXT" )" }
+    { "id": "say-hello", "type": "shell", "run": "echo Hello $( jq -r .name <<<\"$OSL_CONTEXT\" )" }
   ]
 }
 ```
@@ -452,7 +458,7 @@ evidence:
     - session_started
     - effective_prompt
     - task_received
-    - handoff
+    - handoff_created
 ```
 
 `evidence.required` is an array of requirement names. Each name is drawn from
@@ -460,7 +466,7 @@ one of two closed vocabularies:
 
 | Kind | Names | Satisfied when |
 |---|---|---|
-| Event-type requirement | Any of the event types in the `event` enum of `schemas/execution-event-0.5.json` (`session_started`, `agent_created`, `agent_terminated`, `task_received`, `intent`, `tool_call`, `tool_result`, `uncertainty`, `handoff`, `error`) | A structurally sound event of that type — its base envelope intact — is present in the trace. |
+| Event-type requirement | Any of the event types in the `event` enum of `schemas/execution-event-0.5.json` (`session_started`, `agent_created`, `agent_terminated`, `task_created`, `task_received`, `intent`, `tool_call`, `tool_result`, `uncertainty`, `handoff_created`, `handoff_received`, `error`) | A structurally sound event of that type — its base envelope intact — is present in the trace. |
 | Field-level requirement | `effective_prompt` — the only field-level name in v0.1 | The `session_started` event's `effective_prompt` carries a non-empty `body`, or a `uri` that resolves. A `hash`-only `effective_prompt` does NOT satisfy this requirement: a hash proves integrity, not retrievability. |
 
 This spec does not restate the event schema's field-level structure here; see
@@ -513,12 +519,12 @@ close it out:
     { "id": "extract", "type": "automated", "run": "steps/extract.sh" }
   ],
   "evidence": {
-    "required": ["session_started", "effective_prompt", "task_received", "handoff"]
+    "required": ["session_started", "effective_prompt", "task_received", "handoff_created"]
   }
 }
 ```
 
-Checked against a trace missing a `handoff` event, a conformance checker
+Checked against a trace missing a `handoff_created` event, a conformance checker
 reports that requirement missing and the process non-conformant, while every
 other declared requirement is reported present — presence is evaluated
 per-requirement, not as an all-or-nothing bundle.
@@ -1861,7 +1867,7 @@ A process has exactly one of these states at any moment:
 | State | Meaning |
 |---|---|
 | `open` | Declared and available on-demand; no active scheduler is watching it. Starts when called explicitly (`opensop run`, `POST /sop/:name/start`, or a webhook trigger). A process with a trigger configured but no active scheduler is also `open` (see derivation rules below). |
-| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: the Rails dispatcher is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved for v0.7.x) is active and watching the process. |
+| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: the Rails dispatcher is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved — not yet implemented) is active and watching the process. |
 | `running` | One or more instances are currently active (state `running` per §4.3). A process can be both `scheduled` and `running` simultaneously; when displaying, `running` takes precedence as the visible state. |
 
 A process with an `interval` or cron trigger declared in its definition but **no active scheduler** must be reported as `open`, not `scheduled`. Implementations may surface the configured trigger as an informational field (e.g. `"configured_trigger": "interval"` / `null`) alongside the `open` state so that tooling can distinguish "open with no trigger" from "open with a trigger pending a scheduler."
@@ -1875,7 +1881,7 @@ A process with an `interval` or cron trigger declared in its definition but **no
 
 **State derivation rules (server, `GET /sop/processes/status`):**
 
-Reserved for v0.7.x — lands with G1 (the server observability terminal). The
+Reserved — not yet implemented; lands with G1 (the server observability terminal). The
 endpoint shape is specified in §9.4 below; the implementation is not yet shipped.
 
 ### 9.3 Rollup fields
@@ -1906,7 +1912,7 @@ populated by the dispatcher when the process is `scheduled`. See §9.4.
 
 ### 9.4 `GET /sop/processes/status` — process status rollup
 
-**Reserved for v0.7.x — not yet implemented. The shape below is the contract;
+**Reserved — not yet implemented. The shape below is the contract;
 implementation lands with G1.**
 
 Returns one entry per registered process with its current state and rollup
@@ -1944,7 +1950,7 @@ Authentication: `X-SOP-Token` required (same as all `/sop/*` endpoints).
 
 ### 9.5 `opensop ps` — local process status
 
-**Reserved for v0.7.x — not yet implemented (A1).** The description below is
+**Reserved — not yet implemented (A1).** The description below is
 the intended contract; the command does not exist in the current CLI.
 
 `opensop ps` will surface the process status model locally without requiring a
@@ -2043,7 +2049,7 @@ event; analysis tools may sum both segments for total active time across a pause
 **Note:** this is a CLI-local receipt contract. A server implementation
 tracks step timing separately in `sop_llm_calls` and step records; the exact
 server-side API for resumed-completion metrics is part of the observability
-terminal (G1/A2, reserved for v0.7.x).
+terminal (G1/A2, reserved — not yet implemented).
 
 **result_hash and PII:** `result_hash` is a digest, not the data, so it exposes
 no personal data. The `output` object it hashes is written verbatim (not a
@@ -2073,7 +2079,7 @@ as `null` rather than an absurd epoch-0–derived value.
   "started_at": "...", "started_at_ms": 1754352000123, "ended_at": "...", "duration_ms": 4210 }
 ```
 
-**Reserved for v0.7.x (not yet implemented):** an aggregated `metrics` block —
+**Reserved — not yet implemented:** an aggregated `metrics` block —
 `{ total_tokens_in, total_tokens_out, llm_step_count }` summed across the run's
 `llm` steps — lands with `opensop bench` (C1b). Until then, consumers that need
 per-run token totals aggregate them from the per-step `tokens_in`/`tokens_out`
@@ -2084,7 +2090,7 @@ fields (§10.2). Do not rely on a `manifest.metrics` object on current receipts.
 The Rails reference server already captures `model`, `input_tokens`,
 `output_tokens`, and timing in `sop_llm_calls`. Conforming servers must expose
 these fields on the instance event stream once §10 is implemented. The exact
-server API for querying per-run metrics is reserved for v0.7.x — it lands with
+server API for querying per-run metrics is reserved — not yet implemented; it lands with
 the observability terminal (G1/A2).
 
 ### 10.5 Reproducibility comparison
@@ -2179,8 +2185,8 @@ the process operates on personal data.
    `opensop heal --share`), a conforming implementation must provide a
    redaction mechanism. The **field-level annotations that drive redaction**
    (e.g. marking a process input as personal data, or declaring a `format`)
-   are **not yet part of the §2.2 process schema** — they are specified in
-   v0.7.x together with the fault/heal work (D2). Until then, treat entire
+   are **not yet part of the §2.2 process schema** — they are reserved, not yet
+   implemented, and land together with the fault/heal work (D2). Until then, treat entire
    fault records as sensitive.
 3. Until the redaction mechanism ships, the implementation must warn the user
    before writing a fault record that contains input data, and keep such
@@ -2195,7 +2201,7 @@ When a server exposes a streaming endpoint (e.g. SSE for live instance events):
 - The server must not expose instance inputs or step outputs on an
   unauthenticated stream channel.
 
-**Reserved for v0.7.x:** the specific SSE endpoint shape (`GET
+**Reserved — not yet implemented:** the specific SSE endpoint shape (`GET
 /sop/instances/stream`) lands with G1/A2. The authentication requirement stated
 here applies to any conforming implementation that exposes a stream.
 
@@ -2258,21 +2264,21 @@ profile. The server parser rejects them unless noted.
 | `subprocess` fan-out (`fan_out:` modifier) | Phase 4 |
 | `post_review:` process hook | Phase 5 |
 | Inter-instance shared state (`shared_state_writes:`, `instance.shared_state.<key>`) | Phase 5 |
-| `trigger.type: schedule` (cron) | Reserved for v0.7.x — lands with A3; parser rejects today |
-| `trigger.type: interval` scheduler consumption | Reserved for v0.7.x — lands with A3; parser stores `interval_seconds` but no scheduler runs yet |
-| `trigger.at: [...]` (multi-time daily) | Reserved for v0.7.x — lands with A3; parser rejects today |
+| `trigger.type: schedule` (cron) | Reserved — not yet implemented; lands with A3; parser rejects today |
+| `trigger.type: interval` scheduler consumption | Reserved — not yet implemented; lands with A3; parser stores `interval_seconds` but no scheduler runs yet |
+| `trigger.at: [...]` (multi-time daily) | Reserved — not yet implemented; lands with A3; parser rejects today |
 | Webhook `response_mode: poll` | Not yet implemented; executor raises StepFailure |
 | Subprocess actual child instance creation | Currently stubbed |
 | Notification actual delivery | Currently stubbed |
 | `judgment` LLM router | Currently stubbed; all judgments escalate to human |
 | `async: true` on steps | Deferred to v0.3 |
 | Template `extends:` | Deferred to v0.3 |
-| `GET /sop/processes/status` server rollup | Reserved for v0.7.x — lands with G1 (§9.4) |
-| Instance stream / SSE (`GET /sop/instances/stream`) | Reserved for v0.7.x — lands with G1/A2 (§11.5) |
-| Fault semantics + `opensop heal` | Reserved for v0.7.x — lands with D2 (§11.4) |
-| Run-level metrics API (server) | Reserved for v0.7.x — lands with G1/A2 (§10.4) |
-| `opensop ps` — local process status command | Reserved for v0.7.x — not yet implemented (A1); spec shape in §9.5 |
-| `opensop serve` — local scheduler daemon | Reserved for v0.7.x — not yet implemented (A3); required before local processes report `scheduled` state |
+| `GET /sop/processes/status` server rollup | Reserved — not yet implemented; lands with G1 (§9.4) |
+| Instance stream / SSE (`GET /sop/instances/stream`) | Reserved — not yet implemented; lands with G1/A2 (§11.5) |
+| Fault semantics + `opensop heal` | Reserved — not yet implemented; lands with D2 (§11.4) |
+| Run-level metrics API (server) | Reserved — not yet implemented; lands with G1/A2 (§10.4) |
+| `opensop ps` — local process status command | Reserved — not yet implemented (A1); spec shape in §9.5 |
+| `opensop serve` — local scheduler daemon | Reserved — not yet implemented (A3); required before local processes report `scheduled` state |
 
 ---
 

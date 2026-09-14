@@ -9335,6 +9335,63 @@ echo "$bare_out" | jq -e '.valid == true and .form == "bare"' >/dev/null \
   || { echo "FAIL: SPEC08-e shipped bare-form SOP should pass schema validate as bare form, got: $bare_out"; exit 1; }
 echo "PASS: SPEC08-e — shipped bare-form library SOP (release-checklist) passes schema validate"
 
+# (f) a minimal wrapped file carrying ONLY the SPEC.md §2.2-required fields
+#     (name, version, description, steps) passes schema validate — inputs
+#     (and every other optional field) is optional and must not false-positive.
+cat > "$spec08_dir/min-required-only.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}]}}
+JSON
+min_req_out="$("$cli" schema validate "$spec08_dir/min-required-only.sop.json" --json 2>&1)"
+echo "$min_req_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-f minimal required-only file (no inputs) should pass schema validate, got: $min_req_out"; exit 1; }
+echo "PASS: SPEC08-f — minimal wrapped file with only §2.2-required fields (no inputs) passes schema validate"
+
+# (g) agent_contract.kind / .lateral_communication: index(.) inside a piped
+#     literal array must not crash (jq evaluates the arg against the array,
+#     not the document) — positive case validates clean, and the negative
+#     control proves an out-of-vocabulary value is a validation FAILURE
+#     (exit 1), never a jq crash (exit 5).
+cat > "$spec08_dir/ac-good.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "agent_contract": {"kind": "worker", "lateral_communication": "forbidden"}}}
+JSON
+ac_good_out="$("$cli" schema validate "$spec08_dir/ac-good.sop.json" --json 2>&1)"; ac_good_rc=$?
+[ "$ac_good_rc" -eq 0 ] \
+  || { echo "FAIL: SPEC08-g agent_contract {kind:worker, lateral_communication:forbidden} should validate clean, got rc=$ac_good_rc: $ac_good_out"; exit 1; }
+echo "$ac_good_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-g agent_contract positive case should be valid, got: $ac_good_out"; exit 1; }
+
+cat > "$spec08_dir/ac-bad.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "agent_contract": {"kind": "reviewer"}}}
+JSON
+set +e
+ac_bad_out="$("$cli" schema validate "$spec08_dir/ac-bad.sop.json" --json 2>&1)"; ac_bad_rc=$?
+set -e
+[ "$ac_bad_rc" -eq 1 ] \
+  || { echo "FAIL: SPEC08-g agent_contract.kind=reviewer must fail as a validation error (rc=1), NOT crash (rc=5) — got rc=$ac_bad_rc: $ac_bad_out"; exit 1; }
+echo "$ac_bad_out" | jq -e '.errors[]?.message | test("planner or worker")' >/dev/null 2>&1 \
+  || { echo "FAIL: SPEC08-g agent_contract.kind=reviewer error should name the closed vocabulary (planner/worker), got: $ac_bad_out"; exit 1; }
+echo "PASS: SPEC08-g — agent_contract.kind/lateral_communication: valid case clean, out-of-vocabulary kind fails as validation error (not a jq crash)"
+
+# (h) evidence.required vocabulary matches schemas/execution-event-0.5.json's
+#     event enum (12 entries) + effective_prompt (field-level) = 13 names.
+#     handoff_created is valid; the old (wrong) "handoff" name is rejected.
+cat > "$spec08_dir/ev-good.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "evidence": {"required": ["handoff_created"]}}}
+JSON
+ev_good_out="$("$cli" schema validate "$spec08_dir/ev-good.sop.json" --json 2>&1)"
+echo "$ev_good_out" | jq -e '.valid == true' >/dev/null \
+  || { echo "FAIL: SPEC08-h evidence.required:[handoff_created] should be accepted, got: $ev_good_out"; exit 1; }
+
+cat > "$spec08_dir/ev-bad.sop.json" <<'JSON'
+{"opensop": "0.8", "process": {"name": "x", "version": "1", "description": "d", "steps": [{"id": "s1", "type": "shell", "name": "n"}], "evidence": {"required": ["handoff"]}}}
+JSON
+set +e
+ev_bad_out="$("$cli" schema validate "$spec08_dir/ev-bad.sop.json" --json 2>&1)"
+set -e
+echo "$ev_bad_out" | jq -e '.valid == false and (.errors[]?.message | test("unknown requirement") and test("handoff"))' >/dev/null 2>&1 \
+  || { echo "FAIL: SPEC08-h evidence.required:[handoff] (not in schema 0.5 enum) should be rejected as unknown, got: $ev_bad_out"; exit 1; }
+echo "PASS: SPEC08-h — evidence.required vocabulary matches schema 0.5's event enum + effective_prompt; stale 'handoff' name rejected"
+
 rm -rf "$spec08_dir"
 
 # Cleanup.
