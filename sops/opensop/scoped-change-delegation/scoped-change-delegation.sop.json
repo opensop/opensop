@@ -1,0 +1,105 @@
+{
+  "opensop": "0.8",
+  "name": "scoped-change-delegation",
+  "version": "1.0.0",
+  "description": "Delegate a scoped code change to a worker agent in an isolated checkout, gate the handoff on planner approval, and require a checkable evidence trail before the change is accepted.",
+  "inputs": {
+    "planner": "on-call-engineer"
+  },
+  "evidence": {
+    "required": [
+      "session_started",
+      "effective_prompt",
+      "task_received",
+      "tool_call",
+      "tool_result",
+      "handoff_created"
+    ]
+  },
+  "agent_contract": {
+    "kind": "worker",
+    "owns": "task",
+    "may_spawn": false,
+    "lateral_communication": "forbidden"
+  },
+  "prompt": {
+    "id": "code-change-worker",
+    "version": "2.1"
+  },
+  "isolation": {
+    "repository": "independent-checkout"
+  },
+  "steps": [
+    {
+      "id": "collect-scope",
+      "type": "form",
+      "description": "Define the scoped code change to hand off to a worker agent.",
+      "inputs": [
+        {
+          "name": "task_title",
+          "type": "string",
+          "required": true,
+          "description": "One-line summary of the change"
+        },
+        {
+          "name": "repo",
+          "type": "string",
+          "required": true,
+          "description": "Repository the worker will check out (e.g. github.com/example-org/example-repo)"
+        },
+        {
+          "name": "file_scope",
+          "type": "string",
+          "required": true,
+          "description": "Glob(s) the worker is allowed to touch, e.g. src/payments/**"
+        },
+        {
+          "name": "instructions",
+          "type": "string",
+          "required": true,
+          "description": "What the worker should change, and why"
+        },
+        {
+          "name": "risk",
+          "type": "enum",
+          "required": true,
+          "values": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Risk level of this change"
+        }
+      ]
+    },
+    {
+      "id": "gate-delegation",
+      "type": "approval",
+      "description": "Planner must approve handing this scope off to a worker agent before it starts.",
+      "prompt": "Review the scope collected above. Approve to delegate it to a worker agent running under the declared isolation and prompt contract, or reject to keep it with the planner.",
+      "decision_field": "decision"
+    },
+    {
+      "id": "apply-scoped-change",
+      "type": "noop",
+      "description": "Placeholder for the worker's own tool calls while it makes the change in its isolated checkout. Those calls are not modeled as SOP steps — evidence.required is what makes them checkable after the fact, against the worker's actual event trace."
+    },
+    {
+      "id": "format-handoff",
+      "type": "shell",
+      "description": "Emit the delegation record (approved) or a hold record (rejected).",
+      "run": "set -o pipefail; jq -r '\n  if ((.\"gate-delegation\".decision // \"reject\") == \"approve\") then\n    \"## Delegation Record\\n\" +\n    \"**Task:** \" + ((.\"collect-scope\".task_title // \"(untitled)\") | tostring) + \"\\n\" +\n    \"**Repo:** \" + ((.\"collect-scope\".repo // \"?\") | tostring) + \"\\n\" +\n    \"**Scope:** \" + ((.\"collect-scope\".file_scope // \"?\") | tostring) + \"\\n\" +\n    \"**Risk:** \" + ((.\"collect-scope\".risk // \"?\") | tostring) + \"\\n\" +\n    \"**Planner (self-reported):** \" + ((.inputs.planner // \"?\") | tostring) + \"\\n\" +\n    \"**Decision:** approved\\n\\n\" +\n    \"_Delegated to a worker agent under `independent-checkout` isolation and the `code-change-worker` prompt contract. Certify this run against the declared `evidence.required` events, not against this record._\"\n  else\n    \"## Delegation Record\\n\" +\n    \"**Task:** \" + ((.\"collect-scope\".task_title // \"(untitled)\") | tostring) + \"\\n\" +\n    \"**Decision:** rejected — not delegated.\\n\"\n  end\n' <<< \"$OSL_CONTEXT\" | jq -Rs '{delegation_record: .}'"
+    }
+  ],
+  "sop": {
+    "source": "opensop/scoped-change-delegation",
+    "install": "opensop pull opensop/scoped-change-delegation",
+    "tags": [
+      "agents",
+      "delegation",
+      "code-change",
+      "evidence",
+      "isolation"
+    ]
+  }
+}
