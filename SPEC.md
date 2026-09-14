@@ -73,7 +73,7 @@ The CLI accepts this by default — no server required.
 **Wrapped envelope (standard — for server registration and YAML files):**
 
 ```yaml
-opensop: "0.6"
+opensop: "0.8"
 
 process:
   name: lead-qualification
@@ -127,9 +127,19 @@ requires the wrapped form for registration.
 | `"0.2"` | Server parser, CLI `schema validate` |
 | `"0.6"` | Server parser, CLI `schema validate` |
 | `"0.7"` | Server parser, CLI `schema validate` |
+| `"0.8"` | Server parser, CLI `schema validate` |
+| any other value | Rejected by CLI `schema validate` |
 
-New process files should declare `opensop: "0.7"`. Files declared at earlier
+New process files should declare `opensop: "0.8"`. Files declared at earlier
 versions continue to parse and run unchanged — this spec is additive.
+
+`schema validate` accepts both serializations from §2.1: the wrapped form (a
+`process` key is present; the `opensop` envelope key is REQUIRED and checked
+against the allowlist above) and the flat form (the whole document is the
+process body, with no `process` wrapper; the `opensop` envelope key is
+optional there, and checked against the same allowlist when present) — it is
+a shape check against that allowlist, not deep contract verification, which
+is the separate conformance checker's job.
 
 ---
 
@@ -411,7 +421,7 @@ governs `sop` and its `recipe` alias only.
 
 ---
 
-### 2.9 Agent-work fields (additive, v0.7.x)
+### 2.9 Agent-work fields (additive, 0.8)
 
 Sections 2–11 describe what a process *does*: steps, triggers, inputs and
 outputs. The four optional Process fields below describe a different axis —
@@ -487,9 +497,8 @@ compares a process definition against a trace of one execution of it,
 strictly after the fact — the same boundary that keeps `sop` (§2.8) out of
 execution, applied here to a field that is inherently retrospective rather
 than merely advisory. A reference conformance checker implementing this
-grammar against `schemas/execution-event-0.5.json` ships at
-`adapters/conformance.py`; its design rationale and worked examples live in
-`adapters/EVIDENCE-CONTRACT.md`.
+grammar against `schemas/execution-event-0.5.json` exists, with its design
+rationale and worked examples documented separately.
 
 **Worked example.** An SOP that requires a session to have started with a
 retrievable prompt, a task to have been formally received, and a handoff to
@@ -2233,9 +2242,9 @@ An emitter with stronger first-party standing than the process it is reconstruct
 
 A field absent from `field_provenance` inherits the event-level label. Overrides run in both directions: a field on an otherwise-`observed` event may be `inferred` (an adapter-bound cross-reference inside a mechanically-captured event), and, symmetrically, a field may carry a stronger label than the event's own — a single override never raises the *event* above its event-level label, only the one fact it names.
 
-**Conformance.** A conformance checker MUST take, as an event's effective provenance for any fact it relies on, the weakest label touching that fact — the weaker of the event-level `provenance` and any `field_provenance` override that names it — and MUST report accordingly rather than defaulting to the event-level label alone. `adapters/conformance.py` is the reference checker.
+**Conformance.** A conformance checker MUST take, as an event's effective provenance for any fact it relies on, the weakest label touching that fact — the weaker of the event-level `provenance` and any `field_provenance` override that names it — and MUST report accordingly rather than defaulting to the event-level label alone.
 
-Normative shape: `schemas/execution-event-0.5.json`. Background and the reference evidence-requirement mechanism this feeds: `adapters/EVIDENCE-CONTRACT.md`, `adapters/conformance.py`.
+Normative shape: `schemas/execution-event-0.5.json`. Background and the reference evidence-requirement mechanism this feeds are documented separately, alongside the reference conformance checker itself.
 
 ---
 
@@ -2376,8 +2385,8 @@ process:
 | 0.7.x (additive) | Optional `recipe` object (§2.8), a Process field: `recipe.source` (canonical origin), `recipe.install` (one-line install hint), `recipe.tags` (discovery tags). Distribution metadata only — ignored by the execution engine, additive and non-breaking; ignored by v0.7.x-capable parsers (older strict parsers may not recognize it — a known compatibility boundary). No HTTP API change. No CLI parsing required for MVP (later slice). |
 | 0.7.x (rename) | `recipe` object renamed to `sop` (§2.8): `sop.source`, `sop.install`, `sop.tags`, same semantics as the fields above. `recipe` is retained as a deprecated alias — conforming parsers MUST still accept it, and `sop` wins if both are present. Distribution metadata only, still ignored by the execution engine. Non-breaking. No HTTP API change. |
 | 0.7.x (additive) | Optional `effects` field (§3.2), a Step field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence, not content, is the signal that a step is irreversible and must not be silently auto-retried. Additive and non-breaking; process-level effects are derived (union of step `effects`), not a separate stored field. Enforced by the CLI's `opensop heal --apply`, which refuses to re-run a step declaring `effects` unless `--force-effects` is passed. No HTTP API change. |
-| 0.7.x (additive) | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.5.json`; checked post-hoc by a separate conformance checker (reference implementation: `adapters/conformance.py`, design doc: `adapters/EVIDENCE-CONTRACT.md`), never by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. Enforcement is optional and external to the engine, but a harness that elects to enforce a declaration it cannot back MUST refuse the run rather than execute it unenforced; and `lateral_communication: forbidden` MUST NOT be reported as verified from a trace, since a trace can show a spawn tree well-formed but never show a side channel absent. No enforcement *mechanism* is specified — that mapping belongs to a harness and its backend, not to this format. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.5.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
-| 0.7.x (additive) | §11.7 execution-trace provenance principle (provenance describes how a fact was established, never who established it) plus execution-event schema 0.5's `field_provenance` sparse per-field override map. Execution-event schemas (`schemas/execution-event-*.json`) version independently of this process-format spec version. Additive and non-breaking: `field_provenance` is optional on every event; existing 0.4-shaped events remain valid. No HTTP API change. |
+| 0.8 | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.5.json`; checked post-hoc by a separate conformance checker, documented separately, not by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. Enforcement is optional and external to the engine, but a harness that elects to enforce a declaration it cannot back MUST refuse the run rather than execute it unenforced; and `lateral_communication: forbidden` MUST NOT be reported as verified from a trace, since a trace can show a spawn tree well-formed but never show a side channel absent. No enforcement *mechanism* is specified — that mapping belongs to a harness and its backend, not to this format. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.5.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. |
+| 0.8 | §11.7 execution-trace provenance principle (provenance describes how a fact was established, never who established it) plus execution-event schema 0.5's `field_provenance` sparse per-field override map. Execution-event schemas (`schemas/execution-event-*.json`) version independently of this process-format spec version. Additive and non-breaking: `field_provenance` is optional on every event; existing 0.4-shaped events remain valid. No HTTP API change. |
 
 ## Appendix B — Flat vs. wrapped envelope quick reference
 
@@ -2392,4 +2401,4 @@ FLAT (local shorthand):                     WRAPPED (server / YAML):
 ```
 
 The local engine reads both. The server requires the wrapped form for registration.
-`opensop schema validate` checks the wrapped form only.
+`opensop schema validate` checks either form — see the version-policy discussion in §2.1.
