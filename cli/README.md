@@ -34,7 +34,7 @@ bash test/test.sh                      # golden test
 
 > **`--local` flag:** accepted for backwards compatibility but now a no-op (local is already the default). Scripts using `opensop run ./x.sop.json --local` continue to work; they will see a deprecation note on stderr. Drop `--local` from new scripts.
 
-**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.6. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT`; its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
+**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.8. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT`; its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
 
 | Type | Pause? | Resume trigger | Notes |
 |---|---|---|---|

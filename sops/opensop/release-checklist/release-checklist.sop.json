@@ -1,4 +1,5 @@
 {
+  "opensop": "0.8",
   "name": "release-checklist",
   "version": "1.0.0",
   "description": "Approval-gated release checklist. Each item is an approval step that must be explicitly confirmed before the release is marked ready.",
