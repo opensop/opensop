@@ -197,7 +197,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
   API calls. `bench/demo/demo.sh` is the driver; `make demo` re-renders the GIF and
   MP4 from scratch (requires `asciinema`, `agg`, `ffmpeg`). The pre-rendered
   `comparison.gif` (~406 KB) and `comparison.mp4` (~783 KB) are committed for
-  offline viewing. Honesty label: all outputs are recorded from real measured runs —
+  offline viewing (demo media later pruned; regenerate via make demo in cli/bench/demo/). Honesty label: all outputs are recorded from real measured runs —
   not simulated. Full methodology: `bench/NUMBERS.md`. Added a "Demo" section to
   `cli/README.md` linking `bench/demo/`.
 - **E1: `opensop onboard` — first-run experience.** Turns a process a user already runs into an
