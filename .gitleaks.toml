@@ -25,7 +25,6 @@ paths = [
   # similar — illustrative, not real. Real production tokens are 64-char
   # hex from `SecureRandom.hex(32)` and are never written to docs.
   '''^docs/API\.md$''',
-  '''^docs/opensop\.postman\.json$''',
   '''^app/views/ui/api_docs/''',
 ]
 

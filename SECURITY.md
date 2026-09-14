@@ -45,7 +45,6 @@ Out of scope — this repo ships no server, so these belong to whoever implement
 - Default server deployment configuration (`Dockerfile`, `bin/deploy`, `config/`).
 - Issues that require the attacker to already have valid `X-SOP-Token` AND admin credentials.
 - Vulnerabilities in third-party gems — please report those upstream. We'll bump the dep once a fix is published.
-- Process definitions in `processes/examples/` having unsafe patterns when run in a real deployment — those are illustrative, not hardened. We'll harden them on request, but it's not a CVE.
 - Issues only reachable in a custom downstream fork's private processes.
 
 ## Disclosure
