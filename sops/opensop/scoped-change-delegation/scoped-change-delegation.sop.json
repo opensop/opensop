@@ -13,7 +13,7 @@
       "task_received",
       "tool_call",
       "tool_result",
-      "handoff"
+      "handoff_created"
     ]
   },
   "agent_contract": {
