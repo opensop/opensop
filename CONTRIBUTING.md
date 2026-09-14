@@ -8,9 +8,10 @@ OpenSOP is a public standard: the spec ([`SPEC.md`](./SPEC.md)), the manifesto (
 
 | Concern | Lives in | How to contribute |
 |---|---|---|
-| **Spec** | `SPEC.md` | Propose changes via issue + PR; coordinate with the rails server repo |
+| **Spec** | `SPEC.md` | Propose changes via issue + PR; coordinate with server implementers |
 | **CLI** | `cli/bin/opensop`, `cli/test/test.sh` | Fix bugs, add subcommands, improve local execution |
 | **Agent guide** | `docs/AGENTS.md` | Keep accurate with CLI and spec changes |
+| **Example SOPs** | `sops/` | Add or improve an example process; keep it passing `opensop dry-run` |
 
 ---
 

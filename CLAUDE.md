@@ -8,7 +8,7 @@ This repo is the **OpenSOP standard**: the specification ([`SPEC.md`](./SPEC.md)
 
 | Path | What it is |
 |---|---|
-| `SPEC.md` | The OpenSOP 0.6 specification — the contract any server must implement |
+| `SPEC.md` | The OpenSOP 0.8 specification — the process format and local-first CLI contract; also defines an optional server profile (§4) any conforming server must implement |
 | `MANIFESTO.md` | The thesis: why processes are infrastructure |
 | `cli/` | The local-first CLI (`bin/opensop`, single bash file) |
 | `cli/CLAUDE.md` | CLI-specific conventions — start here for CLI work |
