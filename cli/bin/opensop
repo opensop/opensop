@@ -735,7 +735,7 @@ upgrade|upgrade the installed opensop CLI to the latest (or a pinned) release|up
 help|show help for a command or the full command reference|help [<command>] [--json]|config|local
 bench|3-arm reliability comparison: skill vs json_only vs opensop over N runs|bench [<task-dir>] [--n N] [--model MODEL] [--arm ARMNAME] [--stub]|bench|local
 onboard|first-run experience: scaffold, validate, bench, and show next steps|onboard [<process.sop.json>] [--stub] [--n N]|onboarding|local
-skill|install the embedded OpenSOP SKILL.md into an agent runtime or directory|skill <install/paths/show> [--runtime FLAVOUR] [--scope user/project] [--force] [--json]|agent-skills|local
+skill|install an embedded SKILL.md (opensop or opensop-build-harness) into an agent runtime or directory|skill <install/paths/show> [--runtime FLAVOUR] [--scope user/project] [--skill NAME] [--force] [--json]|agent-skills|local
 doctor|self-check: version, jq, bash, and skill installation status|doctor [--json]|agent-skills|local
 pull|download an SOP from the opensop SOP library and write it locally|pull <author>/<slug>[@<ref>] [--output <path>] [--force] [--verify <sha256>]|sops|local
 import|read an SOP from a file or stdin, validate, and write locally|import [<file> or -] [--output <path>] [--force]|sops|local
@@ -1165,10 +1165,13 @@ EX
   opensop skill install ./my-dir --force      # overwrite an existing SKILL.md
   opensop skill install --runtime claude      # install to .claude/skills/opensop/ (project scope)
   opensop skill install --runtime claude --scope user  # install to ~/.claude/skills/opensop/
-  opensop skill install --runtime codex       # install to .agents/skills/opensop/ (Agent Skills std)
-  opensop skill paths                         # table: flavour -> canonical install path
+  opensop skill install --runtime codex       # install to .agents/skills/opensop/ (project scope)
+  opensop skill install --runtime codex --scope user  # install to $CODEX_HOME/skills/opensop/ (~/.codex/skills if unset)
+  opensop skill install --runtime claude --skill opensop-build-harness  # install the build-harness skill instead
+  opensop skill paths                         # table: flavour -> canonical root skills path
   opensop skill paths --json                  # machine-readable {flavour: path} object
-  opensop skill show                          # print the embedded SKILL.md to stdout
+  opensop skill show                          # print the embedded opensop SKILL.md to stdout
+  opensop skill show --skill opensop-build-harness  # print the build-harness SKILL.md to stdout
 EX
       ;;
     doctor)
@@ -7293,16 +7296,20 @@ cmd_onboard() {
 # --------------------------------------------------------------------------- #
 # Subcommand: skill
 #
-# Install the embedded OpenSOP SKILL.md into an agent runtime skills directory
-# or any explicit directory.  The canonical SKILL.md content is embedded as a
-# heredoc in _skill_embedded_content() — it never reads from the filesystem, so
+# Install an embedded SKILL.md (opensop, opensop-build-harness) into an agent
+# runtime skills directory or any explicit directory. Each skill's canonical
+# content is embedded as a heredoc (_skill_embedded_content(),
+# _skill_embedded_content_build_harness()) reached through the single
+# dispatcher _skill_content_for() — it never reads from the filesystem, so
 # single-file curl installs work without sibling files.
 #
-# skill install <dir>                 — write to <dir>/opensop/SKILL.md
-# skill install --runtime <flavour>   — resolve canonical path from the embedded
-#                                       registry and install there
-# skill paths [--json]                — print flavour → path table
-# skill show  (or --path)             — print embedded SKILL.md to stdout
+# skill install <dir> [--skill NAME]        — write to <dir>/<NAME>/SKILL.md
+# skill install --runtime <flavour> [--skill NAME]
+#                                            — resolve canonical ROOT path from
+#                                              the embedded registry and
+#                                              install to <root>/<NAME>/SKILL.md
+# skill paths [--json]                      — print flavour → root path table
+# skill show [--skill NAME] (or --path)     — print an embedded SKILL.md to stdout
 # --------------------------------------------------------------------------- #
 
 # _skill_embedded_content — emit the canonical OpenSOP SKILL.md to stdout.
@@ -7471,24 +7478,379 @@ opensop skill paths                             # show all runtime paths
 SKILL_EOF
 }
 
+# _skill_embedded_content_build_harness — emit the embedded opensop-build-harness
+# SKILL.md to stdout. This is the approved opensop-build-harness skill
+# draft, embedded verbatim; the draft itself lives in the project's
+# planning workspace and is not shipped in this repo.
+_skill_embedded_content_build_harness() {
+  cat <<'BUILD_HARNESS_SKILL_EOF'
+---
+name: opensop-build-harness
+description: |
+  Use this skill to BUILD a harness for OpenSOP agent-work processes: a program
+  that reads a wiring file plus role SOPs, spawns one real agent per role,
+  enforces each role's `agent_contract` by capability, emits execution events
+  into a trace.jsonl with honest provenance, checks that trace against
+  `evidence.required`, and survives interruption. Trigger on "execution trace",
+  "trace.jsonl", "agent_contract", "evidence.required", "wiring.json",
+  "execution-event-0.9.1", "conformance checker", "provenance", "one agent per
+  role", or "harness". NOT for running an existing .sop.json locally — that is
+  `opensop run` and the `opensop` skill.
+license: Apache-2.0
+metadata:
+  homepage: https://github.com/opensop/opensop
+  spec: SPEC.md
+  schema: schemas/execution-event-0.9.1.json
+  version: "0.9.1"
+compatibility:
+  - claude
+  - codex
+  - agentskills
+---
+
+# Build an OpenSOP harness
+
+A harness reads a wiring file plus one SOP per role, spawns a real agent for
+each role, constrains that agent to what its `agent_contract` declares, records
+what happened as `schemas/execution-event-0.9.1.json` events in a `trace.jsonl`,
+and checks that trace against each SOP's `evidence.required`. Execution and
+conformance are separate programs; keep them separate in your code too. Two
+agents built this from the spec alone and both spent half their time on
+archaeology — this skill is that archaeology.
+
+## Reading path
+
+Read these, in this order. Do not read the whole spec.
+
+| Read | Settles |
+|---|---|
+| §2.9 intro | All four agent-work fields are engine-ignored. The harness, not the engine, is the only thing that acts on them. |
+| §2.9.1 | `evidence.required`, both closed vocabularies, and the **checker-obligations table** — eight numbered MUSTs, each pinned to a fixture. This table is your checker's spec. |
+| `schemas/execution-event-0.9.1.json` | The twelve event types and the required fields of each. The `provenance` property's own description is the best short statement of the three labels anywhere. |
+| `schemas/fixtures/01`–`08` | The checker obligations as runnable inputs. Fixture 03 has no trace — by design. |
+| §2.9.2 | `agent_contract`, the "half-enforcement is not optional" rule, the three closed `permission_envelope` keys, and why `lateral_communication` is unverifiable. |
+| §11.7 | Provenance. The one rule that keeps the trace evidence and not narration. |
+| §11.8 | Lineage. The conditional `agent_created` MUST, and the root exemption. |
+| §11.9 | Interruption and resumption. Four questions, four answers, one worked `inferred` example. Read it before you design your checkpointing, not after. |
+| §3.4 + §5.3 (skim) | Why the local engine cannot run this. |
+
+**§11.9 answers every resumption question outright.** The builder who read it
+had zero unspecified answers; the builder working from an older spec invented
+four conventions. If you are inventing a resume protocol, you have not read it.
+
+## Why not `opensop run`
+
+§5.3's local dispatch table has rows for `automated`, `shell`, `noop`, `form`,
+`approval`, and "anything else → `rc=2`, unsupported step type". `llm` is not a
+row, so a planner SOP with an `llm` step is categorically outside the local
+engine. And §3.4 `shell` runs `bash -c` directly — no tool loop, so no
+`tool_call`/`tool_result` ever. Write a separate program, and do not split
+execution between the CLI and your harness: `evidence` and `agent_contract` are
+engine-agnostic post-hoc concerns, so a split engine buys nothing.
+
+## The wiring file
+
+`SPEC.md` does not mention wiring. Zero hits. This is the sharpest gap either
+builder found and the format below is carried here, not derived from the spec:
+
+```json
+{
+  "wiring": "planner-worker",
+  "roles": {
+    "planner": { "sop": "planner.sop.json", "count": 1 },
+    "workers": { "sop": "worker.sop.json",  "count": 1 }
+  },
+  "pipeline": ["planner", "workers"]
+}
+```
+
+- `pipeline` names roles in execution order. Run them in that order, and the
+  output of each role becomes the task of the next: the planner's brief is what
+  its `task_created` and the worker's `task_received` carry, sharing a `task_id`.
+- `roles` keys are wiring-local names. An agent's `kind` comes from its SOP's
+  `agent_contract.kind` (`planner` | `worker`, closed), never from the wiring key.
+- **`count > 1` is unresolved.** Nothing states whether N means fan-out to N
+  agents or one agent taking N assignments, nor whether instances run
+  concurrently. Implement `count: 1` and refuse anything else clearly.
+
+## Enforce by capability, not by prose
+
+§2.9.2: a harness that elects to enforce `agent_contract` and cannot back a
+declaration **MUST refuse the run rather than execute it unenforced** — an
+unenforced trace is indistinguishable from an enforced one, so it overstates its
+own evidence. `may_spawn: false` means the agent is never handed a spawning
+tool, not asked not to spawn. The spec says nothing about *how*; both mappings
+below are runtime-specific and verified on this machine.
+
+### Claude Code (`claude` 2.1.245)
+
+```
+# --tools: exactly the allowed set; omit Task for may_spawn:false; "" disables all
+# --strict-mcp-config with no --mcp-config: zero MCP servers
+# --setting-sources "": no user/project settings, hooks, or plugins
+claude -p --output-format stream-json --session-id <uuid> --model <small-model> \
+  --tools "Read" \
+  --strict-mcp-config \
+  --setting-sources "" \
+  --disable-slash-commands \
+  --permission-mode <mode> --add-dir <workspace>
+```
+
+**Verify, do not assume.** The `{"type":"system","subtype":"init"}` line on
+stdout carries the real `tools` array and `mcp_servers` list — assert it matches
+the contract before the first turn. That line is on the **stream**, not in the
+on-disk transcript, so capture it as the process runs. Then record the enforced
+surface, not the contract's intent: `session_started.tool_definitions` gets the
+init line's actual `tools`. A `Read`-only agent is `filesystem: "read-only"`,
+`network_access: false`; a `Bash` agent with no OS sandbox is `full-access`,
+`network_access: true` — the uncomfortable label is the honest one.
+
+**Caveat.** `--system-prompt` is a full override, and `claude --help` states
+`--exclude-dynamic-system-prompt-sections` (cwd, env info, memory paths, git
+status) is "ignored with `--system-prompt`" — those per-machine sections belong
+to the default prompt and overriding drops them. One builder's planner guessed a
+wrong absolute path because of this. Put an explicit cwd line in your prompt;
+the upside is you then know `effective_prompt.body` verbatim.
+
+### Codex (`codex-cli` 0.153.4 — verified from `--help` and on-disk rollouts)
+
+```
+codex exec --json -C <workspace> -m <small-model> \
+  --sandbox read-only|workspace-write|danger-full-access \
+  --ignore-user-config --ignore-rules --skip-git-repo-check "<prompt>"
+```
+
+| `agent_contract` / envelope | Codex mechanism |
+|---|---|
+| `permission_envelope.filesystem` | `-s/--sandbox`. The three values are literally `read-only`, `workspace-write`, `danger-full-access` — a 1:1 name match with the schema enum. `--add-dir` widens the writable set. |
+| `permission_envelope.approval_policy` | `-c approval_policy=<value>`; `--approve-for-me` and `--dangerously-bypass-approvals-and-sandbox` are the shortcuts. Rollouts carry the resolved value (`"never"` observed). |
+| MCP surface | No `exec` flag. Servers come from `~/.codex/config.toml`; `--ignore-user-config` drops them along with hooks. Verify from the rollout's own record, not from the flag. |
+| Per-tool allow-list (`--tools` analogue), `may_spawn` | **No such flag in 0.153.4.** Verify what your version exposes before claiming either is enforced; if the contract needs a restriction Codex cannot back, §2.9.2 says refuse the run. |
+
+**Never pass `--ephemeral`.** It skips persisting session files, and the rollout
+file is your only mechanically-observed record.
+
+## Provenance, honestly (§11.7)
+
+Each label has to be *earned* by a mechanism.
+
+| Label | What earns it |
+|---|---|
+| `observed` | Harvested mechanically from the runtime's own transcript, zero agent cooperation. |
+| `declared` | The agent asserted it in real time through a declare channel you gave it. |
+| `inferred` | Anything reconstructed after the fact, by anyone including you. MUST carry `inferred_by` + `inference_basis`. |
+
+Custody does not upgrade a label: a harness parsing the transcript of a
+subprocess it spawned is still reconstructing. When a reconstructed value cannot
+be stated with its basis, omit it — an absent field is honest evidence of a gap;
+a wrong label is a forgery of certainty.
+
+Where `observed` comes from — the crash-durable transcript each runtime writes
+for itself:
+
+| Runtime | Harvest from |
+|---|---|
+| Claude Code | `~/.claude/projects/<cwd-slug>/<session_id>.jsonl`. Assistant lines carry `content[].type == "tool_use"` with an `id`; user lines carry `tool_result` with the matching `tool_use_id`; every line has its own `timestamp`. Written *during* the session and survives `kill -9` (verified). |
+| Codex | `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<session_id>.jsonl`. `session_meta.payload.base_instructions.text` is the real system prompt verbatim (Claude Code has no equivalent); `turn_context.payload` carries `cwd`/`workspace_roots`/`approval_policy`/`sandbox_policy`; `custom_tool_call` / `custom_tool_call_output` pair on an explicit `call_id`. One `exec` call can run several commands — that is the schema's `sub_results` case. `reasoning` items are encrypted, so never synthesize `intent` from them. |
+
+Both runtimes pair calls to results by explicit id, so that binding is genuinely
+observed and needs no `field_provenance` override. Reach for `field_provenance`
+only when you actually reconstruct something — a `tool_result` rebuilt from disk
+state after a crash.
+
+### The declare channel
+
+The schema's `provenance` description names a reference `emitter/` with a
+declare mode. It is not shipped. Build the minimum it describes:
+
+- Put `declare.sh <event> '<json>'` in the agent's workspace and instruct it to
+  call it via Bash. Treat a Bash call as a declaration only when the command is
+  composed *entirely* of `declare.sh` invocations; anything else falls through
+  to ordinary `tool_call`/`tool_result` handling.
+- For a role with no Bash tool, use a fenced ```` ```opensop-declare ```` JSON
+  block parsed from the transcript.
+
+Instruct the agent to declare at **turn start** (`task_received`, `intent`) and
+**turn end** (`handoff_created`, plus `task_created` for a planner). Turn-start
+is what makes `intent` genuinely pre-action rather than a post-hoc summary.
+
+When an agent doesn't comply, synthesize the event and label it `inferred` with
+`inferred_by`/`inference_basis` naming your harness. Never `declared` — that
+label belongs to the agent, not to you.
+
+**Never fabricate an outcome for a dangling `tool_use`.** `tool_result` requires
+`call_id` and `outcome`, and `outcome` is closed to `success`/`error`. Commit
+the pair only when both halves are on disk; a call with no result yet stays
+uncommitted. There is no `pending`.
+
+## The twelve events and who emits what
+
+| Source | Events | Label |
+|---|---|---|
+| Harness, mechanically | `session_started`, `agent_created` | `observed` |
+| Transcript harvest | `tool_call`, `tool_result` | `observed` |
+| Declare channel | `task_received`, `intent`, `task_created`, `handoff_created`, `handoff_received`, `uncertainty` | `declared` |
+| Harness, on resume | `agent_terminated`, `error` | `inferred` (§11.9) |
+
+`session_started` requires `effective_prompt`, `permission_envelope`, `model`,
+`harness`. `effective_prompt` needs a non-empty `body` or a resolving `uri` — a
+hash alone does not satisfy it (obligation 1). Emit what you composed and know
+verbatim; if you reassemble a `components` array after the fact, mark it
+`inferred` via `field_provenance` rather than riding the event's `observed`
+label.
+
+`handoff_created` is emitted by whoever produced the deliverable — §2.9.2 says
+plainly that `kind` does not gate it. A root planner whose SOP demands it MUST
+emit it, with no `handoff_received` counterpart possible.
+
+### Lineage is owed the moment a second agent appears (§11.8)
+
+`{agent.ids} − {root} ⊆ {agent_created targets}`, each introduction at a lower
+`seq` than the introduced agent's first event. This triggers on trace *content*,
+not on `evidence.required` — a process declaring no evidence still owes lineage.
+Emit `agent_created` from the spawning agent before the child's first event. The
+root is exempt structurally: nothing spawned it, so nothing in-trace can
+corroborate its task. Report `root: uncorroborated, structural`, never as a
+failure (obligation 8).
+
+## The checker
+
+A separate program, run strictly after the fact, in two phases.
+
+**Phase 1 — static lint, from the definition alone, before any trace is read.**
+
+- Unknown requirement name → author error, never a silent pass (obligation 2).
+- **Unsatisfiable demand** → author error (obligation 3). Mandatory rule in v0.1:
+  `tool_call`/`tool_result` demanded by a process whose every step is `shell`.
+- No `evidence` block, or `required: []` → **qualified** pass, and word those
+  two cases differently (obligation 4). A bare PASS fails the row.
+
+**Phase 2 — against the trace.**
+
+- Per-requirement presence, evaluated individually, not as a bundle.
+- Effective provenance of any relied-on fact is the **weakest** label touching
+  it — event-level or `field_provenance` override (obligation 6).
+- `lateral_communication: forbidden` is reported *structurally unverifiable*.
+  Any wording resembling "verified" fails obligation 5.
+- Lineage and the root task per §11.8 (obligations 7, 8).
+
+Run all eight fixtures and diff against §2.9.1's expected outcomes.
+
+**The trap in obligation 3.** If your harness routes a `shell` step through an
+agent's Bash tool — which is what "one real agent per role" forces — your trace
+will honestly contain `tool_call` and `tool_result`. The lint still fires: it
+reads the SOP's declared `type`, not what your harness happened to do. Report
+the author error anyway. A checker that looks at the real, honest trace and
+reports PASS is wrong by the spec's own text.
+
+## Surviving interruption (§11.9)
+
+1. **`run_id`.** Reuse it iff `seq` continues strictly monotonic with no reused
+   values; a gap is honest evidence of lost buffered lines. Restarting `seq` at
+   0 under the same `run_id` makes the trace malformed. Cannot continue the
+   sequence → start a new `run_id`.
+2. **Record the death on resume** as `agent_terminated` + `error`, both
+   `inferred`, both carrying `inferred_by` + `inference_basis` naming the actual
+   wreckage you read (manifest still `running`, dead pid, trace ending mid-run).
+   Labelling these `observed` is the canonical forgery — nothing observes its
+   own death.
+3. **One writer at a time.** Use `flock`, held for the process lifetime: the
+   kernel releases it on any death including `SIGKILL`, so "can I acquire it" is
+   exactly "is a live writer holding it" — zero stale-lock cleanup logic.
+4. **Resumed vs. two runs.** Same `run_id` + a mid-stream `inferred`
+   `agent_terminated`/`error` pair + unbroken monotonic `seq` = one resumed run.
+   Two `run_id` values are two runs, always.
+
+**Never trust the runtime's own resume for a non-idempotent step.** Verified:
+`claude --resume <sid> -p "continue"` after a kill mid-tool-call simply reissues
+the abandoned command as a fresh tool call. For `wc -l < f >> f` that doubles
+the append. Take a physical state reading (the file's line count) once before
+the cycle starts, never re-take it, and compare it on resume to decide re-run /
+skip / reconstruct. If the mutation landed but the transcript shows a dangling
+call, reconstruct the `tool_result` from disk evidence and mark the
+reconstructed fields `inferred` in `field_provenance`.
+
+**Flush every event at emit time**, so a `kill -9` loses only the in-flight
+cycle, never a committed line. And note that killing the harness pid does not
+kill the agent: the child is not in your process group, and
+`start_new_session=True` makes it *harder* to reach, not easier. Track the child
+pid and reap it on resume, or an orphan keeps writing into a workspace you are
+about to reuse.
+
+## Two traps that cost real hours
+
+**Cost.** One probe call with default settings and the default model cost
+**$1.80 for a two-word answer** — the ambient skill/tool surface billed as
+cached input. A small model with `--setting-sources ""` and a minimal `--tools`
+list brought a cycle to about **$0.01**. Measure your first cycle before running
+the pipeline.
+
+**Silent success.** A first live run produced a schema-valid, evidence-complete,
+fully conformant trace while the task never happened: the planner conflated its
+own `agent_contract` ("does not edit files", about itself) with a constraint it
+invented for the worker, the worker correctly refused, and the pipeline
+"succeeded" without touching the artifact. **A trace can be conformant while the
+work did not occur.** Ground the planner's prompt in what the worker's step
+concretely does, and put an independent artifact check (expected line count,
+file hash) next to the conformance verdict in your output.
+
+## Done when
+
+- [ ] Each role's tool surface was verified from the runtime's own init/session
+      record, not from your own config, and `permission_envelope` says so.
+- [ ] Every label is earned by a mechanism; every `inferred` carries
+      `inferred_by` + `inference_basis`.
+- [ ] Every non-root `agent.id` has an `agent_created` at a lower `seq`; the
+      root reads `uncorroborated, structural`.
+- [ ] The checker reproduces all eight fixture outcomes, 03 included.
+- [ ] A `kill -9` then a resume yields one trace — same `run_id`, monotonic
+      `seq`, an `inferred` `agent_terminated` + `error` pair — and an artifact
+      that is correct exactly once.
+BUILD_HARNESS_SKILL_EOF
+}
+
+# _skill_valid_names — space-separated list of all embedded skill names.
+_skill_valid_names() {
+  printf 'opensop\nopensop-build-harness\n' | tr '\n' ' '
+}
+
+# _skill_content_for NAME — emit the embedded SKILL.md content for the given
+# skill name to stdout, or return 1 if NAME is not a known embedded skill.
+# The single dispatch point for skill content — show and install both route
+# through this instead of branching on the name themselves.
+_skill_content_for() {
+  case "$1" in
+    opensop)                _skill_embedded_content ;;
+    opensop-build-harness)  _skill_embedded_content_build_harness ;;
+    *) return 1 ;;
+  esac
+}
+
 # _skill_flavour_registry — emit lines: flavour|scope|path_template
-# path_template uses HOME as a literal placeholder expanded by _skill_resolve_path.
+# path_template is the ROOT skills directory for that flavour+scope (no skill
+# name leaf — callers append the skill name). Uses HOME as a literal
+# placeholder expanded by _skill_expand_root.
 # Runtimes with only one scope emit a single line with scope "only".
 # Rules-only runtimes (no SKILL.md slot) use scope "rules" — install prints guidance.
+#
+# codex|user: the template below (~/.codex/skills) is the fallback default
+# only — _skill_expand_root overrides it at resolve time to honor a live
+# CODEX_HOME env var. Evidence: codex-cli 0.153.4 resolves skills at
+# $CODEX_HOME/skills, or ~/.codex/skills when CODEX_HOME is unset.
 _skill_flavour_registry() {
   cat <<'FLAVOURS'
-claude|project|.claude/skills/opensop
-claude|user|~/.claude/skills/opensop
-codex|project|.agents/skills/opensop
-codex|user|~/.agents/skills/opensop
-agentskills|project|.agents/skills/opensop
-agentskills|user|~/.agents/skills/opensop
-hermes|project|.hermes/skills/opensop
-hermes|user|~/.hermes/skills/opensop
-openclaw|project|skills/opensop
-openclaw|user|~/.claw/skills/opensop
-openhands|project|.openhands/skills/opensop
-goose|user|~/.config/goose/skills/opensop
+claude|project|.claude/skills
+claude|user|~/.claude/skills
+codex|project|.agents/skills
+codex|user|~/.codex/skills
+agentskills|project|.agents/skills
+agentskills|user|~/.agents/skills
+hermes|project|.hermes/skills
+hermes|user|~/.hermes/skills
+openclaw|project|skills
+openclaw|user|~/.claw/skills
+openhands|project|.openhands/skills
+goose|user|~/.config/goose/skills
 cline|rules|(rules-only runtime — no SKILL.md slot)
 cursor|rules|(rules-only runtime — no SKILL.md slot)
 continue|rules|(rules-only runtime — no SKILL.md slot)
@@ -7501,20 +7863,33 @@ _skill_valid_flavours() {
   _skill_flavour_registry | awk -F'|' '{print $1}' | sort -u | tr '\n' ' '
 }
 
-# _skill_resolve_path FLAVOUR SCOPE — echo the resolved absolute path for the
-# given flavour+scope, or return 1 if not found.
-# Expands leading ~/ to $HOME.
+# _skill_expand_root FLAVOUR SCOPE TPL — expand one registry path template to
+# an absolute ROOT skills directory (no skill name leaf). Expands a leading
+# ~/ to $HOME. Special-cases codex|user to honor a live CODEX_HOME env var
+# (see the comment above _skill_flavour_registry) instead of the registry's
+# static fallback template.
+_skill_expand_root() {
+  local flavour="$1" scope="$2" tpl="$3"
+  if [[ "$flavour" == "codex" && "$scope" == "user" ]]; then
+    printf '%s' "${CODEX_HOME:-$HOME/.codex}/skills"
+    return 0
+  fi
+  if [[ "$tpl" == '~/'* ]]; then
+    printf '%s' "$HOME/${tpl#\~/}"
+  else
+    printf '%s' "$tpl"
+  fi
+}
+
+# _skill_resolve_path FLAVOUR SCOPE — echo the resolved absolute ROOT skills
+# directory (no skill name leaf) for the given flavour+scope, or return 1 if
+# not found. Callers append "/<skill-name>/SKILL.md" themselves.
 _skill_resolve_path() {
   local want_flavour="$1" want_scope="$2"
   local flavour scope tpl
   while IFS='|' read -r flavour scope tpl; do
     if [[ "$flavour" == "$want_flavour" && "$scope" == "$want_scope" ]]; then
-      # Expand leading ~/ to $HOME.
-      if [[ "$tpl" == '~/'* ]]; then
-        printf '%s' "$HOME/${tpl#\~/}"
-      else
-        printf '%s' "$tpl"
-      fi
+      _skill_expand_root "$flavour" "$scope" "$tpl"
       return 0
     fi
   done < <(_skill_flavour_registry)
@@ -7545,7 +7920,22 @@ cmd_skill() {
 
   # ---------- skill show (--path) ----------
   if [[ "$subcmd" == "show" ]] || $want_path; then
-    _skill_embedded_content
+    local valid_names; valid_names=$(_skill_valid_names); valid_names="${valid_names% }"
+    local show_skill="opensop"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --skill)
+          [[ $# -lt 2 ]] && die "--skill requires a name" "usage_error" \
+              "opensop skill show --skill <${valid_names// /|}>"
+          show_skill="$2"; shift 2 ;;
+        --path) shift ;;  # already consumed by top-level dispatch
+        *) die "unknown flag '$1' for skill show" "unknown_flag" \
+               "opensop skill show [--skill <${valid_names// /|}>]" ;;
+      esac
+    done
+    _skill_content_for "$show_skill" || die \
+      "unknown skill '$show_skill' — valid: $valid_names" \
+      "usage_error" "opensop skill show --skill <${valid_names// /|}>"
     return 0
   fi
 
@@ -7566,11 +7956,7 @@ cmd_skill() {
       local json_out="{}"
       local flavour scope tpl resolved
       while IFS='|' read -r flavour scope tpl; do
-        if [[ "$tpl" == '~/'* ]]; then
-          resolved="$HOME/${tpl#\~/}"
-        else
-          resolved="$tpl"
-        fi
+        resolved=$(_skill_expand_root "$flavour" "$scope" "$tpl")
         # Merge into the JSON object using jq.
         json_out=$(jq -n \
           --argjson obj "$json_out" \
@@ -7585,11 +7971,7 @@ cmd_skill() {
       local cur_flavour="" flavour scope tpl resolved
       printf '%s%-14s %-10s %s%s\n' "$C_BOLD" "FLAVOUR" "SCOPE" "PATH" "$C_RESET"
       while IFS='|' read -r flavour scope tpl; do
-        if [[ "$tpl" == '~/'* ]]; then
-          resolved="$HOME/${tpl#\~/}"
-        else
-          resolved="$tpl"
-        fi
+        resolved=$(_skill_expand_root "$flavour" "$scope" "$tpl")
         if [[ "$scope" == "rules" ]]; then
           printf '  %-14s %-10s %s\n' "$flavour" "(rules)" "$resolved"
         else
@@ -7601,8 +7983,8 @@ cmd_skill() {
   fi
 
   # ---------- skill install ----------
-  # Parse install args: optional <dir> positional OR --runtime, plus --scope and --force.
-  local install_dir="" install_runtime="" scope_explicit=false
+  # Parse install args: optional <dir> positional OR --runtime, plus --scope, --force, --skill.
+  local install_dir="" install_runtime="" scope_explicit=false skill_name="opensop"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --runtime)
@@ -7617,11 +7999,15 @@ cmd_skill() {
           || die "unknown scope '$scope' — valid: user, project" "usage_error" \
                  "opensop skill install --scope <user|project>"
         ;;
+      --skill)
+        [[ $# -lt 2 ]] && die "--skill requires a name" "usage_error" \
+            "opensop skill install --skill <$(_skill_valid_names)>"
+        skill_name="$2"; shift 2 ;;
       --force) force=true; shift ;;
       --json)  want_json=true; shift ;;
       -*)
         die "unknown flag '$1' for skill install" "unknown_flag" \
-            "opensop skill install [<dir>|--runtime FLAVOUR] [--scope user|project] [--force]"
+            "opensop skill install [<dir>|--runtime FLAVOUR] [--scope user|project] [--force] [--skill NAME]"
         ;;
       *)
         [[ -z "$install_dir" ]] || die "unexpected argument '$1'" "usage_error" \
@@ -7629,6 +8015,15 @@ cmd_skill() {
         install_dir="$1"; shift ;;
     esac
   done
+
+  # Validate the skill name up front — same style as the flavour check below.
+  local valid_names; valid_names=$(_skill_valid_names)
+  local found_skill=false sn
+  for sn in $valid_names; do
+    [[ "$sn" == "$skill_name" ]] && { found_skill=true; break; }
+  done
+  $found_skill || die "unknown skill '$skill_name' — valid: ${valid_names% }" \
+                      "usage_error" "opensop skill install --skill <${valid_names% }>"
 
   local target_dir=""
 
@@ -7682,7 +8077,7 @@ RULES_GUIDANCE
     # request redirected into persistent $HOME/user configuration.
     local resolved_path alt_scope alt_path
     if resolved_path=$(_skill_resolve_path "$install_runtime" "$scope"); then
-      target_dir="$resolved_path"
+      target_dir="$resolved_path/$skill_name"
     else
       [[ "$scope" == "project" ]] && alt_scope="user" || alt_scope="project"
       if alt_path=$(_skill_resolve_path "$install_runtime" "$alt_scope"); then
@@ -7693,14 +8088,14 @@ RULES_GUIDANCE
           die "runtime '$install_runtime' does not support scope '$scope' (only '$alt_scope')" \
               "usage_error" "opensop skill install --runtime $install_runtime --scope $alt_scope"
         fi
-        target_dir="$alt_path"
+        target_dir="$alt_path/$skill_name"
       else
         die "runtime '$install_runtime' has no path for scope '$scope'" \
             "usage_error" "run 'opensop skill paths' to see available scopes"
       fi
     fi
   elif [[ -n "$install_dir" ]]; then
-    target_dir="$install_dir/opensop"
+    target_dir="$install_dir/$skill_name"
   else
     die "skill install requires a directory argument or --runtime <flavour>" \
         "usage_error" \
@@ -7722,7 +8117,7 @@ RULES_GUIDANCE
   local tmp_file
   tmp_file=$(mktemp "$target_dir/.SKILL.md.XXXXXX") \
     || die "could not create a temp file in '$target_dir'" "cli_error" "check permissions and free space"
-  if ! _skill_embedded_content > "$tmp_file"; then
+  if ! _skill_content_for "$skill_name" > "$tmp_file"; then
     rm -f "$tmp_file"
     die "failed writing skill content in '$target_dir'" "cli_error" "check free disk space"
   fi
@@ -7859,33 +8254,28 @@ cmd_doctor() {
     return 1
   fi
 
-  # Skill installation: scan each flavour/scope in the registry.
-  # Build an array of {flavour, scope, path, installed} objects.
+  # Skill installation: scan each flavour/scope in the registry, for each
+  # embedded skill name. Build an array of {flavour, scope, skill, path,
+  # installed} objects. The `skills` key/shape is unchanged (still a flat
+  # array of records with flavour/scope/path/installed) — `skill` is an
+  # added field, so existing --json consumers keep working.
   local -a skill_records=()
-  local seen_paths=""
-  local flavour scope tpl resolved installed_val
+  local flavour scope tpl resolved installed_val skill_name
   while IFS='|' read -r flavour scope tpl; do
     [[ "$scope" == "rules" ]] && continue   # rules-only: skip file check
 
-    if [[ "$tpl" == '~/'* ]]; then
-      resolved="$HOME/${tpl#\~/}"
-    else
-      resolved="$tpl"
-    fi
+    resolved=$(_skill_expand_root "$flavour" "$scope" "$tpl")
 
-    installed_val=false
-    [[ -f "$resolved/SKILL.md" ]] && installed_val=true
+    for skill_name in $(_skill_valid_names); do
+      installed_val=false
+      [[ -f "$resolved/$skill_name/SKILL.md" ]] && installed_val=true
 
-    # Deduplicate paths (agentskills and codex share a path).
-    local record_key="${flavour}|${scope}"
-    if [[ "$seen_paths" != *"|${resolved}|"* ]]; then
-      seen_paths="${seen_paths}|${resolved}|"
-    fi
-    skill_records+=("$(jq -nc \
-      --arg f "$flavour" --arg s "$scope" \
-      --arg p "$resolved/SKILL.md" \
-      --argjson i "$installed_val" \
-      '{flavour:$f, scope:$s, path:$p, installed:$i}')")
+      skill_records+=("$(jq -nc \
+        --arg f "$flavour" --arg s "$scope" --arg k "$skill_name" \
+        --arg p "$resolved/$skill_name/SKILL.md" \
+        --argjson i "$installed_val" \
+        '{flavour:$f, scope:$s, skill:$k, path:$p, installed:$i}')")
+    done
   done < <(_skill_flavour_registry)
 
   # Overall critical check.
@@ -7945,18 +8335,19 @@ cmd_doctor() {
 
   # Skills.
   printf '\n  %sAgent skill installation:%s\n' "$C_BOLD" "$C_RESET"
-  local rec flavour_val scope_val path_val inst_val
+  local rec flavour_val scope_val skill_val path_val inst_val
   for rec in "${skill_records[@]}"; do
     flavour_val=$(jq -r '.flavour' <<< "$rec")
     scope_val=$(jq -r '.scope'   <<< "$rec")
+    skill_val=$(jq -r '.skill'   <<< "$rec")
     path_val=$(jq -r '.path'    <<< "$rec")
     inst_val=$(jq -r '.installed' <<< "$rec")
     if [[ "$inst_val" == "true" ]]; then
-      printf '    %s✓%s  %-12s %-8s %s\n' \
-             "$C_GREEN" "$C_RESET" "$flavour_val" "$scope_val" "$path_val"
+      printf '    %s✓%s  %-12s %-24s %-8s %s\n' \
+             "$C_GREEN" "$C_RESET" "$flavour_val" "$skill_val" "$scope_val" "$path_val"
     else
-      printf '    %s–%s  %-12s %-8s %s\n' \
-             "$C_DIM" "$C_RESET" "$flavour_val" "$scope_val" "$path_val"
+      printf '    %s–%s  %-12s %-24s %-8s %s\n' \
+             "$C_DIM" "$C_RESET" "$flavour_val" "$skill_val" "$scope_val" "$path_val"
     fi
   done
 
