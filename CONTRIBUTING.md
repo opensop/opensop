@@ -10,7 +10,6 @@ OpenSOP is a public standard: the spec ([`SPEC.md`](./SPEC.md)), the manifesto (
 |---|---|---|
 | **Spec** | `SPEC.md` | Propose changes via issue + PR; coordinate with the rails server repo |
 | **CLI** | `cli/bin/opensop`, `cli/test/test.sh` | Fix bugs, add subcommands, improve local execution |
-| **Process examples** | `processes/` | Add generic, runnable `.sop.json` / `.sop.yaml` examples |
 | **Agent guide** | `docs/AGENTS.md` | Keep accurate with CLI and spec changes |
 
 ---
@@ -56,20 +55,6 @@ bash cli/test/test.sh
 - **`set -euo pipefail` throughout.** Guard any command substitution running user-supplied steps: `out=$(...) || rc=$?`.
 - **bash 4+.** macOS ships 3.2 — don't use 4-only features without documenting the requirement.
 - **Output contract.** Normal output goes through `emit_pretty_or_json`. Errors go through `die "msg" "code" "hint"`.
-
----
-
-## Adding a process example
-
-Public example processes live in `processes/examples/`. They must be:
-
-- **Generic** — no company-specific integrations, no internal service names.
-- **Runnable** — includes any required step scripts in `processes/examples/steps/`.
-- **Documented** — a brief comment at the top of the file explaining what the process demonstrates.
-
-`processes/examples/customer-onboarding.sop.yaml` is the canonical reference.
-
-**A note on `run:` paths:** a conforming server resolves script paths relative to `processes/` (not relative to the YAML file). A YAML at `processes/examples/my-process.sop.yaml` must reference its script as `./examples/steps/my-script.rb`.
 
 ---
 
