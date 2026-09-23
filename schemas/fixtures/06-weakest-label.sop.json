@@ -1,0 +1,17 @@
+{
+  "name": "fixture-06",
+  "version": "1.0",
+  "description": "Fault-injection fixture for the checker-obligations table in SPEC.md \u00a72.9.1.",
+  "steps": [
+    {
+      "id": "work",
+      "type": "automated",
+      "run": "steps/work.sh"
+    }
+  ],
+  "evidence": {
+    "required": [
+      "effective_prompt"
+    ]
+  }
+}

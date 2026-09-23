@@ -1,0 +1,22 @@
+{
+  "name": "fixture-03",
+  "version": "1.0",
+  "description": "Fault-injection fixture for the checker-obligations table in SPEC.md \u00a72.9.1.",
+  "steps": [
+    {
+      "id": "build",
+      "type": "shell",
+      "run": "make build"
+    },
+    {
+      "id": "test",
+      "type": "shell",
+      "run": "make test"
+    }
+  ],
+  "evidence": {
+    "required": [
+      "tool_call"
+    ]
+  }
+}
