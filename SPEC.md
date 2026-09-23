@@ -478,7 +478,7 @@ not by omniscience.** A harness that cannot observe the full composition —
 it injected the base prompt but never saw everything else the runtime added
 — still owes this requirement what it *has*: it MUST emit the composition
 it can retrieve and label every gap through `field_provenance` (§11.7,
-`schemas/execution-event-0.5.json`), rather than withholding the field or
+`schemas/execution-event-0.9.1.json`), rather than withholding the field or
 presenting a partial reconstruction as the observed whole. A `components`
 array reassembled after the fact is `inferred`, with `inferred_by` and
 `inference_basis`; a `body` the agent reported rather than the harness
@@ -619,13 +619,13 @@ closeout pair, whoever that producer is: a worker closing out an assigned
 task in the common case, and equally a planner at the root of a pipeline,
 producing the pipeline's final deliverable with no parent above it. An
 agent whose process demands `handoff_created` in `evidence.required` MUST
-emit it itself, whatever its `kind`. The 0.5 schema's description strings
+emit it itself, whatever its `kind`. The 0.9.1 schema's description strings
 say "emitted by the WORKER"; that is shorthand for the common case, not a
 kind restriction — the schema's `handoff_created` clause validates
 `task_id` and `content` and constrains nothing about `agent.kind`, so this
 clarification changes no validation outcome, and the description text is
 corrected at the next schema revision rather than by editing the published
-0.5 file. Pass: a root planner's own `handoff_created` closing out the
+0.9.1 file. Pass: a root planner's own `handoff_created` closing out the
 pipeline it owns — the requirement is satisfied. Fail: a planner-run trace
 with no `handoff_created` because "planners don't emit handoffs" — the
 requirement is missing and the run non-conformant; the reading that
@@ -657,7 +657,7 @@ draw from closed sets:
 | Key | Values | Notes |
 |---|---|---|
 | `filesystem` | `read-only` \| `workspace-write` \| `full-access` | Already enforced by the schema's enum. |
-| `approval_policy` | `untrusted` \| `on-failure` \| `on-request` \| `never` | The names one observed harness already emits. The 0.5 schema types this `string`; the vocabulary is normative prose until the next schema revision closes it there. |
+| `approval_policy` | `untrusted` \| `on-failure` \| `on-request` \| `never` | The names one observed harness already emits. The 0.9.1 schema types this `string`; the vocabulary is normative prose until the next schema revision closes it there. |
 | `network_access` | `true` \| `false` | Boolean by schema. Absence means *unrecorded*, not "no network". |
 
 Two independent harnesses converged on `filesystem` + `approval_policy`
@@ -2388,7 +2388,7 @@ anything.
 
 **The root is exempt — structurally, not leniently.** Corroboration is a
 relation between two events from two different `agent.id` values sharing a
-`task_id` (`schemas/execution-event-0.5.json`). The root agent's own task
+`task_id` (`schemas/execution-event-0.9.1.json`). The root agent's own task
 has no second party inside the trace: nothing spawned the root, so nothing
 in-trace can emit the other half. A checker MUST report the root task as
 uncorroborated *and structural* — `root: uncorroborated, structural` —
@@ -2429,12 +2429,12 @@ is real, the emitter is honest about how it knows, and the basis is stated
 where a reader can weigh it.
 
 ```json
-{"schema": "opensop.events/0.5", "run_id": "r-7", "seq": 42,
+{"schema": "opensop.events/0.9.1", "run_id": "r-7", "seq": 42,
  "ts": "2026-02-03T09:14:02Z", "agent": {"id": "root", "kind": "planner"},
  "event": "agent_terminated", "provenance": "inferred",
  "inferred_by": "example-harness/1.3 (resume)",
  "inference_basis": "manifest.status was 'running' with no live process; trace ends at seq 41"}
-{"schema": "opensop.events/0.5", "run_id": "r-7", "seq": 43,
+{"schema": "opensop.events/0.9.1", "run_id": "r-7", "seq": 43,
  "ts": "2026-02-03T09:14:02Z", "agent": {"id": "root", "kind": "planner"},
  "event": "error", "fatal": false,
  "message": "harness process died between seq 41 and resume; cause not observable post hoc",
@@ -2455,7 +2455,7 @@ structural register as `lateral_communication` (§2.9.2).
 **4. How a reader tells a resumed run from two runs.** A resumed run is:
 the same `run_id`, a mid-stream `agent_terminated` + `error` pair labelled
 `inferred`, and an unbroken — strictly monotonic, possibly gapped — `seq`.
-Two `run_id` values are two runs, always; nothing in v0.5 annotates two
+Two `run_id` values are two runs, always; nothing in v0.9.1 annotates two
 runs into one.
 
 ---
@@ -2597,7 +2597,7 @@ process:
 | 0.7.x (additive) | Optional `recipe` object (§2.8), a Process field: `recipe.source` (canonical origin), `recipe.install` (one-line install hint), `recipe.tags` (discovery tags). Distribution metadata only — ignored by the execution engine, additive and non-breaking; ignored by v0.7.x-capable parsers (older strict parsers may not recognize it — a known compatibility boundary). No HTTP API change. No CLI parsing required for MVP (later slice). |
 | 0.7.x (rename) | `recipe` object renamed to `sop` (§2.8): `sop.source`, `sop.install`, `sop.tags`, same semantics as the fields above. `recipe` is retained as a deprecated alias — conforming parsers MUST still accept it, and `sop` wins if both are present. Distribution metadata only, still ignored by the execution engine. Non-breaking. No HTTP API change. |
 | 0.7.x (additive) | Optional `effects` field (§3.2), a Step field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence, not content, is the signal that a step is irreversible and must not be silently auto-retried. Additive and non-breaking; process-level effects are derived (union of step `effects`), not a separate stored field. Enforced by the CLI's `opensop heal --apply`, which refuses to re-run a step declaring `effects` unless `--force-effects` is passed. No HTTP API change. |
-| 0.9.1 | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.9.1.json`; checked post-hoc by a separate conformance checker, documented separately, not by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. Enforcement is optional and external to the engine, but a harness that elects to enforce a declaration it cannot back MUST refuse the run rather than execute it unenforced; and `lateral_communication: forbidden` MUST NOT be reported as verified from a trace, since a trace can show a spawn tree well-formed but never show a side channel absent. No enforcement *mechanism* is specified — that mapping belongs to a harness and its backend, not to this format. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.9.1.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. Later 0.8 revisions: a checker-obligations table (§2.9.1) pinning every checker-addressed MUST to a numbered fault-injection fixture in `schemas/fixtures/`; the unsatisfiable-demand lint (§2.9.1); the `effective_prompt` partial-composition rule funded by `field_provenance` (§2.9.1); a closed vocabulary for the three load-bearing `permission_envelope` keys (§2.9.2); kind-neutral `handoff_created` attribution (§2.9.2); trace lineage completeness and the structural root exemption (§11.8); harness interruption and trace resumption semantics (§11.9). `schemas/execution-event-0.5.json` unchanged, byte for byte. |
+| 0.9.1 | Four optional agent-work Process fields (§2.9), all additive, non-breaking, and ignored by the execution engine: `evidence` (§2.9.1) — declares event-type and field-level evidence a trace of this process's execution MUST contain for a conformance claim about it to be checkable, from a closed vocabulary keyed to `schemas/execution-event-0.9.1.json`; checked post-hoc by a separate conformance checker, documented separately, not by the engine; absence is vacuous conformance, stated explicitly, mirroring how `effects`' absence is treated. `agent_contract` (§2.9.2) — declares the closed two-kind (`planner`/`worker`) role, scope ownership, spawn permission, and lateral-communication boundary of the agent executing this process; mints no further roles. Enforcement is optional and external to the engine, but a harness that elects to enforce a declaration it cannot back MUST refuse the run rather than execute it unenforced; and `lateral_communication: forbidden` MUST NOT be reported as verified from a trace, since a trace can show a spawn tree well-formed but never show a side channel absent. No enforcement *mechanism* is specified — that mapping belongs to a harness and its backend, not to this format. `prompt` (§2.9.3) — a versioned reference (`id` + `version`) to the prompt given to that agent, never the prompt text itself; the actual composed prompt is recorded, at execution time, in `session_started.effective_prompt` (`schemas/execution-event-0.9.1.json`). `isolation` (§2.9.4) — advisory declaration of the execution substrate (e.g. `repository: independent-checkout`) a conforming runtime should provide; not enforced by the local engine. No HTTP API change. No CLI parsing required for MVP. Later 0.9.1 revisions: a checker-obligations table (§2.9.1) pinning every checker-addressed MUST to a numbered fault-injection fixture in `schemas/fixtures/`; the unsatisfiable-demand lint (§2.9.1); the `effective_prompt` partial-composition rule funded by `field_provenance` (§2.9.1); a closed vocabulary for the three load-bearing `permission_envelope` keys (§2.9.2); kind-neutral `handoff_created` attribution (§2.9.2); trace lineage completeness and the structural root exemption (§11.8); harness interruption and trace resumption semantics (§11.9). These additions introduce no new event types and change no event shape: the event vocabulary and field shapes of `schemas/execution-event-0.9.1.json` are unchanged. Only its version identity moved to 0.9.1. |
 | 0.9.1 | §11.7 execution-trace provenance principle (provenance describes how a fact was established, never who established it) plus execution-event schema 0.9.1's `field_provenance` sparse per-field override map. Execution-event schemas (`schemas/execution-event-*.json`) version independently of this process-format spec version. Additive and non-breaking: `field_provenance` is optional on every event; existing 0.4-shaped events remain valid. No HTTP API change. |
 | — | This spec skips 0.8 and 0.9.0. Neither was ever published as a spec release — `main` carried v0.7 throughout — and the execution-event schema was never published at all. The `v0.8.0` tag already belongs to the archived `opensop-cli` repository, so it was not available to claim. This release therefore unifies the spec, the CLI, and the execution-event schema on one version, 0.9.1. |
 
