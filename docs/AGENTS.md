@@ -60,7 +60,7 @@ cp /tmp/opensop/cli/bin/opensop /usr/local/bin/opensop && chmod +x /usr/local/bi
 Verify:
 
 ```bash
-opensop --version    # opensop 0.8.0
+opensop --version    # opensop 0.9.1
 opensop help         # full command reference
 ```
 
