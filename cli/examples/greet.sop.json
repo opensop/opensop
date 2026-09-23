@@ -1,4 +1,5 @@
 {
+  "opensop": "0.9.1",
   "name": "greet",
   "version": "1.0",
   "description": "Minimal example for opensop-local. One automated step produces JSON, a shell step renders it from the threaded context. Demonstrates context threading + the on-disk audit, with no server.",

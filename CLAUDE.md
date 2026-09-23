@@ -8,7 +8,7 @@ This repo is the **OpenSOP standard**: the specification ([`SPEC.md`](./SPEC.md)
 
 | Path | What it is |
 |---|---|
-| `SPEC.md` | The OpenSOP 0.6 specification — the contract any server must implement |
+| `SPEC.md` | The OpenSOP 0.9.1 specification — the process format and local-first CLI contract; also defines an optional server profile (§4) any conforming server must implement |
 | `MANIFESTO.md` | The thesis: why processes are infrastructure |
 | `cli/` | The local-first CLI (`bin/opensop`, single bash file) |
 | `cli/CLAUDE.md` | CLI-specific conventions — start here for CLI work |
@@ -23,7 +23,7 @@ All CLI work starts in `cli/`. Read `cli/CLAUDE.md` before touching `cli/bin/ope
 
 - `cli/bin/opensop` is a single bash file (~1600 lines). No build step. The file is the binary.
 - Test gate: `bash -n cli/bin/opensop && bash cli/test/test.sh` — run this before committing.
-- Local is the default backend (v0.8+). `--remote`/`--server` routes to a server's `/sop/*` API.
+- Local is the default backend (v0.9.1+). `--remote`/`--server` routes to a server's `/sop/*` API.
 - When you add or change a subcommand, update `cmd_help`, `README.md`'s subcommand table, and `cli/CHANGELOG.md` in the same commit.
 
 ---

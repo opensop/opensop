@@ -62,7 +62,7 @@ OpenSOP is pre-1.0. The following are supported for security fixes:
 | Version | Supported |
 |---|---|
 | `main` | ✅ |
-| Latest `v0.2.x` tag | ✅ |
+| Latest `v0.9.x` tag | ✅ |
 | Older `v0.x` tags | ❌ — please upgrade |
 
 Once 1.0 ships we'll expand this matrix to include the previous minor.

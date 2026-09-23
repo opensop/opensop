@@ -34,7 +34,7 @@ bash test/test.sh                      # golden test
 
 > **`--local` flag:** accepted for backwards compatibility but now a no-op (local is already the default). Scripts using `opensop run ./x.sop.json --local` continue to work; they will see a deprecation note on stderr. Drop `--local` from new scripts.
 
-**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.6. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT`; its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
+**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.9.1. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT`; its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
 
 | Type | Pause? | Resume trigger | Notes |
 |---|---|---|---|
@@ -63,7 +63,7 @@ Execution re-enters at `cursor.next_index` — never re-runs completed steps.
 
 > **⚠ Trust boundary:** local steps execute as shell **on your machine** — a `.sop.json`'s `shell`/`automated` steps run arbitrary commands. Only run process files you trust (same posture as a `Makefile` or an npm `postinstall`). This matters most for agents: don't `opensop run` a process file you just fetched from an untrusted source.
 >
-> **Note on `--local`:** accepted for backwards compatibility but now a deprecated no-op (v0.8+ default is local). In v0.5–v0.7 `--local` opted into local execution; in v0.8 local is the default so `--local` can simply be dropped from scripts — no other migration needed. For a local dev *server*, use `opensop --server http://localhost:3000` or `opensop config set url http://localhost:3000`.
+> **Note on `--local`:** accepted for backwards compatibility but now a deprecated no-op (v0.9.1+ default is local). In v0.5–v0.7 `--local` opted into local execution; in v0.9.1 local is the default so `--local` can simply be dropped from scripts — no other migration needed. For a local dev *server*, use `opensop --server http://localhost:3000` or `opensop config set url http://localhost:3000`.
 
 ## Install
 
@@ -127,7 +127,7 @@ Once installed, keep it current with:
 
 ```bash
 opensop upgrade              # latest release
-opensop upgrade --pin 0.9.0  # specific version
+opensop upgrade --pin 0.9.1  # specific version
 ```
 
 ### Requirements
