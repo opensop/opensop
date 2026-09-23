@@ -8437,7 +8437,7 @@ cmd_info() {
 
 main() {
   # Strip global flags anywhere in the argument list.
-  # v0.9.1: default backend is LOCAL. --remote uses the configured server URL;
+  # v0.8: default backend is LOCAL. --remote uses the configured server URL;
   # --server <url> sets the URL for this invocation and implies --remote.
   # --local is accepted as a deprecated no-op (local is already the default).
   local -a args=()
