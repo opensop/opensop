@@ -8304,6 +8304,50 @@ echo "$skill_cline_out" | grep -qi "rules\|no SKILL" \
   || { echo "FAIL: skill install --runtime cline — output should mention rules-only"; exit 1; }
 echo "PASS: skill install --runtime cline — exits 0, prints guidance (rules-only runtime)"
 
+# --- skill show --skill opensop-build-harness: prints the real embedded content ---
+bh_show="$("$cli" skill show --skill opensop-build-harness 2>&1)"
+echo "$bh_show" | grep -q "^name: opensop-build-harness" \
+  || { echo "FAIL: skill show --skill opensop-build-harness — missing 'name: opensop-build-harness' frontmatter"; exit 1; }
+echo "$bh_show" | grep -q "^## Reading path" \
+  || { echo "FAIL: skill show --skill opensop-build-harness — missing '## Reading path' heading"; exit 1; }
+echo "$bh_show" | grep -q "checker-obligations" \
+  || { echo "FAIL: skill show --skill opensop-build-harness — missing 'checker-obligations' string"; exit 1; }
+echo "PASS: skill show --skill opensop-build-harness — prints real content (frontmatter name, Reading path, checker-obligations)"
+
+# --- skill install <tmpdir> --skill opensop-build-harness: writes <tmpdir>/opensop-build-harness/SKILL.md ---
+bh_install_dir="$(mktemp -d)"
+"$cli" skill install "$bh_install_dir" --skill opensop-build-harness >/dev/null
+[ -f "$bh_install_dir/opensop-build-harness/SKILL.md" ] \
+  || { echo "FAIL: skill install --skill opensop-build-harness — SKILL.md not created at expected path"; exit 1; }
+grep -q "^name: opensop-build-harness" "$bh_install_dir/opensop-build-harness/SKILL.md" \
+  || { echo "FAIL: skill install --skill opensop-build-harness — installed SKILL.md missing 'name: opensop-build-harness'"; exit 1; }
+rm -rf "$bh_install_dir"
+echo "PASS: skill install --skill opensop-build-harness — writes <dir>/opensop-build-harness/SKILL.md"
+
+# --- skill install --runtime codex --scope user: honors a live CODEX_HOME env var
+#     (codex-cli 0.153.4 resolves skills at \$CODEX_HOME/skills). Both CODEX_HOME
+#     and HOME are overridden to a throwaway tmpdir — NEVER touch the real
+#     ~/.codex or ~/.claude. ---
+codex_home_dir="$(mktemp -d)"
+codex_fake_home="$(mktemp -d)"
+CODEX_HOME="$codex_home_dir" HOME="$codex_fake_home" \
+  "$cli" skill install --runtime codex --scope user --skill opensop-build-harness >/dev/null
+[ -f "$codex_home_dir/skills/opensop-build-harness/SKILL.md" ] \
+  || { echo "FAIL: skill install --runtime codex --scope user — did not honor CODEX_HOME, expected $codex_home_dir/skills/opensop-build-harness/SKILL.md"; exit 1; }
+rm -rf "$codex_home_dir" "$codex_fake_home"
+echo "PASS: skill install --runtime codex --scope user — honors CODEX_HOME env var (\$CODEX_HOME/skills)"
+
+# --- skill install/show --skill bogus: unknown skill name exits non-zero ---
+set +e
+"$cli" skill show --skill bogus-skill >/dev/null 2>&1; bogus_show_rc=$?
+"$cli" skill install --runtime claude --skill bogus-skill >/dev/null 2>&1; bogus_install_rc=$?
+set -e
+[ "$bogus_show_rc" -ne 0 ] \
+  || { echo "FAIL: skill show --skill bogus-skill — should exit non-zero"; exit 1; }
+[ "$bogus_install_rc" -ne 0 ] \
+  || { echo "FAIL: skill install --skill bogus-skill — should exit non-zero"; exit 1; }
+echo "PASS: skill show/install --skill bogus-skill — both exit non-zero for unknown skill name"
+
 # --- skill paths --json: valid JSON object ---
 skill_paths_json="$("$cli" skill paths --json)"
 echo "$skill_paths_json" | jq -e 'type == "object"' >/dev/null \
@@ -8332,6 +8376,13 @@ echo "PASS: doctor --json — valid JSON with version, jq, bash, skills, ok fiel
 echo "$doctor_json" | jq -e '.skills | all(.[]; (.flavour|length>0) and (.scope|length>0) and (.path|length>0) and (.installed|type=="boolean"))' >/dev/null \
   || { echo "FAIL: doctor --json — skill records missing required fields"; exit 1; }
 echo "PASS: doctor --json — skill records have flavour, scope, path, installed fields"
+
+# --- doctor --json: reports status for BOTH embedded skills ---
+echo "$doctor_json" | jq -e 'any(.skills[]; .skill == "opensop")' >/dev/null \
+  || { echo "FAIL: doctor --json — .skills should mention 'opensop'"; exit 1; }
+echo "$doctor_json" | jq -e 'any(.skills[]; .skill == "opensop-build-harness")' >/dev/null \
+  || { echo "FAIL: doctor --json — .skills should mention 'opensop-build-harness'"; exit 1; }
+echo "PASS: doctor --json — mentions both embedded skill names (opensop, opensop-build-harness)"
 
 # --- doctor (human-readable): exits 0 ---
 set +e
