@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opensop.ai/schemas/events/0.9.1.json",
+  "title": "OpenSOP Execution Event",
+  "description": "One line of a harness execution trace. A conforming harness (or a conforming adapter, standing in for one) emits newline-delimited JSON of these objects. 0.9.1 is a revision of 0.4, not a replacement: 0.1 through 0.4 are preserved, unedited, in the project's development history, because a standard does not delete published versions. The reference adapters, emitter, conformance checker, and harness this description mentions are local development scaffolding: they are deliberately not shipped in this repository until they meet their graduation criteria, and mentions of them below are design history explaining WHY each rule exists -- not pointers to files you can open here. 0.9.1's one change: an optional sparse override map, `field_provenance`, that lets ONE FIELD on an event carry a provenance label different from the event's own top-level `provenance` -- in either direction, described below.\n\nA real conflict forced this. The reference Codex adapter marks a `tool_result` event 'inferred' AS A WHOLE whenever its `patch` field was correlated to its `tool_call` by ordinal-window adjacency -- Codex's CommandExecution/FileChange records carry no explicit `call_id`, so the adapter reconstructs the association from which call's window was open when the record arrived. Its own docstring names exactly why it downgrades the whole event rather than the one field: 'the schema has no per-field provenance, only per-event, so an event with even one adapter-derived field is marked \\\"inferred\\\" as a whole rather than the more generous \\\"source\\\"' (the Codex adapter's own docstring). The reference harness dispatcher re-stamps that SAME event 'observed', unconditionally, for every mechanical event it keeps -- it forces `provenance` to 'observed' and strips `inferred_by`/`inference_basis` outright, on the argument that the harness has first-party chain of custody: it is the process that invoked `codex exec` itself, recorded the wall-clock instant before doing so, and located the resulting rollout file by that same instant, so 're-stamping every mechanical event \\\"observed\\\" reflects that stronger vantage point' (the dispatcher's module docstring). Both adapters are right about their own fact and wrong to disagree with each other: the correlation ALGORITHM run over the CommandExecution/FileChange records is identical in both cases -- ordinal-window adjacency; nobody, in either case, witnessed the patch/call_id binding at the instant it happened. Chain of custody over the transcript FILE does not change how the `patch` got attached to the `call_id` inside it. The settlement: provenance describes how a fact was established, never who established it or how trustworthy the reporting party is. Custody upgrades the RELIABILITY of an inference -- how much a reader should trust the dispatcher's reconstruction over a stranger's cold read of the same rollout file -- it does not upgrade the METHOD from inferred to observed. Letting custody relabel the method is exactly the failure this project exists to prevent: if identical epistemics get different labels depending on which binary happened to run them, 'observed' stops meaning 'mechanically witnessed' and starts meaning 'trust me, I was there' -- a trace that looks more authoritative than its evidence.\n\n0.9.1 resolves this not by picking a winner but by making both true statements expressible on the SAME event. The top-level `provenance` still names the event's own directly-transcribed facts (a tool_result's `call_id`, `outcome`) -- for a harness-observed tool_result, that stays 'observed'. `field_provenance` then carries a per-field override for the one fact inside that event a single label doesn't actually cover: `field_provenance.patch` = 'inferred', with `inferred_by`/`inference_basis` naming the ordinal-window correlation, exactly as the Codex adapter already reports it standalone. the dispatcher's custody argument is real, and is captured too -- as the justification text inside `inference_basis`, not as a reason to change the label. Neither adapter has to be wrong: they differ only in how MUCH evidence backs the same reconstruction, and 0.9.1 lets that difference live in prose rather than forcing it to relabel the whole event.\n\nOverrides work in both directions, each with a demonstrated need beyond the tool_result/patch case above. Direction one: an OBSERVED event carrying an INFERRED field -- the tool_result/patch case just described; the event's own envelope facts were mechanically witnessed, but one field's binding to it was reconstructed. Direction two, the mirror image: an event whose envelope facts are SOURCE-derived carrying an ADAPTER-INFERRED cross-reference. A `tool_call`'s `call_id`/`tool` are transcribed directly off the source record; its `reason_ref`, when bound by adapter-side proximity inference (see this schema's `tool_call` clause below) rather than an explicit source-provided link, is a reconstruction -- the 0.2 schema backlog (a design record) named this exact gap first, in its finding 1: 'tool_call.reason_ref is bound to \\\"the nearest preceding intent event's id within this adapter's single linear pass\\\"... an adapter-side ordering inference, not a source-provided link,' and observed that a conformance check asking only 'does a tool_call exist' 'passes... a green result built on evidence no harness ever emitted' when that is the only weak spot. Through 0.4, the sole honest response to one weak field was to downgrade the WHOLE tool_call to 'inferred' -- exactly what this schema's tool_call allOf clause still requires absent an override, and exactly the loss finding 1 flagged: a directly-transcribed `call_id` and a narration-derived `reason_ref` collapse to one flattened label. `field_provenance.reason_ref` = 'inferred' (with `call_id`/`tool` left to inherit the event's stronger label) lets the strong fact stay strong and the weak fact stay honestly weak, on the same event.\n\nA flat `inferred_fields: []` array -- just the names of the weak fields, no map -- was considered and rejected. An inferred fact already MUST carry `inferred_by` and `inference_basis` (this schema's unchanged top-level allOf clause, below); a bare list of names has nowhere to hang either one, so it could flag WHICH fields are weak without ever saying WHY -- reintroducing, at field granularity, exactly the 'honest flag, no explanation' gap 0.2 closed at event granularity (see this schema's `provenance` property description and the allOf clause immediately following it).\n\nConformance consumption: an event's EFFECTIVE provenance for a given requirement is the WEAKEST label touching any fact that requirement relies on -- the weakest of the event-level `provenance` and every override present in `field_provenance` that bears on that fact. A stronger override never raises an event above its event-level label; a weaker override only ever pulls one fact down from it. The reference conformance checker's provenance-precedence machinery is the reference implementation of 'weakest wins' for whole-event labels today; a 0.9.1-aware checker extends the same precedence walk to `field_provenance` overrides per fact rather than only to the event-level label -- see the reference conformance checker. Every other 0.4 field, event type, and allOf clause carries over unmodified -- 0.9.1 touches only this top-level description, one appended sentence on the `provenance` property's description, and one new optional top-level property, `field_provenance`.",
+
+  "type": "object",
+  "required": ["schema", "run_id", "seq", "ts", "agent", "event", "provenance"],
+  "additionalProperties": true,
+
+  "properties": {
+    "schema": {
+      "const": "opensop.events/0.9.1",
+      "description": "Format identifier. Present on every line so a trace is self-describing when split."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Stable for the whole execution. Both observed harnesses already carry an equivalent."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic within run_id. Ordering must not depend on ts: observed traces contain sub-millisecond ties."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339. Both harnesses already timestamp every event; per-phase timing is derivable from gaps, so no duration field is required."
+    },
+    "provenance": {
+      "enum": ["observed", "declared", "inferred"],
+      "description": "REQUIRED on every event. Three values, in descending order of how far the claim survives the agent's own cooperation: 'observed' -- a harness or a mechanical adapter watched this happen; it was captured with ZERO agent cooperation and the agent had no opportunity to shade it (session_started, tool_call, tool_result, timing -- the reference emitter's observe mode, and the Claude Code and Codex adapters' directly-transcribed events). 'declared' -- the agent asserted this itself, in real time, via a declare-mode call (the reference emitter's declare command: intent, uncertainty, task_created, task_received, handoff_created, handoff_received) -- genuinely contemporaneous, not reconstructed after the fact, but true only insofar as the agent is honest and complete: nothing outside the agent independently checked it, and an agent that forgets to declare, or shades what it declares, produces a trace that looks identical to one that didn't. 'inferred' -- an adapter derived it after the fact from something else (e.g. Codex's 'intent' events synthesised from assistant narration because native reasoning is encrypted); it is a reconstruction, the weakest of the three. UNCHANGED from 0.3: still exactly three values, unconditionally. 0.4 does NOT add a fourth value for 'corroborated' -- corroboration is a relation between two DIFFERENT events (each carrying its own honest provenance) from two DIFFERENT agent.id values referring to the same task_id, not a property one event can claim about itself; see task_created/task_received/handoff_created/handoff_received below, and the reference checker's corroboration computation. A conformance check that treats 'declared' or 'inferred' evidence as equivalent to 'observed' evidence produces a green result that overstates what anything other than the agent's own word backs -- see the reference checker's provenance-split reporting, and the 0.2 backlog's finding 1 for the 0.1->0.2 half of this same argument. NEW in 0.9.1: this label is the DEFAULT every field on the event inherits. `field_provenance` (below) overrides it per field, in either direction -- e.g. an 'observed' event whose one reconstructed cross-reference is 'inferred', or a 'declared' event whose one mechanically-captured field is 'observed'."
+    },
+    "inferred_by": {
+      "type": "string",
+      "description": "REQUIRED when provenance is 'inferred'. Identifies the deriving party, e.g. 'codex-adapter/0.2'. Who derived it."
+    },
+    "inference_basis": {
+      "type": "string",
+      "description": "REQUIRED when provenance is 'inferred'. A plain-words account of how the value was derived, e.g. 'nearest preceding intent by ordering' or 'narration text mapped from non-final-phase assistant messages; native reasoning is encrypted and unavailable'. How it was derived."
+    },
+    "agent": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "parent_id": {
+          "type": ["string", "null"],
+          "description": "OPTIONAL. null for the root. CORRECTED in 0.2: this is intra-agent message-thread lineage -- 'what turn preceded this one, within this agent's own transcript' -- NOT agent-spawn lineage. Evidence: in a real Claude Code subagent transcript, all 28 non-null parentUuid values point at a uuid that exists earlier in the SAME file; zero point outside it. A subagent transcript, taken alone, does not and cannot record which agent spawned it. Do NOT rely on this field to reconstruct the agent graph or to audit claims like 'workers do not communicate' -- that reconstruction comes from agent_created events, emitted by the PARENT/spawning agent, never from a field on the child's own events. See the 0.2 schema backlog, finding 2."
+        },
+        "kind": {
+          "enum": ["planner", "worker"],
+          "description": "Two kinds only. If it writes code it is a worker; if it owns and decomposes scope it is a planner."
+        }
+      },
+      "additionalProperties": true
+    },
+    "event": {
+      "enum": [
+        "session_started",
+        "agent_created",
+        "agent_terminated",
+        "task_created",
+        "task_received",
+        "intent",
+        "tool_call",
+        "tool_result",
+        "uncertainty",
+        "handoff_created",
+        "handoff_received",
+        "error"
+      ],
+      "description": "NEW in 0.4: 'task_received' is redefined (see its allOf clause below) and 'handoff' is retired in favor of the restored pairs 'task_created'/'task_received' and 'handoff_created'/'handoff_received' -- see the top-level description for why. Every other value is unchanged from 0.3."
+    },
+    "field_provenance": {
+      "type": "object",
+      "description": "NEW in 0.9.1. OPTIONAL sparse override map. Each key names a field on THIS event object (dot-paths permitted for nested fields, e.g. 'effective_prompt.components'; individual array elements are not addressable in 0.9.1 -- an override on e.g. 'sub_results' covers the array as a whole, not one of its entries). Each value states how THAT field's value, and its binding to this event, was established -- not how the event as a whole was established. A field absent from this map inherits the event-level 'provenance' label (see that property's description above); a field present here is governed by its own entry instead. Overrides run in both directions: a field on an 'observed' event MAY be marked 'inferred' (e.g. a tool_result whose call_id/outcome were mechanically witnessed but whose patch was bound to that call_id by adapter-side ordinal-window adjacency rather than an explicit link -- see the top-level description's worked example), and a field on a weaker event MAY be marked 'observed' or 'declared' when that one field's own establishment was in fact stronger than the event's overall label. A key SHOULD name a field actually present on the event; naming an absent field is not an error, but has nothing to override. This map exists instead of a flat 'inferred_fields: []' list of names because an inferred fact already MUST carry inferred_by and inference_basis (see the allOf clause below) -- a bare list of names has nowhere to hang either one.",
+      "additionalProperties": {
+        "type": "object",
+        "description": "One override entry: how a single named field was established. Same three-value vocabulary as the event-level 'provenance' property, applied to this one field instead of to the whole event.",
+        "required": ["provenance"],
+        "properties": {
+          "provenance": {
+            "enum": ["observed", "declared", "inferred"],
+            "description": "This field's own provenance, overriding the event-level label for this field only. Same meanings as the event-level 'provenance' enum above."
+          },
+          "inferred_by": {
+            "type": "string",
+            "description": "REQUIRED when this override's provenance is 'inferred'. Identifies the deriving party for THIS field, e.g. 'codex-adapter/0.5'. Independent of the event-level inferred_by, which (if present) describes the event as a whole."
+          },
+          "inference_basis": {
+            "type": "string",
+            "description": "REQUIRED when this override's provenance is 'inferred'. A plain-words account of how THIS field's value, or its binding to this event, was derived, e.g. 'ordinal-window adjacency to a structurally separate file-change record, with no explicit call_id linking them' or 'nearest preceding intent by ordering'."
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "provenance": { "const": "inferred" } }, "required": ["provenance"] },
+            "then": { "required": ["inferred_by", "inference_basis"] },
+            "description": "Same rule as the event-level allOf clause below, applied per field: an override claiming 'inferred' MUST name who derived it and how -- an honest 'inferred' flag with no explanation of how is not enough to let a reader judge the reconstruction, whether it covers a whole event or one field of it."
+          }
+        ]
+      }
+    }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "provenance": { "const": "inferred" } }, "required": ["provenance"] },
+      "then": { "required": ["inferred_by", "inference_basis"] },
+      "description": "New in 0.2. When provenance is 'inferred', the deriving party and the derivation method MUST both be stated -- an honest 'inferred' flag with no explanation of how is not enough to let a reader judge the reconstruction."
+    },
+    {
+      "if": { "properties": { "event": { "const": "session_started" } }, "required": ["event"] },
+      "then": {
+        "required": ["effective_prompt", "permission_envelope", "model", "harness"],
+        "properties": {
+          "effective_prompt": {
+            "description": "What the agent was actually told, composed. NOT a hash alone: a hash proves integrity, not retrievability, and a trace that carries only a hash cannot answer 'what was it told'. This constraint is load-bearing and unchanged from 0.1. Codex already emits this as base_instructions (21,551 chars observed) including provenance.",
+            "type": "object",
+            "required": ["hash"],
+            "oneOf": [
+              { "required": ["body"] },
+              { "required": ["uri"] }
+            ],
+            "properties": {
+              "hash": { "type": "string", "description": "sha256 of body, for integrity and dedup." },
+              "body": { "type": "string", "description": "The composed prompt verbatim." },
+              "uri": {
+                "type": "string",
+                "description": "Content-addressed reference that MUST resolve for the retention period. The harness is the party obliged to store it."
+              },
+              "components": {
+                "type": "array",
+                "description": "Provenance: which source contributed which part. Optional but strongly preferred -- it is what makes 'which instruction produced this behaviour' answerable rather than guessable. Extended in 0.2: real harnesses compose the effective context from several distinct injected messages, not one body. Evidence: beyond Codex's base_instructions, the first turn injects <skills_instructions>, <multi_agent_role>, <multi_agent_mode>, and <recommended_plugins> as separate developer/user messages that also shape what the agent was told. 'role' and 'body' let each of those be represented as its own component instead of being collapsed into the base prompt. See the 0.2 schema backlog, finding 4.",
+                "items": {
+                  "type": "object",
+                  "required": ["source"],
+                  "properties": {
+                    "source": { "type": "string" },
+                    "version": { "type": "string" },
+                    "hash": { "type": "string" },
+                    "role": {
+                      "type": "string",
+                      "description": "New in 0.2. What kind of message this component was injected as, e.g. 'system', 'developer', 'user', 'tool-listing'. Not a closed enum -- harnesses inject turn-scoped context under roles this schema cannot enumerate in advance."
+                    },
+                    "body": {
+                      "type": "string",
+                      "description": "New in 0.2. This component's content verbatim, when retrievable. A component may carry body, hash, or both; unlike effective_prompt itself, a components entry with only a hash is permitted -- the top-level oneOf: [body, uri] retrievability constraint applies to effective_prompt as a whole, not to every individual component."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "permission_envelope": {
+            "description": "What the agent was ALLOWED to do. Without it an auditor cannot distinguish 'chose not to' from 'could not'. Codex already emits this as sandbox_policy + approval_policy.",
+            "type": "object",
+            "properties": {
+              "network_access": { "type": "boolean" },
+              "filesystem": { "enum": ["read-only", "workspace-write", "full-access"] },
+              "approval_policy": { "type": "string" },
+              "workspace_roots": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": true
+          },
+          "tool_definitions": {
+            "description": "The tools offered, by name and schema -- what the agent COULD have done, not only what it did. Absent from both observed harnesses. SHOULD, not MUST, until at least one harness ships it.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string" },
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "model": { "type": "string" },
+          "harness": {
+            "type": "object",
+            "required": ["name", "version"],
+            "properties": {
+              "name": { "type": "string" },
+              "version": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "agent_created" } }, "required": ["event"] },
+      "then": {
+        "description": "New in 0.2. Emitted by the PARENT/spawning agent, never by the child. This -- not agent.parent_id on a child's own events -- is where agent-graph reconstruction comes from. See the 0.2 schema backlog, finding 2. ALIGNED IN 0.4 with the same principle now applied to task_created/task_received and handoff_created/handoff_received below: a fact that structurally involves two parties (who spawned whom; who assigned what to whom; who closed out what) cannot be established by either party alone. agent_created was always this schema's first instance of that rule -- one party (the spawner) emits the half only it can honestly attest to, and the child's own transcript is never asked to self-certify its own lineage. Fields and required-ness are otherwise unchanged from 0.2/0.3.",
+        "required": ["child_agent_id"],
+        "properties": {
+          "child_agent_id": {
+            "type": "string",
+            "description": "The id of the agent being created. Matches that agent's own 'agent.id' on its subsequent events."
+          },
+          "child_kind": {
+            "enum": ["planner", "worker"],
+            "description": "OPTIONAL. The kind of agent being spawned, if known at spawn time."
+          },
+          "task_id": {
+            "type": "string",
+            "description": "OPTIONAL. The task the child is being spawned to carry out, if one was assigned at spawn time."
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "intent" } }, "required": ["event"] },
+      "then": {
+        "required": ["intent_id", "statement"],
+        "properties": {
+          "intent_id": { "type": "string", "description": "Referenced later by reason_ref." },
+          "statement": {
+            "type": "string",
+            "description": "What the agent believes and expects, in its own words, BEFORE acting. Required because native reasoning is unreadable in both observed harnesses -- Claude Code signs it, Codex encrypts it, neither exposes it. When this event is synthesised from narration rather than emitted natively by the harness, provenance MUST be 'inferred' -- see the top-level provenance field."
+          },
+          "expectation": { "type": "string", "description": "What the agent expects the next action to show." }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "tool_call" } }, "required": ["event"] },
+      "then": {
+        "required": ["call_id", "tool"],
+        "properties": {
+          "call_id": { "type": "string" },
+          "tool": { "type": "string" },
+          "arguments": { "type": ["object", "string"] },
+          "reason_ref": {
+            "type": "string",
+            "description": "intent_id of the intent this action carries out. The explicit reason-to-action binding. Observed traces place narration near actions but never bind them, so causality is inferred from ordering -- which breaks the moment anything runs concurrently. When reason_ref was bound by adapter-side proximity inference rather than a source-provided link, the event's top-level provenance MUST be 'inferred', with inference_basis naming the binding method (e.g. 'nearest preceding intent by ordering')."
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "tool_result" } }, "required": ["event"] },
+      "then": {
+        "required": ["call_id", "outcome"],
+        "properties": {
+          "call_id": { "type": "string" },
+          "outcome": {
+            "enum": ["success", "error"],
+            "description": "The aggregate outcome. When sub_results is present, this MUST be 'error' if any sub-result failed -- callers that don't care about the per-sub-result breakdown can still rely on this field alone."
+          },
+          "content": { "type": "string", "description": "What the agent saw, as it saw it." },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "patch": {
+            "type": "string",
+            "description": "Unified diff, when the call changed a file. When this was correlated to the call by adapter-side inference (e.g. ordinal-window adjacency to a structurally separate file-change record, with no explicit call_id linking them), the event's top-level provenance MUST be 'inferred', with inference_basis naming the correlation method."
+          },
+          "sub_results": {
+            "type": "array",
+            "description": "New in 0.2, OPTIONAL. One call_id can produce more than one independent outcome -- e.g. a single unified-exec tool_call that issues several underlying shell commands and file changes, each with its own exit code. Evidence: a Codex rollout's 4 custom_tool_call records produced 5 completed sub-items (4 CommandExecution + 1 FileChange) that 0.1's 1-call_id-to-1-outcome model had no slot for. The existing flat outcome/stdout/stderr/patch fields are UNCHANGED and remain sufficient for the common single-outcome case -- sub_results is additive, never required. See the 0.2 schema backlog, finding 3.",
+            "items": {
+              "type": "object",
+              "required": ["outcome"],
+              "properties": {
+                "outcome": { "enum": ["success", "error"] },
+                "stdout": { "type": "string" },
+                "stderr": { "type": "string" },
+                "patch": { "type": "string" },
+                "exit_code": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "uncertainty" } }, "required": ["event"] },
+      "then": {
+        "required": ["statement"],
+        "properties": {
+          "statement": { "type": "string" },
+          "about_ref": {
+            "type": "string",
+            "description": "call_id or intent_id this uncertainty qualifies. Observed runs declared real assumptions ONLY in a closing summary, detached from the action they affected -- so a reviewer reading the diff cannot see that a semantic change rested on a guess."
+          },
+          "resolved": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "task_created" } }, "required": ["event"] },
+      "then": {
+        "description": "NEW in 0.4. Emitted by the PLANNER that assigned the work -- the half of the task-assignment pair only the planner can honestly attest to. Pairs with task_received (below), emitted by the worker that accepted it. Corroboration (see the reference checker's corroboration computation) holds when a task_created and a task_received share the same task_id and come from two different agent.id values; it is computed from the pair, never asserted by either event alone.",
+        "required": ["task_id", "brief", "assigned_to"],
+        "properties": {
+          "task_id": { "type": "string", "description": "Identifies this task assignment. The worker's task_received for the same assignment MUST reuse this exact value for the pair to be findable." },
+          "brief": { "type": "string", "description": "What the planner told the worker to do -- the task_received counterpart no outside observer, and no adapter, can reconstruct from the worker's transcript alone." },
+          "assigned_to": { "type": "string", "description": "The agent.id of the child/worker this task is being assigned to. MAY match child_agent_id on a preceding agent_created event for the same child, when the assignment happens at spawn time; kept as its own field because a task can also be assigned to an already-running agent." }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "task_received" } }, "required": ["event"] },
+      "then": {
+        "description": "REDEFINED in 0.4. Emitted by the WORKER that accepted the task -- the half of the pair only the worker can honestly attest to (that it, in fact, received and is acting on this task_id). Pairs with task_created (above), emitted by the planner. On its own this event is an uncorroborated claim by the worker -- true self-certification only when a task_created event with the same task_id exists from a DIFFERENT agent.id; see the reference checker's corroboration computation. 0.2/0.3 traces already used this exact event name for the worker's single-sided claim; a 0.2/0.3 task_received event satisfies this clause's required fields as-is (task_id is required in both), but predates the pairing -- see the reference conformance checker for how presence without a task_created counterpart is reported.",
+        "required": ["task_id"],
+        "properties": {
+          "task_id": { "type": "string", "description": "MUST match the task_created event's task_id for the pair to corroborate." },
+          "brief": { "type": "string", "description": "OPTIONAL, carried over from 0.2/0.3: the worker's own restatement of the brief, when it records one. Never a substitute for task_created.brief -- this is the worker's account, not the planner's." },
+          "scope_id": { "type": "string", "description": "OPTIONAL, carried over from 0.2/0.3." },
+          "from_agent": { "type": "string", "description": "OPTIONAL. The agent.id the worker believes assigned it this task, when the worker knows it. A hint for a human/auditor reading the trace, NOT what establishes corroboration -- corroboration is computed from task_id + the two events' own agent.id fields, so an absent or even a wrong from_agent does not by itself defeat corroboration, and a present, correct one does not by itself grant it." }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "handoff_created" } }, "required": ["event"] },
+      "then": {
+        "description": "NEW in 0.4, replaces 0.3's singular 'handoff'. Emitted by the WORKER reporting an outcome -- the half of the task-closeout pair only the worker can honestly attest to (what it did, and how it characterizes the result). Pairs with handoff_received (below), emitted by the planner that takes receipt of it. Same required/optional shape as 0.3's 'handoff' -- only the event name and its pairing partner are new; see the reference conformance checker for how a legacy 0.2/0.3 'handoff' event is treated when an SOP requires 'handoff_created'.",
+        "required": ["task_id", "content"],
+        "properties": {
+          "task_id": { "type": "string", "description": "SHOULD match the task_id from the task_received/task_created pair this handoff closes out, and MUST match the handoff_received event's task_id for that pair to corroborate." },
+          "content": { "type": "string" },
+          "status": { "enum": ["completed", "blocked", "failed", "premise-invalid"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "handoff_received" } }, "required": ["event"] },
+      "then": {
+        "description": "NEW in 0.4. Emitted by the PLANNER that took receipt of the handoff -- the half of the pair only the planner can honestly attest to (that it, in fact, received this report and what it did next). Pairs with handoff_created (above). On its own this event is an uncorroborated claim by the planner; corroboration requires a handoff_created with the same task_id from a different agent.id. Has no 0.2/0.3 predecessor -- 0.3's model had no planner-side event for this at all, which is exactly the gap 0.4 closes.",
+        "required": ["task_id"],
+        "properties": {
+          "task_id": { "type": "string", "description": "MUST match the handoff_created event's task_id for the pair to corroborate." },
+          "disposition": { "type": "string", "description": "OPTIONAL. What the planner did with the handoff it received -- e.g. 'accepted', 'requested rework', 'escalated to a human'. Free text, not a closed enum: what a planner can do with a handoff is process-specific." }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "error" } }, "required": ["event"] },
+      "then": {
+        "required": ["message"],
+        "properties": {
+          "message": { "type": "string" },
+          "fatal": { "type": "boolean" }
+        }
+      }
+    }
+  ]
+}

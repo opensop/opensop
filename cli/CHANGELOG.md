@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-09-23
+
 ### Added
 
 - **`heal --apply` refuses to re-run a step with declared `effects` (SPEC §3.2, additive v0.7.x).** A step can fail from the CLI's point of view while having already succeeded remotely (classic case: an HTTP request lands but the response times out) — blindly re-running it can double-post, double-send, or double-spend. Steps now carry an optional `effects` field: a plain string describing what the step does to the world (e.g. `"publishes a post to LinkedIn"`). Presence of the field, not its content, is the signal. `opensop heal <run_id> --apply` now refuses (exit non-zero, no re-run, no audit event) when the failed step declares `effects`, printing the declared string and the escape hatch. A new `--force-effects` flag permits the re-run explicitly; when used, the audit `heal` event's `note` records that an effectful step was knowingly re-run. Bare `heal` (diagnosis mode) no longer blandly recommends `--apply` for such a step — it surfaces the effects string and recommends `--apply --force-effects` instead, both in the printed "next steps" and in the `debug_prompt` baked into the fault record at failure time. Not an interactive prompt: agents have no TTY, so this is a refusal plus a documented flag. Steps without `effects` heal exactly as before (no regression). +cases in `test/test.sh`.
@@ -1038,6 +1040,7 @@ work; v0.6 features only activate inside a cell.
 - `X-SOP-Token` auth header support.
 - `NO_COLOR` support.
 
+[0.9.1]: https://github.com/opensop/opensop/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/opensop/opensop/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/opensop/opensop/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/opensop/opensop/compare/v0.6.0...v0.7.0

@@ -129,34 +129,32 @@ One model, two serializations (SPEC v0.7):
 - **`.sop.json`** — the canonical format the local CLI runs (`opensop run`).
 - **`.sop.yaml`** — the wrapped variant a server accepts at `POST /sop/processes/register`.
 
-```yaml
-opensop: "0.7"
-process:
-  name: morning-briefing
-  version: "1.0"
-  inputs:
-    - { name: date, type: string, format: date, required: true }
-  steps:
-    - id: fetch-calendar
-      type: automated
-      run: ./scripts/fetch-calendar.sh
-      outputs:
-        - { name: success, type: boolean }
-        - { name: events, type: object }
-
-    - id: synthesize
-      type: llm
-      model: claude-haiku-4-5
-      # The gate that makes "the agent can't launder missing data" mechanical:
-      # if the fetch returned success:false, the LLM is never asked.
-      condition: "steps.fetch-calendar.outputs.success == true"
-      expected_output_schema: { brief: string }
-      prompt: "Synthesize a 200-word brief from these sources…"
-      outputs:
-        - { name: brief, type: string }
+```json
+{
+  "name": "morning-briefing",
+  "version": "1.0",
+  "description": "Fetch today's calendar and synthesize a short morning brief.",
+  "inputs": { "date": "2026-09-23" },
+  "steps": [
+    {
+      "id": "fetch-calendar",
+      "type": "automated",
+      "description": "Fetch today's calendar events.",
+      "run": "./scripts/fetch-calendar.sh"
+    },
+    {
+      "id": "synthesize",
+      "type": "llm",
+      "description": "Synthesize a short brief from the day's events.",
+      "model": "claude-haiku-4-5",
+      "prompt": "Write a 100-word morning brief for {{date}}.",
+      "expected_output_schema": { "brief": { "type": "string", "required": true } }
+    }
+  ]
+}
 ```
 
-If Calendar times out, the run stops at the gate. It does **not** hand the LLM a blank calendar and let it say *"your schedule looks clear this morning."* You get back exactly what was collected — with a receipt.
+Context threads between steps automatically — `synthesize` runs after `fetch-calendar` and inherits its output, no wiring required. You get back exactly what was collected — with a receipt.
 
 ---
 
