@@ -25,6 +25,10 @@ paths = [
   # similar — illustrative, not real. Real production tokens are 64-char
   # hex from `SecureRandom.hex(32)` and are never written to docs.
   '''^docs/API\.md$''',
+  # Deleted in this branch, but the full-history scan still reaches its old
+  # blobs (placeholder header values, e.g. REPLACE_WITH_HMAC_..., trip the
+  # generic rule). History-only allowlist, same pattern as the demo token below.
+  '''^docs/opensop\.postman\.json$''',
   '''^app/views/ui/api_docs/''',
 ]
 
