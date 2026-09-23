@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/opensop/opensop/main/cli/bin/openso
 ./opensop onboard
 ```
 
-Read [MANIFESTO.md](./MANIFESTO.md) for the thesis. Spec: [SPEC.md](./SPEC.md) (v0.7).
+Read [MANIFESTO.md](./MANIFESTO.md) for the thesis. Spec: [SPEC.md](./SPEC.md) (v0.9.1).
 
 ---
 
@@ -124,13 +124,13 @@ Run it on your machine — `opensop bench` (add `ANTHROPIC_API_KEY` for a live r
 
 ## A process is a file
 
-One model, two serializations (SPEC v0.7):
+One model, two serializations (SPEC v0.9.1):
 
 - **`.sop.json`** — the canonical format the local CLI runs (`opensop run`).
 - **`.sop.yaml`** — the wrapped variant a server accepts at `POST /sop/processes/register`.
 
 ```yaml
-opensop: "0.7"
+opensop: "0.9.1"
 process:
   name: morning-briefing
   version: "1.0"
@@ -217,7 +217,7 @@ There is no maintained reference server. The profile is specified so anyone can 
 | Doc | For | Covers |
 |---|---|---|
 | [`MANIFESTO.md`](./MANIFESTO.md) | Everyone | The thesis — why processes are infrastructure |
-| [`SPEC.md`](./SPEC.md) | Architects + implementors | The OpenSOP v0.7 spec and `/sop/*` API contract |
+| [`SPEC.md`](./SPEC.md) | Architects + implementors | The OpenSOP v0.9.1 spec and `/sop/*` API contract |
 | [`docs/AGENTS.md`](./docs/AGENTS.md) | Agent builders | Discover → run → build → openSOP-ize → evolve |
 | [`EVOLUTION.md`](./EVOLUTION.md) | Process authors | Mineralization tiers — hardening a process over time |
 | [`cli/README.md`](./cli/README.md) | CLI users | Full command reference + install verification |

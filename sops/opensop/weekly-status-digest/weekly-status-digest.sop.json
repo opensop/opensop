@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "weekly-status-digest",
   "version": "1.0.0",
   "description": "Collect weekly wins, risks, and next steps via form, then format a concise Markdown status digest.",

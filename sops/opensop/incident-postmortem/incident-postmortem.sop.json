@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "incident-postmortem",
   "version": "1.1.0",
   "description": "Collect incident details via form, gate on human sign-off, then emit a structured postmortem Markdown document — or a rejection record if the postmortem is not approved.",

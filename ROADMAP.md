@@ -1,11 +1,11 @@
 # OpenSOP roadmap
 
-OpenSOP is Process as Infrastructure for agentic processes. The CLI (v0.9.0) is local-first: `opensop run/list/search` execute locally against `.sop.json` with no server; remote is opt-in via `--remote`. The spec is at v0.8. This roadmap keeps the public repo honest about what ships next.
+OpenSOP is Process as Infrastructure for agentic processes. The CLI (v0.9.1) is local-first: `opensop run/list/search` execute locally against `.sop.json` with no server; remote is opt-in via `--remote`. The spec is at v0.9.1. This roadmap keeps the public repo honest about what ships next.
 
 ## Shipped
 
-- SPEC 0.8 — agent-work Process fields (`evidence`, `agent_contract`, `prompt`, `isolation`) and trace provenance, plus bare-form `opensop schema validate`
-- CLI 0.9.0 — local-first execution against `.sop.json`, `--remote` opt-in
+- SPEC 0.9.1 — agent-work Process fields (`evidence`, `agent_contract`, `prompt`, `isolation`) and trace provenance, plus bare-form `opensop schema validate`
+- CLI 0.9.1 — local-first execution against `.sop.json`, `--remote` opt-in
 - `sops/` — a library of example SOPs to fork and run
 
 ## Next — harness graduation gates

@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "triage-bug-report",
   "version": "1.1.0",
   "description": "Triage a bug report with an LLM: assign a P0–P3 priority + rationale, then format a triage summary. Pass the report as process inputs (no interactive form).",

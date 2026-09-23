@@ -16,7 +16,7 @@ set -euo pipefail
 # Constants & paths
 # --------------------------------------------------------------------------- #
 
-readonly OPENSOP_CLI_VERSION="0.9.0"
+readonly OPENSOP_CLI_VERSION="0.9.1"
 readonly OPENSOP_HOME="${OPENSOP_HOME:-$HOME/.opensop}"
 readonly CONFIG_FILE="$OPENSOP_HOME/config"
 readonly CACHE_FILE="$OPENSOP_HOME/instances.tsv"
@@ -7259,7 +7259,7 @@ allowed-tools:
 metadata:
   homepage: https://github.com/opensop/opensop
   spec: SPEC.md
-  version: "0.8"
+  version: "0.9.1"
 compatibility:
   - claude
   - codex
@@ -8437,7 +8437,7 @@ cmd_info() {
 
 main() {
   # Strip global flags anywhere in the argument list.
-  # v0.8: default backend is LOCAL. --remote uses the configured server URL;
+  # v0.9.1: default backend is LOCAL. --remote uses the configured server URL;
   # --server <url> sets the URL for this invocation and implies --remote.
   # --local is accepted as a deprecated no-op (local is already the default).
   local -a args=()

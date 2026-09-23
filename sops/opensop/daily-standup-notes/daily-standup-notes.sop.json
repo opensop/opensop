@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "daily-standup-notes",
   "version": "1.0.0",
   "description": "Collect standup answers (yesterday / today / blockers) via form steps, then format a concise Markdown summary.",
