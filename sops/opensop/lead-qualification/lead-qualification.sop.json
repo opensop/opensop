@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "lead-qualification",
   "version": "1.1.0",
   "description": "Score and route a sales lead with an LLM step, then format a qualification summary. Pass lead details as process inputs; no interactive form required.",

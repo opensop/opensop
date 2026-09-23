@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "meeting-action-items",
   "version": "1.1.0",
   "description": "Extract structured action items from meeting notes with an LLM step, then format the list — showcasing OpenSOP's reliability story for agentic extraction. Pass notes as a process input; no interactive form required.",

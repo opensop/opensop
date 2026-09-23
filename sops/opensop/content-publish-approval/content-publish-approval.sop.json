@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "content-publish-approval",
   "version": "1.0.0",
   "description": "Collect draft content details via form, gate on editorial approval, then emit a publish record.",

@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/opensop/opensop/main/cli/bin/openso
 ./opensop onboard
 ```
 
-Read [MANIFESTO.md](./MANIFESTO.md) for the thesis. Spec: [SPEC.md](./SPEC.md) (v0.7).
+Read [MANIFESTO.md](./MANIFESTO.md) for the thesis. Spec: [SPEC.md](./SPEC.md) (v0.9.1).
 
 ---
 
@@ -124,34 +124,36 @@ Run it on your machine — `opensop bench` (add `ANTHROPIC_API_KEY` for a live r
 
 ## A process is a file
 
-One model, two serializations (SPEC v0.7):
+One model, two serializations (SPEC v0.9.1):
 
 - **`.sop.json`** — the canonical format the local CLI runs (`opensop run`).
 - **`.sop.yaml`** — the wrapped variant a server accepts at `POST /sop/processes/register`.
 
-```json
-{
-  "name": "morning-briefing",
-  "version": "1.0",
-  "description": "Fetch today's calendar and synthesize a short morning brief.",
-  "inputs": { "date": "2026-09-23" },
-  "steps": [
-    {
-      "id": "fetch-calendar",
-      "type": "automated",
-      "description": "Fetch today's calendar events.",
-      "run": "./scripts/fetch-calendar.sh"
-    },
-    {
-      "id": "synthesize",
-      "type": "llm",
-      "description": "Synthesize a short brief from the day's events.",
-      "model": "claude-haiku-4-5",
-      "prompt": "Write a 100-word morning brief for {{date}}.",
-      "expected_output_schema": { "brief": { "type": "string", "required": true } }
-    }
-  ]
-}
+```yaml
+opensop: "0.9.1"
+process:
+  name: morning-briefing
+  version: "1.0"
+  inputs:
+    - { name: date, type: string, format: date, required: true }
+  steps:
+    - id: fetch-calendar
+      type: automated
+      run: ./scripts/fetch-calendar.sh
+      outputs:
+        - { name: success, type: boolean }
+        - { name: events, type: object }
+
+    - id: synthesize
+      type: llm
+      model: claude-haiku-4-5
+      # The gate that makes "the agent can't launder missing data" mechanical:
+      # if the fetch returned success:false, the LLM is never asked.
+      condition: "steps.fetch-calendar.outputs.success == true"
+      expected_output_schema: { brief: string }
+      prompt: "Synthesize a 200-word brief from these sources…"
+      outputs:
+        - { name: brief, type: string }
 ```
 
 Context threads between steps automatically — `synthesize` runs after `fetch-calendar` and inherits its output, no wiring required. You get back exactly what was collected — with a receipt.
@@ -215,7 +217,7 @@ There is no maintained reference server. The profile is specified so anyone can 
 | Doc | For | Covers |
 |---|---|---|
 | [`MANIFESTO.md`](./MANIFESTO.md) | Everyone | The thesis — why processes are infrastructure |
-| [`SPEC.md`](./SPEC.md) | Architects + implementors | The OpenSOP v0.7 spec and `/sop/*` API contract |
+| [`SPEC.md`](./SPEC.md) | Architects + implementors | The OpenSOP v0.9.1 spec and `/sop/*` API contract |
 | [`docs/AGENTS.md`](./docs/AGENTS.md) | Agent builders | Discover → run → build → openSOP-ize → evolve |
 | [`EVOLUTION.md`](./EVOLUTION.md) | Process authors | Mineralization tiers — hardening a process over time |
 | [`cli/README.md`](./cli/README.md) | CLI users | Full command reference + install verification |
