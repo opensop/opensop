@@ -78,7 +78,7 @@ The `sha256` printed after every pull is for pinning and identification (both th
 | `content-publish-approval` | Collect draft content details, gate on editorial approval, then emit a publish record |
 | `weekly-status-digest` | Collect weekly wins, risks, and next steps via form, then format a Markdown status digest |
 | `email-spam-filter` | ADVISORY LLM spam triage: classify (spam/ham + confidence) and recommend deliver vs quarantine — delivery only for high-confidence ham; injection-aware (advisory; LLM classifiers are susceptible to crafted-email prompt injection); not an authenticated gate |
-| `scoped-change-delegation` | Collect a scoped code-change task, gate delegating it to a worker agent on planner approval, then emit a delegation record — exercises SPEC 0.8 §2.9's agent-work fields (`evidence`, `agent_contract`, `prompt`, `isolation`) |
+| `scoped-change-delegation` | Collect a scoped code-change task, gate delegating it to a worker agent on planner approval, then emit a delegation record — exercises SPEC 0.9.1 §2.9's agent-work fields (`evidence`, `agent_contract`, `prompt`, `isolation`) |
 
 These exist as CLI test fixtures and `opensop dry-run`/`opensop import` examples. They are not published to the `opensop/sops` library.
 

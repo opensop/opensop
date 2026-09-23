@@ -1,5 +1,5 @@
 {
-  "opensop": "0.8",
+  "opensop": "0.9.1",
   "name": "scoped-change-delegation",
   "version": "1.0.0",
   "description": "Delegate a scoped code change to a worker agent in an isolated checkout, gate the handoff on planner approval, and require a checkable evidence trail before the change is accepted.",
