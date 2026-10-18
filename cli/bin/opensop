@@ -3539,7 +3539,7 @@ _local_step_loop() {
         #   max_retries (default 2; total attempts = max_retries + 1)
         #   retry_on_incomplete (default true; false => 1 attempt)
         #   workdir    (CLI providers; {{ var }}-templated; default: the run's cwd)
-        #   permission (CLI providers; read-only (default) | workspace-write | full-access)
+        #   permission (CLI providers; {{ var }}-templated; read-only (default) | workspace-write | full-access)
         #
         # Test seams: if OSL_LLM_STUB is set, skip the network/CLI call entirely and
         # treat its value as the raw model response text (same fence-strip +
@@ -3593,7 +3593,10 @@ _local_step_loop() {
         #   kimi         full-access only: `kimi -p` has no sandbox, writes without
         #                asking, and refuses --plan/--auto alongside --prompt.
         if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
-          llm_perm="$(jq -r '.permission // "read-only"' <<<"$step")"; s_llm_permission="$llm_perm"
+          # {{ ref }}-templated like model/workdir, so an earlier step can choose it;
+          # the rendered value must still be in the closed vocabulary below (an
+          # unresolved token stays literal and is refused).
+          llm_perm="$(_local_render "$(jq -r '.permission // "read-only"' <<<"$step")" "$ctx" "$llm_pinp")"; s_llm_permission="$llm_perm"
           case "$llm_perm" in
             read-only|workspace-write|full-access) ;;
             *) out_raw="{\"error\":\"permission must be read-only, workspace-write or full-access, got '$llm_perm'\"}"; rc=1; llm_ok=false ;;

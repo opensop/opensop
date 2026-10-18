@@ -955,7 +955,7 @@ fields apply to CLI providers:
 |---|---|---|
 | `workdir` | Directory the CLI runs in; `{{ ref }}`-templated | The directory the run was started from (`manifest.cwd`), also after a resume |
 | `timeout` | Wall-clock bound per CLI attempt: seconds, or `30s` / `2m` / `1h`. A timeout fails the step | None (unbounded) |
-| `permission` | `read-only` \| `workspace-write` \| `full-access` (the §2.9.2 `filesystem` vocabulary) | `read-only` |
+| `permission` | `read-only` \| `workspace-write` \| `full-access` (the §2.9.2 `filesystem` vocabulary); `{{ ref }}`-templated, and the rendered value must be one of these | `read-only` |
 
 `permission` is mapped onto each CLI's own sandbox or permission flags. A CLI
 that cannot enforce the declared value fails the step instead of running with
