@@ -43,7 +43,7 @@ bash test/test.sh                      # golden test
 | `form` | Yes — `waiting_for_input` | `submit --output k=v` | Collects structured human/agent input |
 | `approval` | Yes — `waiting_for_approval` | `submit --output decision=approve\|reject` | Defaults to `decision` enum; fully configurable |
 | `wait` | `wait.seconds` → No; `wait.until` → Yes — `waiting_for_callback` | `submit` (no outputs required) | `wait.seconds` completes immediately with `{waited:true}` |
-| `llm` | No | — | `claude*` → Anthropic API (`ANTHROPIC_API_KEY`). CLI providers: `claude-code:<model>`, `codex:<model>`, `cursor:<model>`, `kimi:<model>` (empty model = the CLI's default), with `workdir` and `permission` (`read-only` default \| `workspace-write` \| `full-access`; refused where the CLI cannot enforce it — kimi is `full-access` only). `model` is `{{ var }}`-templated |
+| `llm` | No | — | `claude*` → Anthropic API (`ANTHROPIC_API_KEY`). CLI providers: `claude-code:<model>`, `codex:<model>`, `cursor:<model>`, `kimi:<model>` (empty model = the CLI's default), with `workdir` and `permission` (`read-only` default \| `workspace-write` \| `full-access`; refused where the CLI cannot enforce it — kimi is `full-access` only) and an optional `timeout` per CLI attempt. `workdir` defaults to where the run was started. `model` is `{{ var }}`-templated |
 | `judgment` | Yes — `escalated` | `submit --output decision=...` | With `judgment.allow_agent` + `model` + `prompt`, runs the `llm` path against the step's outputs + `confidence`; escalates on `require_human_review` or confidence below `confidence_threshold`. No agent → escalates at once |
 | `loop` | No | — | `for_each` (+`as`) / `repeat_until` / `while` over `body` steps; `max_iterations` (default 100); `aggregate` sum\|concat\|last. A pausing body step fails the loop |
 | `webhook` | sync → No; callback → Yes — `waiting_for_callback` | `submit --output k=v` | sync asserts 2xx; poll mode not yet implemented |
@@ -574,7 +574,7 @@ opensop run ./daily-standup-notes.sop.json     # only after reading the steps an
 - **`register` may be admin-only.** Some OpenSOP deployments restrict `/sop/processes/register` to admin tokens. If you get a 401/403, check your token scope or use the dashboard.
 - **No inbound webhook receiver.** The CLI doesn't run a server, so it can't receive webhook callbacks over the network. `webhook` steps in `callback` mode pause the run — resume manually with `opensop submit <run_id> <step-id>`. The OpenSOP server runtime handles live inbound callbacks at `/sop/webhooks/<callback_id>`.
 - **`webhook` poll mode** is not yet implemented in the local backend (mirrors the server runtime's current state). The step exits non-zero with a clear message.
-- **`llm` step type** with a `claude*` model requires `ANTHROPIC_API_KEY` and outbound HTTPS to `api.anthropic.com`; CLI providers need that CLI installed and signed in. A CLI-provider prompt travels in argv (128 KiB cap on Linux), and CLI calls have no wall-clock timeout yet.
+- **`llm` step type** with a `claude*` model requires `ANTHROPIC_API_KEY` and outbound HTTPS to `api.anthropic.com`; CLI providers need that CLI installed and signed in. A CLI-provider prompt travels in argv (128 KiB cap on Linux). Without a step `timeout`, CLI calls are unbounded.
 - **`loop` bodies cannot pause.** A `form`, `approval`, escalated `judgment`, or other pausing step inside a loop body fails the loop step.
 - **`notification` step type** is not yet implemented in the local backend; it fails the run with a clear error.
 

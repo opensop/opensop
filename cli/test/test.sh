@@ -8681,10 +8681,7 @@ for stub in \
     '{"items":[{"owner":"Al","task":["a","b"]}]}' \
     '{"items":[null,{"owner":"Al","task":"real"}]}' \
     '{"items":[{"owner":"Al"}]}' \
-    '{"items":["a bare string"]}' \
-    '{"items":7}' \
-    '{"items":"a scalar"}' \
-    '{"items":{"owner":"x","task":"y"}}'; do
+    '{"items":["a bare string"]}'; do
   mh="$(mktemp -d)"
   mm="$(OSL_LLM_STUB="$stub" OPENSOP_LOCAL_HOME="$mh" "$cli" run "$mai" --input notes=x --input meeting_title=T --json 2>/dev/null)"
   st="$(echo "$mm" | jq -r '.status')"; rid="$(echo "$mm" | jq -r '.run_id')"
@@ -8696,6 +8693,19 @@ for stub in \
     || { echo "FAIL: meeting-action-items produced an EMPTY artifact on malformed items ($stub)"; exit 1; }
 done
 echo "PASS: meeting-action-items — malformed LLM items render non-empty (never crash or silently empty)"
+# A non-array `items` violates the declared schema (items: {type: array}) and
+# fails at the llm step with a clear error (v0.9.2 validates array/object types).
+for stub in '{"items":7}' '{"items":"a scalar"}' '{"items":{"owner":"x","task":"y"}}'; do
+  mh="$(mktemp -d)"
+  set +e
+  mm="$(OSL_LLM_STUB="$stub" OPENSOP_LOCAL_HOME="$mh" "$cli" run "$mai" --input notes=x --input meeting_title=T --json 2>/dev/null)"
+  set -e
+  rid="$(echo "$mm" | jq -r '.run_id')"
+  jq -e 'select(.status=="failed") | .output.error | contains("items must be an array")' "$mh/runs/$rid/audit.jsonl" >/dev/null \
+    || { rm -rf "$mh"; echo "FAIL: meeting-action-items non-array items ($stub) should fail schema validation"; exit 1; }
+  rm -rf "$mh"
+done
+echo "PASS: meeting-action-items — a non-array items fails the declared array schema with a clear error"
 
 # --- lead-qualification: the outcome enum is runtime-enforced ---
 lq="$sops_dir/lead-qualification/lead-qualification.sop.json"
@@ -9460,6 +9470,7 @@ for b in claude codex cursor-agent kimi; do
 #!/usr/bin/env bash
 [ "${1:-}" = "--version" ] && { echo "fake-$(basename "$0") 1.0"; exit 0; }
 echo "$(basename "$0") cwd=$PWD" >> "$FAKE_CLI_LOG"
+[ -n "${FAKE_SLEEP:-}" ] && exec sleep "$FAKE_SLEEP"
 case "$(basename "$0")" in
   claude) printf '%s' '{"type":"result","is_error":false,"result":"{\"ok\":true}"}' ;;
   codex)  while [ $# -gt 0 ]; do [ "$1" = "-o" ] && printf '{"ok":true}' > "$2"; shift; done ;;
@@ -9491,7 +9502,7 @@ done
 _argv() { sed -n "${1}p" "$p092/argv.jsonl" | jq -c '.argv[:-1]'; }   # drop the prompt
 [ "$(_argv 1)" = '["claude","-p","--output-format","json","--no-session-persistence","--model","opus-x","--tools","Read,Grep,Glob","--"]' ] \
   || { echo "FAIL: P092-a claude-code read-only argv: $(_argv 1)"; exit 1; }
-[ "$(_argv 2)" = '["claude","-p","--output-format","json","--no-session-persistence","--permission-mode","acceptEdits","--"]' ] \
+[ "$(_argv 2)" = '["claude","-p","--output-format","json","--no-session-persistence","--permission-mode","auto","--"]' ] \
   || { echo "FAIL: P092-a claude-code workspace-write argv (empty model → no --model): $(_argv 2)"; exit 1; }
 _argv 3 | jq -e --arg w "$p092/work" '.[0:2] == ["codex","exec"] and (index(["-C",$w])) and (index(["-s","read-only"])) and (index(["-m","gpt-x"])) and (index("-o"))' >/dev/null \
   || { echo "FAIL: P092-a codex read-only argv: $(_argv 3)"; exit 1; }
@@ -9657,6 +9668,135 @@ set -e
        "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_p")/audit.jsonl" >/dev/null \
   || { echo "FAIL: P092-g a pausing body step should fail the loop clearly, got: $g_p"; exit 1; }
 echo "PASS: P092-g — a pausing body step (approval) is refused with a clear error, not silently skipped"
+
+# (h) step timeout bounds a CLI attempt; the codex -o temp file is cleaned up.
+mkdir -p "$p092/tmp"
+jq '.steps[0].timeout = "1s"' "$(_p092_proc codex:x read-only "$p092/work")" > "$p092/to.sop.json"
+h_t0="$(date +%s)"
+set +e
+h_out="$(FAKE_SLEEP=30 TMPDIR="$p092/tmp" PATH="$p092/bin:$PATH" "$cli" run "$p092/to.sop.json" --json 2>/dev/null)"; h_rc=$?
+set -e
+[ "$h_rc" -ne 0 ] && [ $(( $(date +%s) - h_t0 )) -lt 15 ] \
+  && jq -e 'select(.step=="ask") | .status == "failed" and (.output.error | contains("codex timed out after 1s"))' \
+       "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$h_out")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-h a CLI attempt over its step timeout should fail fast with a clear error"; exit 1; }
+[ -z "$(ls -A "$p092/tmp")" ] || { echo "FAIL: P092-h codex -o temp file left behind after timeout: $(ls -A "$p092/tmp")"; exit 1; }
+jq '.steps[0].timeout = "soon"' "$p092/to.sop.json" > "$p092/to-bad.sop.json"
+set +e
+h_bad="$(OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/to-bad.sop.json" --json 2>/dev/null)"
+set -e
+jq -e 'select(.step=="ask") | .output.error | contains("timeout must be")' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$h_bad")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-h a malformed timeout should be refused"; exit 1; }
+echo "PASS: P092-h — step timeout kills a hung CLI, fails the step clearly, leaves no temp file; bad timeout refused"
+
+# (i) default workdir is the run's invocation cwd (manifest.cwd), also after a submit from elsewhere.
+mkdir -p "$p092/inv" "$p092/elsewhere"
+cat > "$p092/cwd.sop.json" <<'JSON'
+{ "name": "p092-cwd", "steps": [
+  { "id": "gate", "type": "approval" },
+  { "id": "ask", "type": "llm", "model": "cursor:", "prompt": "Say ok.",
+    "expected_output_schema": { "ok": { "type": "boolean", "required": true } } } ] }
+JSON
+i_out="$(cd "$p092/inv" && "$cli" run "$p092/cwd.sop.json" --json)"; i_rid="$(jq -r .run_id <<<"$i_out")"
+[ "$(jq -r .cwd "$OPENSOP_LOCAL_HOME/runs/$i_rid/manifest.json")" = "$p092/inv" ] \
+  || { echo "FAIL: P092-i manifest should record the invocation cwd"; exit 1; }
+: > "$p092/argv.jsonl"
+(cd "$p092/elsewhere" && OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' \
+  "$cli" submit "$i_rid" gate --output decision=approve --json >/dev/null)
+[ "$(jq -r .cwd "$p092/argv.jsonl")" = "$p092/inv" ] \
+  || { echo "FAIL: P092-i resumed CLI step should default to the invocation cwd, got $(jq -r .cwd "$p092/argv.jsonl")"; exit 1; }
+echo "PASS: P092-i — default workdir is the run's invocation cwd, persisted in the manifest and used on resume"
+
+# (j) condition (skip with a receipt) and exit_when + exit_outputs (§3.15), incl. from a loop body and on submit.
+cat > "$p092/cond.sop.json" <<'JSON'
+{ "name": "p092-cond", "inputs": { "mode": "fast" }, "steps": [
+  { "id": "slow", "type": "shell", "condition": "process.inputs.mode == 'slow'", "run": "echo '{\"ran\":true}'" },
+  { "id": "fast", "type": "shell", "condition": "process.inputs.mode == 'fast'", "run": "echo '{\"score\":0.2}'" },
+  { "id": "gate", "type": "noop", "exit_when": "steps.fast.outputs.score < 0.4",
+    "exit_outputs": { "outcome": "rejected_low_score" } },
+  { "id": "never", "type": "shell", "run": "echo '{\"ran\":true}'" } ] }
+JSON
+j_out="$("$cli" run "$p092/cond.sop.json" --json)"; j_rid="$(jq -r .run_id <<<"$j_out")"
+jq -e '.status == "completed" and .exited_early == {step: "gate", exit_outputs: {outcome: "rejected_low_score"}}' \
+  "$OPENSOP_LOCAL_HOME/runs/$j_rid/manifest.json" >/dev/null \
+  || { echo "FAIL: P092-j exit_when should end the run completed with exit_outputs, got: $(cat "$OPENSOP_LOCAL_HOME/runs/$j_rid/manifest.json")"; exit 1; }
+jq -e 'select(.step=="slow") | .status == "skipped"' "$OPENSOP_LOCAL_HOME/runs/$j_rid/audit.jsonl" >/dev/null \
+  && jq -e 'has("slow") | not' "$OPENSOP_LOCAL_HOME/runs/$j_rid/context.json" >/dev/null \
+  && jq -e 'select(.step=="fast") | .status == "completed"' "$OPENSOP_LOCAL_HOME/runs/$j_rid/audit.jsonl" >/dev/null \
+  && ! jq -e 'select(.step=="never")' "$OPENSOP_LOCAL_HOME/runs/$j_rid/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j false condition → skipped receipt; true → runs; nothing after an exit_when"; exit 1; }
+jq '.steps[0].condition = "mode is slow"' "$p092/cond.sop.json" > "$p092/cond-bad.sop.json"
+set +e
+j_bad="$("$cli" run "$p092/cond-bad.sop.json" --json 2>/dev/null)"
+set -e
+jq -e 'select(.step=="slow") | .status == "failed" and (.output.error | contains("cannot evaluate condition"))' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$j_bad")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j an unparseable condition should fail the step"; exit 1; }
+echo "PASS: P092-j — condition skips with a receipt; exit_when ends the run completed with exit_outputs; bad condition fails"
+
+cat > "$p092/exit-loop.sop.json" <<'JSON'
+{ "name": "p092-exit-loop", "steps": [
+  { "id": "lp", "type": "loop", "loop": { "for_each": [1, 2, 3], "as": "n" },
+    "body": [ { "id": "b", "type": "shell", "run": "jq -c '{n: .loop.n}'",
+                "exit_when": "outputs.n == 2", "exit_outputs": { "stopped_at": 2 } } ] },
+  { "id": "never", "type": "noop" } ] }
+JSON
+j_l="$("$cli" run "$p092/exit-loop.sop.json" --json)"; j_lr="$(jq -r .run_id <<<"$j_l")"
+jq -e '.status == "completed" and .exited_early.exit_outputs == {stopped_at: 2}' "$OPENSOP_LOCAL_HOME/runs/$j_lr/manifest.json" >/dev/null \
+  && [ "$(jq -r .lp.iterations "$OPENSOP_LOCAL_HOME/runs/$j_lr/context.json")" = 2 ] \
+  && ! jq -e 'select(.step=="never")' "$OPENSOP_LOCAL_HOME/runs/$j_lr/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j exit_when inside a loop body should end the loop and the run"; exit 1; }
+jq '.steps[0].exit_when = "outputs.decision == '"'"'approve'"'"'" | .steps[0].exit_outputs = {outcome: "approved"}' \
+  "$p092/jd.sop.json" > "$p092/jd-exit.sop.json"
+j_s="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.1}' "$cli" run "$p092/jd-exit.sop.json" --json)"; j_sr="$(jq -r .run_id <<<"$j_s")"
+"$cli" submit "$j_sr" judge --output decision=approve --json >/dev/null
+jq -e '.status == "completed" and .exited_early == {step: "judge", exit_outputs: {outcome: "approved"}}' \
+  "$OPENSOP_LOCAL_HOME/runs/$j_sr/manifest.json" >/dev/null \
+  && ! jq -e 'select(.step=="after")' "$OPENSOP_LOCAL_HOME/runs/$j_sr/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j exit_when on an escalated judgment should apply when a human submits"; exit 1; }
+echo "PASS: P092-j — exit_when in a loop body ends the run; exit_when applies on submit (escalated judge)"
+
+# (k) schema validation covers object / array / nested / shorthand, on the API and CLI paths alike.
+_k_run() {  # <model> <schema_json> <stub> → prints the step's status
+  jq -n --arg m "$1" --argjson sc "$2" '{name:"p092-k", steps:[{id:"ask", type:"llm", model:$m, prompt:"x",
+    retry_on_incomplete:false, expected_output_schema:$sc}]}' > "$p092/k.sop.json"
+  local o; set +e; o="$(OSL_LLM_STUB="$3" "$cli" run "$p092/k.sop.json" --json 2>/dev/null)"; set -e
+  jq -r 'select(.step=="ask") | .status' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$o")/audit.jsonl"
+}
+for m in claude-sonnet-x codex:; do
+  [ "$(_k_run "$m" '{"x":{"type":"object"}}' '{"x":"not an object"}')" = failed ] \
+    || { echo "FAIL: P092-k $m: a string must not pass type:object"; exit 1; }
+  [ "$(_k_run "$m" '{"x":{"type":"object","properties":{"n":{"type":"number","required":true}}}}' '{"x":{"n":"7"}}')" = failed ] \
+    || { echo "FAIL: P092-k $m: nested property type must be checked"; exit 1; }
+  [ "$(_k_run "$m" '{"xs":"array[number]"}' '{"xs":[1,"two"]}')" = failed ] \
+    || { echo "FAIL: P092-k $m: array[number] items must be checked"; exit 1; }
+  [ "$(_k_run "$m" '{"intent":"enum[question, task]"}' '{"intent":"rant"}')" = failed ] \
+    || { echo "FAIL: P092-k $m: enum[...] shorthand must be enforced"; exit 1; }
+  [ "$(_k_run "$m" '{"x":{"n":"number","tags":"array[string]"},"intent":"enum[question, task]"}' \
+        '{"x":{"n":7,"tags":["a"]},"intent":"task"}')" = completed ] \
+    || { echo "FAIL: P092-k $m: a valid nested shorthand object should pass"; exit 1; }
+done
+echo "PASS: P092-k — schema validation enforces object, array[<type>], nested properties and enum[...] (API and CLI paths)"
+
+# (l) a parent paused on a waiting subprocess child cannot be submitted directly.
+cat > "$p092/child.sop.json" <<'JSON'
+{ "name": "p092-child", "steps": [ { "id": "approve-it", "type": "approval" } ] }
+JSON
+jq -n --arg c "$p092/child.sop.json" '{name:"p092-parent", steps:[{id:"sub", type:"subprocess", process:$c}, {id:"after", type:"noop"}]}' \
+  > "$p092/parent.sop.json"
+l_out="$("$cli" run "$p092/parent.sop.json" --json)"; l_rid="$(jq -r .run_id <<<"$l_out")"
+l_child="$(jq -r 'select(.step=="sub" and .status=="waiting") | .child_run_id' "$OPENSOP_LOCAL_HOME/runs/$l_rid/audit.jsonl")"
+set +e
+l_err="$("$cli" submit "$l_rid" sub --output x=1 --json 2>&1 >/dev/null)"; l_rc=$?
+set -e
+[ "$l_rc" -ne 0 ] && echo "$l_err" | grep -q "$l_child" \
+  && [ "$(jq -r .status "$OPENSOP_LOCAL_HOME/runs/$l_rid/manifest.json")" = waiting ] \
+  || { echo "FAIL: P092-l submitting to a parent with a waiting child should fail naming the child, got: $l_err"; exit 1; }
+"$cli" submit "$l_child" approve-it --output decision=approve --json >/dev/null
+[ "$(jq -r .status "$OPENSOP_LOCAL_HOME/runs/$l_rid/manifest.json")" = completed ] \
+  || { echo "FAIL: P092-l submitting to the child should still continue the parent"; exit 1; }
+echo "PASS: P092-l — parent submit is refused while its subprocess child waits (error names the child run)"
 
 unset FAKE_CLI_LOG
 rm -rf "$p092"
