@@ -34,7 +34,7 @@ bash test/test.sh                      # golden test
 
 > **`--local` flag:** accepted for backwards compatibility but now a no-op (local is already the default). Scripts using `opensop run ./x.sop.json --local` continue to work; they will see a deprecation note on stderr. Drop `--local` from new scripts.
 
-**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.9.1. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT`; its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
+**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.9.1. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT` (left unset past Linux's 128 KiB env-string cap; stdin always has it); its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
 
 | Type | Pause? | Resume trigger | Notes |
 |---|---|---|---|
@@ -574,7 +574,7 @@ opensop run ./daily-standup-notes.sop.json     # only after reading the steps an
 - **`register` may be admin-only.** Some OpenSOP deployments restrict `/sop/processes/register` to admin tokens. If you get a 401/403, check your token scope or use the dashboard.
 - **No inbound webhook receiver.** The CLI doesn't run a server, so it can't receive webhook callbacks over the network. `webhook` steps in `callback` mode pause the run — resume manually with `opensop submit <run_id> <step-id>`. The OpenSOP server runtime handles live inbound callbacks at `/sop/webhooks/<callback_id>`.
 - **`webhook` poll mode** is not yet implemented in the local backend (mirrors the server runtime's current state). The step exits non-zero with a clear message.
-- **`llm` step type** with a `claude*` model requires `ANTHROPIC_API_KEY` and outbound HTTPS to `api.anthropic.com`; CLI providers need that CLI installed and signed in. A CLI-provider prompt travels in argv (128 KiB cap on Linux). Without a step `timeout`, CLI calls are unbounded.
+- **`llm` step type** with a `claude*` model requires `ANTHROPIC_API_KEY` and outbound HTTPS to `api.anthropic.com`; CLI providers need that CLI installed and signed in. A CLI-provider prompt goes on stdin, except kimi's (`-p <prompt>`, capped at 128 KiB on Linux). Without a step `timeout`, CLI calls are unbounded.
 - **`loop` bodies cannot pause.** A `form`, `approval`, escalated `judgment`, or other pausing step inside a loop body fails the loop step.
 - **`notification` step type** is not yet implemented in the local backend; it fails the run with a clear error.
 

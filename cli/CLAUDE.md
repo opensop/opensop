@@ -33,7 +33,7 @@ bin/opensop --version           # must equal OPENSOP_CLI_VERSION at bin/opensop:
 
 **Remote state lives server-side; the only local state is a cache.** `~/.opensop/instances.tsv` maps `id → process name` so most commands take just an instance ID. It's primed from list/history/instances responses and rebuilt on a miss via `lookup_name`. Safe to delete.
 
-**Local execution engine contract.** A `.sop.json` process runs `automated`/`shell`/`noop` steps in order. Each step receives the accumulated JSON context on **stdin** and in **`$OSL_CONTEXT`**; its JSON stdout is merged back under the step id (non-JSON stdout becomes `{stdout: "..."}`). Per-step append-only receipts are written under `$OPENSOP_LOCAL_HOME/runs/<id>/` (`manifest.json`, `audit.jsonl`, `context.json`; default `~/.opensop-local`). **Trust boundary:** local steps execute arbitrary shell on the host — same posture as a Makefile.
+**Local execution engine contract.** A `.sop.json` process runs `automated`/`shell`/`noop` steps in order. Each step receives the accumulated JSON context on **stdin** and in **`$OSL_CONTEXT`** (unset when over 128 KiB, the Linux per-string exec cap); its JSON stdout is merged back under the step id (non-JSON stdout becomes `{stdout: "..."}`). Per-step append-only receipts are written under `$OPENSOP_LOCAL_HOME/runs/<id>/` (`manifest.json`, `audit.jsonl`, `context.json`; default `~/.opensop-local`). **Trust boundary:** local steps execute arbitrary shell on the host — same posture as a Makefile.
 
 ## Bash invariants (this script bites if you ignore them)
 
