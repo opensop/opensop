@@ -9371,8 +9371,8 @@ echo "PASS: SPEC091-c — onboard-emitted process file stamped 0.9.1 and passes 
 
 # (d) --version prints both clocks: the CLI version and the supported SPEC list.
 version_out="$("$cli" --version 2>&1)"
-echo "$version_out" | grep -q "opensop 0.9.1" \
-  || { echo "FAIL: SPEC091-d --version should print the CLI version 0.9.1, got: $version_out"; exit 1; }
+echo "$version_out" | grep -q "opensop 0.9.2" \
+  || { echo "FAIL: SPEC091-d --version should print the CLI version 0.9.2, got: $version_out"; exit 1; }
 echo "$version_out" | grep -q "0.1, 0.2, 0.6, 0.7, 0.9.1" \
   || { echo "FAIL: SPEC091-d --version should print the supported SPEC version list, got: $version_out"; exit 1; }
 echo "PASS: SPEC091-d — --version prints both the CLI version and the supported SPEC versions"
@@ -9444,6 +9444,222 @@ echo "$ev_bad_out" | jq -e '.valid == false and (.errors[]?.message | test("unkn
 echo "PASS: SPEC091-h — evidence.required vocabulary matches schema 0.9.1's event enum + effective_prompt; stale 'handoff' name rejected"
 
 rm -rf "$spec08_dir"
+
+# --------------------------------------------------------------------------- #
+# v0.9.2: CLI-backed llm providers, local judgment (§3.9), local loop (§3.14).
+#
+# Hermetic: fake claude/codex/cursor-agent/kimi binaries on PATH record each
+# call to $FAKE_CLI_LOG and answer {"ok":true} the way the real CLI emits its
+# final text (claude: json .result; codex: -o file; cursor: text; kimi: "• "
+# bullet). OSL_LLM_ARGV_FILE captures the argv the engine built.
+# --------------------------------------------------------------------------- #
+p092="$OPENSOP_LOCAL_HOME/p092"; mkdir -p "$p092/bin" "$p092/work"
+export FAKE_CLI_LOG="$p092/cli.log"; : > "$FAKE_CLI_LOG"
+for b in claude codex cursor-agent kimi; do
+  cat > "$p092/bin/$b" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && { echo "fake-$(basename "$0") 1.0"; exit 0; }
+echo "$(basename "$0") cwd=$PWD" >> "$FAKE_CLI_LOG"
+case "$(basename "$0")" in
+  claude) printf '%s' '{"type":"result","is_error":false,"result":"{\"ok\":true}"}' ;;
+  codex)  while [ $# -gt 0 ]; do [ "$1" = "-o" ] && printf '{"ok":true}' > "$2"; shift; done ;;
+  cursor-agent) echo '{"ok":true}' ;;
+  kimi)   echo '• {"ok":true}' ;;
+esac
+SH
+  chmod +x "$p092/bin/$b"
+done
+
+# _p092_proc <model> <permission> [<workdir>] → a one-llm-step process file path
+_p092_proc() {
+  jq -n --arg m "$1" --arg p "$2" --arg w "${3:-}" '{name:"p092", steps:[
+    {id:"ask", type:"llm", model:$m, permission:$p, prompt:"Say ok.",
+     expected_output_schema:{ok:{type:"boolean", required:true}}} + (if $w == "" then {} else {workdir:$w} end)]}' \
+    > "$p092/proc.sop.json"
+  echo "$p092/proc.sop.json"
+}
+
+# (a) argv per provider prefix + permission (stub path: no CLI is invoked).
+: > "$p092/argv.jsonl"
+for spec in "claude-code:opus-x read-only" "claude-code: workspace-write" "codex:gpt-x read-only" "codex: workspace-write" \
+            "cursor:sonnet-x read-only" "cursor: workspace-write" "kimi:k3 full-access"; do
+  set -- $spec
+  OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' PATH="$p092/bin:$PATH" \
+    "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json >/dev/null \
+    || { echo "FAIL: P092-a $1 $2 stub run should complete"; exit 1; }
+done
+_argv() { sed -n "${1}p" "$p092/argv.jsonl" | jq -c '.argv[:-1]'; }   # drop the prompt
+[ "$(_argv 1)" = '["claude","-p","--output-format","json","--no-session-persistence","--model","opus-x","--tools","Read,Grep,Glob","--"]' ] \
+  || { echo "FAIL: P092-a claude-code read-only argv: $(_argv 1)"; exit 1; }
+[ "$(_argv 2)" = '["claude","-p","--output-format","json","--no-session-persistence","--permission-mode","acceptEdits","--"]' ] \
+  || { echo "FAIL: P092-a claude-code workspace-write argv (empty model → no --model): $(_argv 2)"; exit 1; }
+_argv 3 | jq -e --arg w "$p092/work" '.[0:2] == ["codex","exec"] and (index(["-C",$w])) and (index(["-s","read-only"])) and (index(["-m","gpt-x"])) and (index("-o"))' >/dev/null \
+  || { echo "FAIL: P092-a codex read-only argv: $(_argv 3)"; exit 1; }
+_argv 4 | jq -e '(index(["-s","workspace-write"])) and (index("-m") | not)' >/dev/null \
+  || { echo "FAIL: P092-a codex workspace-write argv: $(_argv 4)"; exit 1; }
+_argv 5 | jq -e --arg w "$p092/work" '.[0:2] == ["cursor-agent","-p"] and (index(["--workspace",$w])) and (index(["--mode","ask"])) and (index(["--model","sonnet-x"]))' >/dev/null \
+  || { echo "FAIL: P092-a cursor read-only argv: $(_argv 5)"; exit 1; }
+_argv 6 | jq -e '(index(["--sandbox","enabled"])) and (index("--mode") | not)' >/dev/null \
+  || { echo "FAIL: P092-a cursor workspace-write argv: $(_argv 6)"; exit 1; }
+[ "$(sed -n 7p "$p092/argv.jsonl" | jq -c '.argv[:-1]')" = '["kimi","--output-format","text","-m","k3","-p"]' ] \
+  || { echo "FAIL: P092-a kimi argv: $(sed -n 7p "$p092/argv.jsonl")"; exit 1; }
+sed -n 1p "$p092/argv.jsonl" | jq -e '.argv[-1] | test("precise JSON generator") and test("Say ok.")' >/dev/null \
+  || { echo "FAIL: P092-a the prompt arg should carry the schema instruction + rendered prompt"; exit 1; }
+jq -se --arg w "$p092/work" 'all(.[]; .cwd == $w)' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-a every CLI call should run in the declared workdir"; exit 1; }
+echo "PASS: P092-a — argv per provider prefix and permission (model flag omitted for an empty model)"
+
+# (b) stub path: no CLI call at all (not even --version); receipt records provider/model/permission/cli_version.
+[ ! -s "$FAKE_CLI_LOG" ] || { echo "FAIL: P092-b OSL_LLM_STUB must skip every CLI call, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
+b_out="$(OSL_LLM_STUB='{"ok":true}' PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc codex:gpt-x read-only)" --json)"
+jq -e 'select(.step=="ask") | .provider == "codex" and .model == "codex:gpt-x" and .permission == "read-only" and .cli_version == "stub"' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$b_out")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-b receipt should record provider/model/permission/cli_version"; exit 1; }
+echo "PASS: P092-b — CLI-provider stub path makes no CLI call; receipt records provider, model, permission, cli_version"
+
+# (c) real invocation path against the fake CLIs: final-text capture per CLI, workdir, CLI version.
+for m in claude-code:x codex:x cursor:x; do
+  c_out="$(PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$m" read-only "$p092/work")" --json)" \
+    || { echo "FAIL: P092-c $m fake-CLI run should complete, got: $c_out"; exit 1; }
+  jq -e 'select(.step=="ask") | .output.ok == true and (.cli_version | startswith("fake-"))' \
+    "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$c_out")/audit.jsonl" >/dev/null \
+    || { echo "FAIL: P092-c $m output/cli_version not captured"; exit 1; }
+done
+c_out="$(PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc kimi: full-access "$p092/work")" --json)" \
+  || { echo "FAIL: P092-c kimi fake-CLI run should complete (bullet stripped), got: $c_out"; exit 1; }
+[ "$(grep -c "cwd=$p092/work" "$FAKE_CLI_LOG")" -eq 4 ] \
+  || { echo "FAIL: P092-c each CLI should run once in the workdir, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
+echo "PASS: P092-c — claude/codex/cursor/kimi final text captured from each CLI's real output channel"
+
+# (d) model templating: an earlier shell step picks the model.
+cat > "$p092/tmpl.sop.json" <<'JSON'
+{ "name": "p092-tmpl", "steps": [
+  { "id": "pick", "type": "shell", "run": "echo '{\"model\":\"cursor:picked-model\"}'" },
+  { "id": "ask", "type": "llm", "model": "{{ pick.model }}", "prompt": "Say ok.",
+    "expected_output_schema": { "ok": { "type": "boolean", "required": true } } } ] }
+JSON
+: > "$p092/argv.jsonl"
+d_out="$(OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/tmpl.sop.json" --json)"
+jq -e 'select(.step=="ask") | .model == "cursor:picked-model" and .provider == "cursor"' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$d_out")/audit.jsonl" >/dev/null \
+  && jq -e '.argv | index(["--model","picked-model"])' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-d {{ pick.model }} should resolve to cursor:picked-model"; exit 1; }
+echo "PASS: P092-d — model is {{ var }}-templated from an earlier step's output"
+
+# (e) permission enforcement: kimi refuses read-only/workspace-write; bad values refused; unknown prefix refused.
+for spec in "kimi:k3 read-only kimi cannot enforce" "kimi: workspace-write kimi cannot enforce" \
+            "codex:x root permission must be" "gemini:x read-only no provider configured"; do
+  set -- $spec; want="${spec#* * }"
+  set +e
+  e_out="$(OSL_LLM_STUB='{"ok":true}' PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$1" "$2")" --json 2>/dev/null)"; e_rc=$?
+  set -e
+  [ "$e_rc" -ne 0 ] || { echo "FAIL: P092-e $1 $2 should fail"; exit 1; }
+  jq -e --arg w "$want" 'select(.step=="ask") | .status == "failed" and (.output.error | contains($w))' \
+    "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$e_out")/audit.jsonl" >/dev/null \
+    || { echo "FAIL: P092-e $1 $2 should fail with '$want'"; exit 1; }
+done
+echo "PASS: P092-e — a permission the CLI cannot back is refused (kimi), bad permission and unknown prefix refused"
+
+# (f) judgment: auto-complete, low-confidence escalation + submit resume, require_human_review, no agent.
+cat > "$p092/jd.sop.json" <<'JSON'
+{ "name": "p092-jd", "steps": [
+  { "id": "judge", "type": "judgment", "model": "codex:x", "prompt": "Decide.",
+    "judgment": { "allow_agent": true, "confidence_threshold": 0.8 },
+    "outputs": [ { "name": "decision", "type": "enum", "values": ["approve", "reject"] } ] },
+  { "id": "after", "type": "shell", "run": "jq -c '{saw: .judge.decision}'" } ] }
+JSON
+f_out="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.95}' "$cli" run "$p092/jd.sop.json" --json)"
+[ "$(jq -r '.status' <<<"$f_out")" = completed ] \
+  && [ "$(jq -r '.after.saw' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$f_out")/context.json")" = approve ] \
+  || { echo "FAIL: P092-f confident judgment should auto-complete, got: $f_out"; exit 1; }
+echo "PASS: P092-f — judgment above confidence_threshold completes with the agent's outputs"
+
+set +e
+f_bad="$(OSL_LLM_STUB='{"decision":"maybe","confidence":0.95}' "$cli" run "$p092/jd.sop.json" --json 2>/dev/null)"
+set -e
+[ "$(jq -r '.status' <<<"$f_bad")" = failed ] || { echo "FAIL: P092-f judgment outside the decision enum should fail validation"; exit 1; }
+echo "PASS: P092-f — judgment output is validated against the step's outputs (enum)"
+
+f_low="$(OSL_LLM_STUB='{"decision":"reject","confidence":0.3}' "$cli" run "$p092/jd.sop.json" --json)"
+f_rid="$(jq -r .run_id <<<"$f_low")"
+jq -e '.status == "waiting" and .waiting.reason == "escalated" and .waiting.step == "judge" and .waiting.expects.outputs == ["decision"]' <<<"$f_low" >/dev/null \
+  || { echo "FAIL: P092-f low confidence should pause escalated, got: $f_low"; exit 1; }
+jq -e 'select(.step=="judge" and .status=="waiting") | .reason == "escalated" and .escalation == "low_confidence" and .proposal.decision == "reject"' \
+  "$OPENSOP_LOCAL_HOME/runs/$f_rid/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-f escalated receipt should carry escalation + proposal"; exit 1; }
+set +e
+"$cli" submit "$f_rid" judge --output decision=perhaps --json >/dev/null 2>&1; f_v=$?
+set -e
+[ "$f_v" -ne 0 ] || { echo "FAIL: P092-f submit should validate decision against the enum"; exit 1; }
+f_sub="$("$cli" submit "$f_rid" judge --output decision=approve --decided-by human:reviewer --json)"
+[ "$(jq -r '.status' <<<"$f_sub")" = completed ] \
+  && [ "$(jq -r '.after.saw' "$OPENSOP_LOCAL_HOME/runs/$f_rid/context.json")" = approve ] \
+  || { echo "FAIL: P092-f submit should resume the escalated judgment, got: $f_sub"; exit 1; }
+echo "PASS: P092-f — low confidence escalates (reason escalated, proposal kept); submit validates and resumes"
+
+jq '.steps[0].judgment.require_human_review = true' "$p092/jd.sop.json" > "$p092/jd-hr.sop.json"
+f_hr="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.99}' "$cli" run "$p092/jd-hr.sop.json" --json)"
+jq -e 'select(.step=="judge" and .status=="waiting") | .escalation == "require_human_review"' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$f_hr")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-f require_human_review should escalate even when confident"; exit 1; }
+jq 'del(.steps[0].judgment.allow_agent)' "$p092/jd.sop.json" > "$p092/jd-na.sop.json"
+: > "$FAKE_CLI_LOG"
+f_na="$(PATH="$p092/bin:$PATH" "$cli" run "$p092/jd-na.sop.json" --json)"
+[ "$(jq -r '.waiting.reason' <<<"$f_na")" = escalated ] && [ ! -s "$FAKE_CLI_LOG" ] \
+  && jq -e 'select(.step=="judge") | .escalation == "no_agent"' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$f_na")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-f judgment without allow_agent should escalate immediately, no agent call"; exit 1; }
+echo "PASS: P092-f — require_human_review escalates; no allow_agent escalates at once without calling an agent"
+
+# (g) loop: for_each (concat + sum), repeat_until, max_iterations exceeded, pausing body refused, while.
+cat > "$p092/loop.sop.json" <<'JSON'
+{ "name": "p092-loop", "inputs": { "cap": "5" }, "steps": [
+  { "id": "fetch", "type": "shell", "run": "echo '{\"leads\":[{\"n\":\"a\",\"s\":1},{\"n\":\"b\",\"s\":2},{\"n\":\"c\",\"s\":3}]}'" },
+  { "id": "each", "type": "loop",
+    "loop": { "for_each": "steps.fetch.outputs.leads[*]", "as": "lead", "max_iterations": "{{ process.inputs.cap }}",
+              "aggregate": { "names": "concat", "total": "sum" } },
+    "body": [ { "id": "score", "type": "shell", "run": "jq -c '{names: [.loop.lead.n], total: .loop.lead.s}'" } ] },
+  { "id": "until", "type": "loop",
+    "loop": { "repeat_until": "steps.bump.outputs.k >= 3", "max_iterations": 10, "aggregate": { "k": "last" } },
+    "body": [ { "id": "bump", "type": "shell", "run": "jq -c '{k: ((.bump.k // 0) + 1)}'" } ] },
+  { "id": "whl", "type": "loop", "loop": { "while": "loop.index < 2" },
+    "body": [ { "id": "noop1", "type": "noop" } ] } ] }
+JSON
+g_out="$("$cli" run "$p092/loop.sop.json" --json)"
+g_ctx="$(cat "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_out")/context.json")"
+jq -e '.each == {iterations: 3, names: ["a","b","c"], total: 6}' <<<"$g_ctx" >/dev/null \
+  || { echo "FAIL: P092-g for_each concat+sum, got: $(jq -c .each <<<"$g_ctx")"; exit 1; }
+echo "PASS: P092-g — for_each over a step output aggregates concat + sum; max_iterations from process.inputs"
+jq -e '.until == {iterations: 3, k: 3}' <<<"$g_ctx" >/dev/null \
+  || { echo "FAIL: P092-g repeat_until should stop at k>=3 carrying state across iterations, got: $(jq -c .until <<<"$g_ctx")"; exit 1; }
+jq -e '.whl.iterations == 2 and (has("score") | not) and (has("bump") | not)' <<<"$g_ctx" >/dev/null \
+  || { echo "FAIL: P092-g while should run 2 iterations; body outputs must not leak to the parent context"; exit 1; }
+echo "PASS: P092-g — repeat_until terminates on its predicate; while checks at start; body outputs stay inside the loop"
+
+jq '.steps[2].loop.max_iterations = 2' "$p092/loop.sop.json" > "$p092/loop-max.sop.json"
+set +e
+g_max="$("$cli" run "$p092/loop-max.sop.json" --json 2>/dev/null)"; g_rc=$?
+set -e
+[ "$g_rc" -ne 0 ] && jq -e 'select(.step=="until") | .status == "failed" and (.output.error | contains("max_iterations (2)"))' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_max")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-g reaching max_iterations unsatisfied should fail the step clearly"; exit 1; }
+echo "PASS: P092-g — max_iterations reached without the predicate satisfied fails with a clear error"
+
+cat > "$p092/loop-pause.sop.json" <<'JSON'
+{ "name": "p092-loop-pause", "steps": [
+  { "id": "lp", "type": "loop", "loop": { "for_each": ["x"] },
+    "body": [ { "id": "gate", "type": "approval" } ] } ] }
+JSON
+set +e
+g_p="$("$cli" run "$p092/loop-pause.sop.json" --json 2>/dev/null)"; g_rc=$?
+set -e
+[ "$g_rc" -ne 0 ] && [ "$(jq -r .status <<<"$g_p")" = failed ] \
+  && jq -e 'select(.step=="lp") | .output.error | contains("body step '"'"'gate'"'"' (approval) paused")' \
+       "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_p")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-g a pausing body step should fail the loop clearly, got: $g_p"; exit 1; }
+echo "PASS: P092-g — a pausing body step (approval) is refused with a clear error, not silently skipped"
+
+unset FAKE_CLI_LOG
+rm -rf "$p092"
 
 # Cleanup.
 unset OPENSOP_SOPS_BASE
