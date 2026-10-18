@@ -970,7 +970,11 @@ sandbox, so a `kimi:` step must declare `full-access`:
 ```
 
 The step receipt records `provider`, `model`, `permission` and the CLI's
-`cli_version`. Validation covers the full mini-grammar recursively for every
+`cli_version`, plus `attempts` and `usage: {input_tokens, output_tokens,
+cache_read_tokens, cost_usd}` summed over all attempts. `input_tokens` counts
+every input token processed, with `cache_read_tokens` as its cached subset. A
+field the provider does not report is `null` (only `claude-code:` reports a
+dollar cost; `kimi:` reports no usage). Validation covers the full mini-grammar recursively for every
 provider: `object` (nested `properties`, or an object of field specs as
 shorthand), `array[<type>]` (each item checked), `enum[a,b]`, and the scalars.
 

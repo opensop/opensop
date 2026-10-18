@@ -3106,6 +3106,46 @@ _local_exit_check() {
   esac
 }
 
+# _local_llm_add_usage <source> <raw_output>
+# Parse one llm call's token usage + cost and add it to s_llm_usage (the
+# caller's, summed across retries). Normalized so providers compare:
+#   input_tokens      — every input token the call processed, cached included
+#   cache_read_tokens — the cached subset of input_tokens
+#   output_tokens, cost_usd — null where the provider reports nothing
+# Sources (verified against each CLI's real output):
+#   claude-code / anthropic: .usage {input, cache_creation_input, cache_read_input,
+#     output}_tokens; claude-code adds .total_cost_usd. input_tokens there excludes
+#     cache tokens, so they are added back in.
+#   codex: --json JSONL, every turn.completed .usage {input_tokens (cached
+#     included), cached_input_tokens, output_tokens}; no dollar figure.
+#   cursor: --output-format json .usage {inputTokens, outputTokens, cacheReadTokens}.
+#   kimi: reports no usage (text and stream-json alike) → null.
+_local_llm_add_usage() {
+  local u=""
+  case "$1" in
+    claude-code|anthropic)
+      u="$(jq -c '.usage as $u | if $u == null then null else
+            {input_tokens: (if $u.input_tokens == null then null
+                            else $u.input_tokens + ($u.cache_creation_input_tokens // 0) + ($u.cache_read_input_tokens // 0) end),
+             output_tokens: $u.output_tokens, cache_read_tokens: $u.cache_read_input_tokens,
+             cost_usd: (.total_cost_usd // null)} end' <<<"$2" 2>/dev/null)" || u="" ;;
+    codex)
+      u="$(jq -Rsc '[split("\n")[] | fromjson? | select(.type? == "turn.completed") | .usage | objects]
+            | if length == 0 then null else
+              {input_tokens: (map(.input_tokens // 0) | add), output_tokens: (map(.output_tokens // 0) | add),
+               cache_read_tokens: (map(.cached_input_tokens // 0) | add), cost_usd: null} end' <<<"$2" 2>/dev/null)" || u="" ;;
+    cursor)
+      u="$(jq -c '.usage as $u | if $u == null then null else
+            {input_tokens: $u.inputTokens, output_tokens: $u.outputTokens,
+             cache_read_tokens: $u.cacheReadTokens, cost_usd: null} end' <<<"$2" 2>/dev/null)" || u="" ;;
+  esac
+  [[ -z "$u" ]] && u="null"
+  s_llm_usage="$(jq -cn --argjson a "$s_llm_usage" --argjson b "$u" '
+    if $b == null then $a elif $a == null then $b
+    else reduce ("input_tokens", "output_tokens", "cache_read_tokens", "cost_usd") as $f ({};
+      .[$f] = (if $a[$f] == null and $b[$f] == null then null else ($a[$f] // 0) + ($b[$f] // 0) end)) end')"
+}
+
 # _local_mark_exited <run_dir> <step_id> <exit_outputs_json> — record an
 # exit_when early exit on the manifest (the run then finalizes as completed).
 _local_mark_exited() {
@@ -3363,6 +3403,7 @@ _local_step_loop() {
     # C1a: per-step metrics; llm-specific fields are set inside the llm case below.
     local s_llm_model="" s_llm_tokens_in=0 s_llm_tokens_out=0 s_llm_token_source="none"
     local s_llm_provider="" s_llm_permission="" s_llm_cli_version="" lp_exit=""
+    local s_llm_usage="null" s_llm_attempts=0   # summed across retries; see _local_llm_add_usage
 
     # SPEC §3.2 condition: evaluated before dispatch; false → the step is
     # skipped (a "skipped" receipt, no output in context). An expression the
@@ -3714,6 +3755,7 @@ No prose, no code fences. Output only the JSON object."
         # Retry loop — only entered when all pre-checks passed (llm_ok=true).
         local llm_attempt=1 llm_last_errors="" llm_validated="" llm_failed=false
         while [[ "$llm_ok" == true && "$llm_attempt" -le "$llm_max_attempts" ]]; do
+          s_llm_attempts=$(( s_llm_attempts + 1 ))
           # Prepend corrective preamble on retry.
           local llm_attempt_prompt
           if [[ "$llm_attempt" -gt 1 && -n "$llm_last_errors" ]]; then
@@ -3748,7 +3790,7 @@ $llm_attempt_prompt"
                 llm_argv+=(-- "$llm_full_prompt") ;;
               codex)
                 llm_lastmsg="$(mktemp)"
-                llm_argv=(codex exec --skip-git-repo-check --ephemeral --color never -C "$llm_workdir" -o "$llm_lastmsg")
+                llm_argv=(codex exec --skip-git-repo-check --ephemeral --color never --json -C "$llm_workdir" -o "$llm_lastmsg")
                 [[ -n "$llm_cli_model" ]] && llm_argv+=(-m "$llm_cli_model")
                 case "$llm_perm" in
                   read-only)       llm_argv+=(-s read-only) ;;
@@ -3757,7 +3799,7 @@ $llm_attempt_prompt"
                 esac
                 llm_argv+=(-- "$llm_full_prompt") ;;
               cursor)
-                llm_argv=(cursor-agent -p --output-format text --trust --workspace "$llm_workdir")
+                llm_argv=(cursor-agent -p --output-format json --trust --workspace "$llm_workdir")
                 [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
                 case "$llm_perm" in
                   read-only)       llm_argv+=(--mode ask) ;;
@@ -3787,8 +3829,11 @@ $llm_attempt_prompt"
             local llm_cli_out="" llm_cli_rc=0 llm_to=()
             [[ -n "$llm_timeout" ]] && llm_to=(timeout --kill-after=10 "$llm_timeout")
             llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" </dev/null 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
+            # Usage first: a failed or timed-out call may still have spent tokens.
+            _local_llm_add_usage "$llm_cli" "$llm_cli_out"
             # The codex -o file is read and removed here on every outcome (success,
-            # failure, timeout) — nothing below may `continue` past it.
+            # failure, timeout) — nothing below may `continue` past it. (codex's
+            # stdout is the --json event stream; the final message is the -o file.)
             if [[ "$llm_cli" == codex && -n "$llm_lastmsg" ]]; then
               llm_cli_out="$(cat "$llm_lastmsg" 2>/dev/null || true)"; rm -f "$llm_lastmsg"
             fi
@@ -3799,10 +3844,10 @@ $llm_attempt_prompt"
               out_raw="{\"error\":\"$llm_bin exited $llm_cli_rc (stderr in this receipt)\"}"; rc=1; llm_failed=true; llm_ok=false; continue
             fi
             case "$llm_cli" in
-              claude-code)
+              claude-code|cursor)
                 # --output-format json: a single result object; .result is the final text.
                 if ! llm_raw_text="$(jq -er 'if .is_error == true then error("is_error") else .result end | strings' <<<"$llm_cli_out" 2>/dev/null)"; then
-                  out_raw="$(jq -nc --arg o "${llm_cli_out:0:300}" '{error:"claude -p returned no result text", detail:$o}')"; rc=1; llm_failed=true; llm_ok=false; continue
+                  out_raw="$(jq -nc --arg b "$llm_bin" --arg o "${llm_cli_out:0:300}" '{error:($b + " returned no result text"), detail:$o}')"; rc=1; llm_failed=true; llm_ok=false; continue
                 fi ;;
               # kimi prints the final answer on stdout behind a "• " bullet (thinking goes to stderr).
               kimi) llm_raw_text="$(sed '1s/^• //' <<<"$llm_cli_out")" ;;
@@ -3845,6 +3890,7 @@ $llm_attempt_prompt"
             fi
 
             local llm_resp_json; llm_resp_json="$(cat "$llm_resp_tmp")"; rm -f "$llm_resp_tmp"
+            _local_llm_add_usage anthropic "$llm_resp_json"
 
             # C1a: capture token usage from the Anthropic response (usage block).
             # Only update the outer metrics variables on the final (successful) attempt;
@@ -3973,11 +4019,13 @@ $llm_attempt_prompt"
                  --arg a "$s_started" --argjson dur "$_jd_pause_ms" --arg why "$jd_escalate" \
                  --argjson prop "$jd_proposal" --arg pv "$s_llm_provider" --arg m "$s_llm_model" \
                  --arg perm "$s_llm_permission" --arg cv "$s_llm_cli_version" \
+                 --argjson usage "$s_llm_usage" --argjson att "$s_llm_attempts" \
             '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
               reason:"escalated", escalation:$why, started_at:$a,
               duration_ms:$dur, result_hash:"pending"}
              + (if $prop != null then {proposal:$prop} else {} end)
-             + ({provider:$pv, model:$m, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))' >> "$audit"
+             + ({provider:$pv, model:$m, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))
+             + (if $att > 0 then {usage: ($usage // {input_tokens:null, output_tokens:null, cache_read_tokens:null, cost_usd:null}), attempts:$att} else {} end)' >> "$audit"
           echo "waiting:$i"
           return 0
         fi ;;
@@ -4715,8 +4763,10 @@ $llm_attempt_prompt"
         --argjson tout "$s_llm_tokens_out" \
         --arg src "$s_llm_token_source" \
         --arg pv "$s_llm_provider" --arg perm "$s_llm_permission" --arg cv "$s_llm_cli_version" \
+        --argjson usage "$s_llm_usage" --argjson att "$s_llm_attempts" \
         '{model:$model, tokens_in:$tin, tokens_out:$tout, token_source:$src}
-         + ({provider:$pv, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))')"
+         + ({provider:$pv, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))
+         + {usage: ($usage // {input_tokens:null, output_tokens:null, cache_read_tokens:null, cost_usd:null}), attempts:$att}')"
     fi
     jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg st "$sstatus" --argjson rc "$rc" \
       --arg a "$s_started" --arg b "$s_ended" --argjson out "$out_json" --arg se "$serr" \

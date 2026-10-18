@@ -9471,11 +9471,18 @@ for b in claude codex cursor-agent kimi; do
 [ "${1:-}" = "--version" ] && { echo "fake-$(basename "$0") 1.0"; exit 0; }
 echo "$(basename "$0") cwd=$PWD" >> "$FAKE_CLI_LOG"
 [ -n "${FAKE_SLEEP:-}" ] && exec sleep "$FAKE_SLEEP"
+# FAKE_BAD_FIRST=<file>: the first call answers schema-invalid JSON (forces one retry).
+ans='{"ok":true}'
+if [ -n "${FAKE_BAD_FIRST:-}" ] && [ ! -e "$FAKE_BAD_FIRST" ]; then : > "$FAKE_BAD_FIRST"; ans='{"nope":1}'; fi
 case "$(basename "$0")" in
-  claude) printf '%s' '{"type":"result","is_error":false,"result":"{\"ok\":true}"}' ;;
-  codex)  while [ $# -gt 0 ]; do [ "$1" = "-o" ] && printf '{"ok":true}' > "$2"; shift; done ;;
-  cursor-agent) echo '{"ok":true}' ;;
-  kimi)   echo '• {"ok":true}' ;;
+  claude) jq -cn --arg r "$ans" '{type:"result", is_error:false, result:$r, total_cost_usd:0.25,
+            usage:{input_tokens:10, cache_creation_input_tokens:5, cache_read_input_tokens:100, output_tokens:7}}' ;;
+  codex)  echo '{"type":"thread.started","thread_id":"t"}'
+          echo '{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":3,"reasoning_output_tokens":0}}'
+          while [ $# -gt 0 ]; do [ "$1" = "-o" ] && printf '%s' "$ans" > "$2"; shift; done ;;
+  cursor-agent) jq -cn --arg r "$ans" '{type:"result", subtype:"success", is_error:false, result:$r,
+            usage:{inputTokens:30, outputTokens:4, cacheReadTokens:10, cacheWriteTokens:0}}' ;;
+  kimi)   echo "• $ans" ;;
 esac
 SH
   chmod +x "$p092/bin/$b"
@@ -9816,6 +9823,25 @@ _m_run full-access '{{ nope.permission }}' | jq -e '.status == "failed" and (.ou
 _m_run workspace-write '{{ pick.permission }}' | jq -e '.status == "failed" and (.output.error | contains("kimi cannot enforce"))' >/dev/null \
   || { echo "FAIL: P092-m a templated permission kimi cannot back should still be refused"; exit 1; }
 echo "PASS: P092-m — permission is {{ ref }}-templated from an earlier step and the rendered value is vocabulary-checked"
+
+# (n) usage + cost per CLI call land in the receipt, summed across retries, with an attempts count.
+for spec in 'claude-code:x read-only {"input_tokens":230,"output_tokens":14,"cache_read_tokens":200,"cost_usd":0.5}' \
+            'codex:x read-only {"input_tokens":100,"output_tokens":6,"cache_read_tokens":40,"cost_usd":null}' \
+            'cursor:x read-only {"input_tokens":60,"output_tokens":8,"cache_read_tokens":20,"cost_usd":null}' \
+            'kimi:x full-access {"input_tokens":null,"output_tokens":null,"cache_read_tokens":null,"cost_usd":null}'; do
+  set -- $spec
+  rm -f "$p092/bad-first"
+  n_out="$(FAKE_BAD_FIRST="$p092/bad-first" PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json)" \
+    || { echo "FAIL: P092-n $1 run should complete after one retry"; exit 1; }
+  jq -e --argjson want "$3" 'select(.step=="ask") | .usage == $want and .attempts == 2' \
+    "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_out")/audit.jsonl" >/dev/null \
+    || { echo "FAIL: P092-n $1 usage should be $3 over 2 attempts, got $(jq -c 'select(.step=="ask") | {usage, attempts}' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_out")/audit.jsonl")"; exit 1; }
+done
+n_stub="$(OSL_LLM_STUB='{"ok":true}' "$cli" run "$(_p092_proc codex:x read-only)" --json)"
+jq -e 'select(.step=="ask") | .usage == {input_tokens:null, output_tokens:null, cache_read_tokens:null, cost_usd:null} and .attempts == 1' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_stub")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-n the stub path should record null usage and attempts 1"; exit 1; }
+echo "PASS: P092-n — per-call usage (tokens, cache reads, cost) is normalized, summed across retries, with attempts, per CLI"
 
 unset FAKE_CLI_LOG
 rm -rf "$p092"
