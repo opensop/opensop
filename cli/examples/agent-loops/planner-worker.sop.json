@@ -1,0 +1,50 @@
+{
+  "opensop": "0.9.1",
+  "name": "planner-worker",
+  "version": "1.0.0",
+  "description": "A minimal agentic loop: a planner splits the request into units, workers implement them in order, a test gate checks, and a fresh reviewer judges. Repeat until the gate passes and the reviewer accepts; the next planner gets the reviewer's feedback.",
+  "inputs": {
+    "workdir": "",
+    "request": "",
+    "request_file": "",
+    "test_command": "",
+    "planner": "claude-code:claude-opus-5-5",
+    "worker": "claude-code:claude-sonnet-5-5",
+    "worker_permission": "workspace-write",
+    "reviewer": "claude-code:claude-opus-5-5",
+    "max_cycles": "4"
+  },
+  "agent_contract": { "kind": "planner", "owns": "task", "may_spawn": true, "lateral_communication": "forbidden" },
+  "isolation": { "repository": "independent-checkout" },
+  "steps": [
+    { "id": "task", "type": "automated", "run": "steps/setup.sh",
+      "description": "Check the inputs; record the request and the base commit." },
+    {
+      "id": "cycle", "type": "loop",
+      "loop": { "repeat_until": "steps.judge.outputs.done == 1", "max_iterations": "{{ process.inputs.max_cycles }}",
+                "aggregate": { "done": "last" } },
+      "body": [
+        { "id": "plan", "type": "llm", "model": "{{ process.inputs.planner }}", "permission": "read-only",
+          "workdir": "{{ process.inputs.workdir }}", "prompt_file": "prompts/planner.md", "timeout": "20m",
+          "expected_output_schema": { "units": { "type": "array", "required": true }, "summary": { "type": "string", "required": true } } },
+        {
+          "id": "build", "type": "loop",
+          "loop": { "for_each": "steps.plan.outputs.units[*]", "as": "unit", "max_iterations": 6, "aggregate": { "report": "concat" } },
+          "body": [
+            { "id": "work", "type": "llm", "model": "{{ process.inputs.worker }}", "permission": "{{ process.inputs.worker_permission }}",
+              "workdir": "{{ process.inputs.workdir }}", "prompt_file": "prompts/worker.md", "timeout": "60m",
+              "expected_output_schema": { "report": { "type": "string", "required": true } } }
+          ]
+        },
+        { "id": "gate", "type": "automated", "run": "steps/gate.sh" },
+        { "id": "diffs", "type": "automated", "run": "steps/diffs.sh" },
+        { "id": "review", "type": "llm", "model": "{{ process.inputs.reviewer }}", "permission": "read-only",
+          "workdir": "{{ process.inputs.workdir }}", "prompt_file": "prompts/reviewer.md", "timeout": "20m",
+          "expected_output_schema": { "verdict": { "type": "enum", "values": ["accept", "revise"], "required": true },
+                                      "feedback": { "type": "string", "required": true } } },
+        { "id": "judge", "type": "shell",
+          "run": "jq -c '{done: (if .gate.passed == true and .review.verdict == \"accept\" then 1 else 0 end)}'" }
+      ]
+    }
+  ]
+}

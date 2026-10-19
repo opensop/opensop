@@ -49,6 +49,8 @@ bash test/test.sh                      # golden test
 | `webhook` | sync → No; callback → Yes — `waiting_for_callback` | `submit --output k=v` | sync asserts 2xx; poll mode not yet implemented |
 | `subprocess` | Propagates child pause | child resume | Recursive local execution; depth-guarded (max 16) |
 
+**Try it with coding agents:** [`examples/agent-loops/`](examples/agent-loops/) has two ready-to-run loops (`planner-worker`, `dev-loop`) that drive local `claude` / `codex` / `cursor-agent` / `kimi` CLIs against a git checkout, using `llm`, `loop` and a test-command gate.
+
 **Pause/resume lifecycle:** when a step pauses the run, `manifest.status` becomes `waiting` and `manifest.waiting` records the step, reason, and what outputs are expected. Resume with:
 
 ```bash
