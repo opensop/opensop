@@ -10224,6 +10224,43 @@ jq -e '.hint == "git clone https://github.com/opensop/opensop && cd opensop && c
 echo "PASS: P0100-t — onboard has no bench step; its next steps work on a curl install"
 rm -rf "$p0100t"
 
+# (u) remote status in a terminal renders without touching local-only state
+# (it used to hit `run_dir: unbound variable`). A loopback stub serves the run.
+if command -v script >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  p0100u="$(mktemp -d)"
+  printf 'r-1\tdemo\n' > "$p0100u/instances.tsv"
+  cat > "$p0100u/srv.py" <<'PY'
+import http.server, json, sys
+body = json.dumps({"id": "r-1", "process": {"name": "demo"}, "state": "completed",
+                   "steps": [{"step_id": "a", "type": "automated", "state": "completed"}]}).encode()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
+PY
+  python3 "$p0100u/srv.py" > "$p0100u/port" & u_pid=$!
+  for _ in $(seq 50); do [ -s "$p0100u/port" ] && break; sleep 0.1; done
+  u_rc=0; u_out="$(OPENSOP_HOME="$p0100u" script -qec "'$cli' --server http://127.0.0.1:$(cat "$p0100u/port") status r-1" /dev/null 2>&1)" || u_rc=$?
+  kill "$u_pid" 2>/dev/null; wait "$u_pid" 2>/dev/null || true
+  [ "$u_rc" = 0 ] && grep -q completed <<<"$u_out" && ! grep -q unbound <<<"$u_out" \
+    || { echo "FAIL: P0100-u remote TTY status (rc=$u_rc): $u_out"; exit 1; }
+  echo "PASS: P0100-u — remote status renders in a terminal"
+  rm -rf "$p0100u"
+fi
+
+# (v) fork also copies scripts that `shell` steps run.
+p0100v="$(mktemp -d)"; v_team="$p0100v/org/team"; mkdir -p "$v_team" "$p0100v/org/processes/steps"
+( cd "$p0100v/org" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+( cd "$v_team" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+printf '#!/bin/sh\necho "{\\"ok\\":true}"\n' > "$p0100v/org/processes/steps/check.sh"; chmod +x "$p0100v/org/processes/steps/check.sh"
+echo '{"opensop":"0.9.1","name":"chk","version":"1","steps":[{"id":"c","type":"shell","run":"steps/check.sh"}]}' > "$p0100v/org/processes/chk.sop.json"
+v_out="$(cd "$v_team" && env -u OPENSOP_LOCAL_HOME "$cli" fork chk --json)"
+jq -e --arg d "$v_team/processes/steps/check.sh" '.copied_scripts == [$d]' <<<"$v_out" >/dev/null \
+  || { echo "FAIL: P0100-v fork shell script: $v_out"; exit 1; }
+echo "PASS: P0100-v — fork copies the scripts shell steps run"
+rm -rf "$p0100v"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

@@ -687,7 +687,7 @@ cmd_fork() {
     snapshot="$(jq -c '{status: (.status // ""), metadata: (.metadata // {})}' <<<"$parent_entry")"
   fi
 
-  # Copy the process file, plus the relative `run:` scripts its automated
+  # Copy the process file, plus the relative `run:` scripts its automated and shell
   # steps (loop bodies included) reference, resolved the way the engine does
   # (next to the process file, else the cell root) and kept at the same
   # relative path. No-clobber: an existing file in the child is left alone.
@@ -706,7 +706,7 @@ cmd_fork() {
       break
     done
   done < <(jq -r '[.steps[]? | recurse(.body? | if type == "array" then .[] elif type == "object" then . else empty end)]
-                 | .[] | select(type == "object" and .type == "automated") | .run // empty' "$src_file")
+                 | .[] | select(type == "object" and (.type == "automated" or .type == "shell")) | .run // empty' "$src_file")
 
   # Create the child lineage entry with forked_from set.
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1776,7 +1776,6 @@ cmd_status() {
     printf '%sinstance:%s %s\n' "$C_BOLD" "$C_RESET" "$id"
     printf '%sprocess:%s  %s\n' "$C_BOLD" "$C_RESET" "$name"
     printf '%sstate:%s    %s%s%s%s\n' "$C_BOLD" "$C_RESET" "$color" "$state" "$C_RESET" "${ended:+ ($ended)}"
-    printf '%sreceipts:%s %s\n' "$C_BOLD" "$C_RESET" "$run_dir"
     echo "$resp" | jq -r '
       if .error then "\nfailed at \(.error.step) (exit \(.error.exit_code // "?")): \(.error.message)\nnext: opensop heal \(.id) --apply   (after fixing the cause)"
       elif .waiting then "\nwaiting on \(.waiting.step) (\(.waiting.reason))\(if .waiting.description then ": " + .waiting.description else "" end)\nnext: opensop submit \(.id) \(.waiting.step)\([.waiting.expects.outputs[]? | " --output " + . + "=..."] | join(""))"
