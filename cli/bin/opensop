@@ -1686,7 +1686,7 @@ build_payload_object() {
       [[ "$kv" != *=* ]] && die "--$noun expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
       # If value parses as JSON (number, bool, null, object, array), use raw; else string.
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         payload=$(echo "$payload" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         payload=$(echo "$payload" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -1700,7 +1700,7 @@ build_payload_object() {
     for kv in "${metadata_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--metadata expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         metadata=$(echo "$metadata" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         metadata=$(echo "$metadata" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -2723,7 +2723,7 @@ cmd_dry_run() {
     for kv in "${kv_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--input expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         inputs=$(echo "$inputs" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         inputs=$(echo "$inputs" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -4920,7 +4920,7 @@ $llm_attempt_prompt"
     esac
 
     local out_json
-    if jq -e . >/dev/null 2>&1 <<<"$out_raw"; then
+    if jq -e 'true' >/dev/null 2>&1 <<<"$out_raw"; then
       out_json="$(jq -c 'if type=="object" then . else {value:.} end' <<<"$out_raw")"
     else
       out_json="$(jq -nc --arg s "$out_raw" '{stdout:$s}')"
@@ -5568,7 +5568,7 @@ local_submit() {
 
   # Inject the submitted outputs under the step id (same merge shape as local_run ~:1926).
   local out_json
-  if jq -e . >/dev/null 2>&1 <<<"$submitted"; then
+  if jq -e 'true' >/dev/null 2>&1 <<<"$submitted"; then
     out_json="$(jq -c 'if type=="object" then . else {value:.} end' <<<"$submitted")"
   else
     out_json="$(jq -nc --arg s "$submitted" '{stdout:$s}')"
@@ -5985,7 +5985,7 @@ local_dry_run() {
     for kv in "${kv_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--input expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         inputs=$(echo "$inputs" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         inputs=$(echo "$inputs" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -6126,6 +6126,23 @@ local_status() {
        run_dir:      $dir,
        steps:        $steps
      }')"
+  # A failed loop iteration or subprocess child reports only "see <dir>": follow
+  # those receipts down (bounded) so the error names the step that really failed.
+  local _emsg _edir _inner _depth=0
+  _emsg="$(jq -r '.error.message // empty' <<<"$resp")"
+  while (( _depth++ < 5 )) && [[ "$_emsg" =~ \((receipts:|see)\ ([^\)]+)\)$ ]]; do
+    _edir="${BASH_REMATCH[2]%/}"
+    [ -f "$_edir/audit.jsonl" ] || break
+    _inner="$(jq -sc '[.[] | select(.status == "failed")] | last // empty
+      | {step, exit_code, message: ([.output.error?, .stderr, (.output | if type == "object" then .stdout else . end)]
+          | map(select(. != null and . != "") | if type == "string" then . else tojson end) | first // "")}' \
+      "$_edir/audit.jsonl" 2>/dev/null)" || break
+    [ -n "$_inner" ] || break
+    resp="$(jq -c --argjson i "$_inner" '.error.message = ((.error.message + " → " + $i.step
+      + " (exit " + (($i.exit_code // "?") | tostring) + "): " + $i.message) | .[-2000:])' <<<"$resp")"
+    _emsg="$(jq -r '.message' <<<"$_inner")"
+  done
+
   # Render {{ ref }} in the waiting step's text against the run's context.
   local _wdesc _wrendered
   _wdesc="$(jq -r '.waiting.description // empty' <<<"$resp")"

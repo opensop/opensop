@@ -10261,6 +10261,24 @@ jq -e --arg d "$v_team/processes/steps/check.sh" '.copied_scripts == [$d]' <<<"$
 echo "PASS: P0100-v — fork copies the scripts shell steps run"
 rm -rf "$p0100v"
 
+# (w) status follows a failed loop iteration / subprocess child down to the step
+# that really failed; typed boolean inputs accept false.
+p0100w="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100w/home"
+echo '{"opensop":"0.9.1","name":"wl","version":"1","inputs":{"xs":[1]},"steps":[{"id":"lp","type":"loop","loop":{"for_each":"process.inputs.xs"},"body":[{"id":"bad","type":"shell","run":"echo loop-detail >&2; exit 7"}]}]}' > "$p0100w/l.sop.json"
+w_id="$({ "$cli" run "$p0100w/l.sop.json" --json 2>/dev/null || true; } | jq -r .run_id)"
+"$cli" status "$w_id" --json | jq -e '.error.message | test("→ bad \\(exit 7\\): loop-detail$")' >/dev/null \
+  || { echo "FAIL: P0100-w loop error: $("$cli" status "$w_id" --json | jq -c .error)"; exit 1; }
+echo '{"opensop":"0.9.1","name":"wc","version":"1","steps":[{"id":"cbad","type":"shell","run":"echo child-detail >&2; exit 3"}]}' > "$p0100w/child.sop.json"
+jq -n --arg c "$p0100w/child.sop.json" '{opensop:"0.9.1",name:"wp",version:"1",steps:[{id:"call",type:"subprocess",process:$c}]}' > "$p0100w/parent.sop.json"
+w_id="$({ "$cli" run "$p0100w/parent.sop.json" --json 2>/dev/null || true; } | jq -r .run_id)"
+"$cli" status "$w_id" --json | jq -e '.error.message | test("→ cbad \\(exit 3\\): child-detail$")' >/dev/null \
+  || { echo "FAIL: P0100-w subprocess error: $("$cli" status "$w_id" --json | jq -c .error)"; exit 1; }
+echo '{"opensop":"0.9.1","name":"wb","version":"1","inputs":[{"name":"enabled","type":"boolean","required":true}],"steps":[{"id":"s","type":"noop"}]}' > "$p0100w/b.sop.json"
+"$cli" run "$p0100w/b.sop.json" --input enabled=false --json | jq -e '.status == "completed" and .inputs.enabled == false' >/dev/null \
+  || { echo "FAIL: P0100-w --input enabled=false should be boolean false"; exit 1; }
+echo "PASS: P0100-w — status names the nested step that failed; boolean inputs accept false"
+rm -rf "$p0100w"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
