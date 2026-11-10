@@ -6,10 +6,7 @@ OpenSOP is an open standard for processes as files, plus a local CLI that runs t
 
 **Please do NOT open a public issue for security reports.**
 
-Use one of these channels, in order of preference:
-
-1. **GitHub private vulnerability reporting** (preferred) — open [a private report](https://github.com/opensop/opensop/security/advisories/new) (Security tab → "Report a vulnerability"). This keeps the report private and gives us an audit trail.
-2. **Email** — `abkuri88@gmail.com` with subject prefix `[OpenSOP security]`. PGP key available on request.
+Report it through **GitHub private vulnerability reporting**: open [a private report](https://github.com/opensop/opensop/security/advisories/new) (Security tab → "Report a vulnerability"). This is the only reporting channel. It keeps the report private and gives us an audit trail.
 
 A good report includes:
 
