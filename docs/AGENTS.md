@@ -35,8 +35,8 @@ The CLI is a single bash file. No build step, no daemon, no package manager.
 |---|---|
 | `bash` 4+ | Everything (macOS ships 3.2 — install via `brew install bash`) |
 | `jq` | Everything |
-| `curl` | Remote server mode only |
-| `ANTHROPIC_API_KEY` | `llm` steps only |
+| `curl` | Install, `upgrade`, `pull`, `webhook` steps, `claude-*` `llm` steps, remote server mode |
+| A model | `llm` / `judgment` steps: `ANTHROPIC_API_KEY` for a `claude-*` model, or a signed-in `claude`, `codex`, `cursor-agent` or `kimi` CLI for the `claude-code:`, `codex:`, `cursor:`, `kimi:` providers |
 
 macOS: `brew install bash jq`
 Linux: `apt-get install -y jq curl`
@@ -44,11 +44,10 @@ Linux: `apt-get install -y jq curl`
 ### Install (one line)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/opensop/opensop/main/cli/bin/opensop \
-  -o /usr/local/bin/opensop && chmod +x /usr/local/bin/opensop
+curl -fsSL https://raw.githubusercontent.com/opensop/opensop/main/cli/install.sh | bash
 ```
 
-If `sudo` is needed for `/usr/local/bin`, use `~/.local/bin/opensop` and confirm it is on `$PATH`.
+It verifies the checksum and installs to `~/.local/bin/opensop`; confirm that directory is on `$PATH`.
 
 From source (hermetic / air-gapped):
 
@@ -60,7 +59,7 @@ cp /tmp/opensop/cli/bin/opensop /usr/local/bin/opensop && chmod +x /usr/local/bi
 Verify:
 
 ```bash
-opensop --version    # opensop 0.9.2
+opensop --version    # opensop 0.10.0
 opensop help         # full command reference
 ```
 
@@ -77,21 +76,19 @@ Before writing anything, check whether a process already exists.
 ### Keyword search
 
 ```bash
-opensop search lead                      # ranked text search (local)
-opensop --remote search lead             # same, against server library
+opensop search release                   # ranked text search over processes in the cell chain
 ```
 
 Output is ranked by name/description/tag match. Parse with `--json`:
 
 ```bash
-opensop search lead --json | jq '.[].name'
+opensop search release --json | jq '.[].name'
 ```
 
 ### Intent-based match
 
 ```bash
-opensop suggest "qualify an inbound lead"          # local
-opensop --remote suggest "score a prospect"        # server
+opensop suggest "get a release out the door"
 opensop suggest "extract action items" --threshold 0.6  # minimum confidence (0.0–1.0)
 ```
 
@@ -101,11 +98,10 @@ opensop suggest "extract action items" --threshold 0.6  # minimum confidence (0.
 
 ```bash
 opensop list                             # processes visible from cwd (cell chain)
-opensop list --tag extraction            # filter by tag
-opensop --remote list                    # server library
+opensop list --conflicts                 # mark processes shadowed by a nearer cell
 ```
 
-### Machine-readable command index (new in v0.9.1)
+### Machine-readable command index
 
 ```bash
 opensop help --json                      # full command registry as JSON
@@ -125,7 +121,7 @@ Search first. Write new only when:
 
 ## 3. Run
 
-v0.9.1 is local-first. `opensop run` runs on-machine with no server required.
+The CLI is local-first. `opensop run` runs on-machine with no server required.
 
 ### Start a run
 
@@ -139,7 +135,7 @@ With `--json`, the run emits a JSON object on stdout when it starts (or complete
 
 ```bash
 opensop run extract-action-items --input notes="..." --json
-# → {"run_id":"r-abc123","status":"running","process":"extract-action-items"}
+# → {"run_id":"20261110T153118Z-…","process":"extract-action-items","status":"completed",…}
 ```
 
 ### Validate without running
@@ -159,14 +155,15 @@ opensop steps  <run_id>                  # per-step state
 opensop steps  <run_id> --json
 ```
 
-`status` values: `running` | `waiting` | `completed` | `failed` | `interrupted`.
+`status --json` reports the run state in `.state`: `running` | `waiting` | `completed` | `failed` | `cancelled` | `interrupted`. It also carries `run_dir` (the receipts folder), `waiting` (step, reason, expected outputs, and the step's `description`) while paused, and `error: {step, exit_code, message}` after a failure.
 
-Poll until done:
+Poll until the run stops moving:
 
 ```bash
-until opensop status <run_id> --json | jq -e '.status != "running" and .status != "waiting"' >/dev/null; do
+until opensop status <run_id> --json | jq -e '.state != "running"' >/dev/null; do
   sleep 2
 done
+opensop status <run_id> --json | jq '{state, waiting, error}'
 ```
 
 ### Resume a paused step
@@ -177,14 +174,15 @@ Some step types pause the run:
 |---|---|---|
 | `form` | `waiting_for_input` | `opensop submit <run_id> <step-id> --output key=value` |
 | `approval` | `waiting_for_approval` | `opensop submit <run_id> <step-id> --output decision=approve` |
+| `judgment` (escalated) | `escalated` | `opensop submit <run_id> <step-id> --output decision=...` |
 | `webhook` callback | `waiting_for_callback` | `opensop submit <run_id> <step-id> --output key=value` |
 | `wait` with `until:` | `waiting_for_callback` | `opensop submit <run_id> <step-id>` |
 | `subprocess` | propagates child pause | Resume the child run; parent auto-continues |
 
-When paused, `manifest.waiting` records the step id, pause reason, and expected outputs. Inspect it:
+When paused, `status --json` (and `manifest.waiting`) records the step id, pause reason, and expected outputs. Inspect it:
 
 ```bash
-opensop show <run_id> --json | jq '.manifest.waiting'
+opensop status <run_id> --json | jq '.waiting'
 # → {"step":"collect-info","index":0,"reason":"waiting_for_input","expects":{"outputs":["notes"],"schema":[{"name":"notes","type":"string","required":true}]},"since":"..."}
 ```
 
@@ -212,19 +210,9 @@ opensop history --process extract-action-items --limit 10
 opensop compass                          # top processes by run-count, recency, failure rate
 ```
 
-### Remote server mode
+### Optional server
 
-```bash
-opensop config set url https://your-server.example.com
-opensop config set token <your-api-token>
-
-opensop --remote run extract-action-items --input notes="..."
-opensop --remote status <run_id>
-opensop --remote submit <run_id> <step-id> --output key=value
-opensop --remote schema extract-action-items    # full process definition from server
-```
-
-`--server <url>` overrides the configured URL for a single call.
+Any server implementing the [`SPEC.md`](../SPEC.md) `/sop/*` contract can run processes too: `opensop config set url https://sop.example.com`, then add `--remote` to dual commands (or `--server <url>` for one call). There is no maintained reference server; everything in this guide works locally.
 
 ---
 
@@ -299,12 +287,14 @@ Process files are JSON (`.sop.json`). Minimal skeleton:
       "model": "claude-haiku-4-5",
       "prompt": "Extract action items from these meeting notes: {{notes}}\n\nRespond with ONLY a JSON object of the form {\"action_items\": [{\"task\": \"...\", \"owner\": \"...\", \"due\": \"...\"}]}.",
       "expected_output_schema": {
-        "action_items": { "type": "array", "required": true }
+        "action_items": "array[object]"
       }
     }
   ]
 }
 ```
+
+`model` picks the provider: a `claude-*` model calls the Anthropic API (`ANTHROPIC_API_KEY`); `claude-code:<model>`, `codex:<model>`, `cursor:<model>` and `kimi:<model>` run that CLI non-interactively (empty `<model>` = the CLI's default), with an optional `permission` (`read-only` default, `workspace-write`, `full-access`) and `workdir`.
 
 Key rules:
 - `"opensop"` is optional in this bare form, but if present must be an allowlisted version — `0.9.1` for new files. (The wrapped/server form requires it.)
@@ -334,9 +324,9 @@ Key rules:
 
 Forward references (pointing to a step that hasn't run yet) fail at runtime.
 
-### The twelve step types
+### The step types
 
-Pick one per boundary. Stop if you need a type not in this list — you're likely over-engineering or need a spec extension.
+Pick one per boundary. Stop if you need a type not in this list — you're likely over-engineering or need a spec extension. The rule of thumb: a script where the result must be certain, a model where it needs judgment, a person where it needs authority.
 
 | Type | What it does | Local support |
 |---|---|---|
@@ -345,13 +335,13 @@ Pick one per boundary. Stop if you need a type not in this list — you're likel
 | `noop` | Pass-through; useful as placeholder | Full |
 | `form` | Pause for structured human or agent input | Full (pause/resume) |
 | `approval` | Binary human gate (approve/reject) | Full (pause/resume) |
-| `llm` | LLM call; structured response validates against schema | Full (needs `ANTHROPIC_API_KEY`) |
+| `llm` | Model call; structured response validates against schema | Full (Anthropic API or a CLI provider) |
 | `wait` | Pause for duration or condition | Full (immediate for `seconds`; pause/resume for `until`) |
 | `webhook` | Outbound HTTP call; sync or callback response mode | Full sync + callback; `poll` not implemented |
 | `subprocess` | Start a child OpenSOP process; pause until it completes | Full (max depth 16) |
-| `loop` | Iterate a subprocess over a collection | Full |
-| `judgment` | LLM or human decision with confidence threshold | Not implemented locally — use server runtime |
-| `notification` | Fire-and-forget email/Slack/SMS | Not implemented locally — use server runtime |
+| `loop` | Repeat a `body` of steps: `for_each` (+ `as`), `repeat_until` or `while`, up to `max_iterations` | Full (body steps cannot pause) |
+| `judgment` | A model decides with a `confidence`; escalates to a person on `require_human_review` or low confidence | Full (escalation pauses for `submit`) |
+| `notification` | Fire-and-forget email/Slack/SMS | Not implemented locally yet (fails the run) |
 
 ### Conditions
 
@@ -447,17 +437,17 @@ Problems:
       "model": "claude-haiku-4-5",
       "prompt": "Extract every action item from these meeting notes.\n\nMeeting date: {{meeting_date}}\n\nNotes:\n{{notes}}\n\nRules:\n- Include only explicitly assigned tasks, not discussion points.\n- If no owner is stated, set owner to null.\n- Express due dates as ISO 8601 or null if not mentioned.\n- Return a JSON object with key 'action_items' containing an array of objects, each with 'task' (string), 'owner' (string or null), 'due' (string or null).",
       "expected_output_schema": {
-        "action_items": { "type": "array", "required": true }
+        "action_items": "array[object]"
       }
     }
   ]
 }
 ```
 
-Two renderer rules to remember:
-- Prompt tokens use `{{key}}` where `key` is a plain identifier — it resolves directly from the accumulated run context. Inputs are merged into context at run start, so `{{notes}}` resolves the `notes` input. The `{{process.inputs.notes}}` syntax is not supported by the local renderer.
+Renderer and schema rules to remember:
+- Prompt tokens use `{{key}}`. A bare key resolves from the accumulated run context (inputs are merged in at run start, so `{{notes}}` is the `notes` input); dotted references such as `{{ process.inputs.notes }}` and `{{ steps.extract.outputs.action_items }}` also resolve.
 - Optional inputs that may be absent should declare a `"default"` in the input definition; the default is merged into context before the first step, so `{{meeting_date}}` always has a value.
-- `expected_output_schema` is a flat object mapping field names to field-definition objects with `type` (`"string"`, `"number"`, `"boolean"`, `"enum"`, `"array"`) and optionally `required: true`. Array shorthand (e.g. `[{"task":"string"}]`) and union strings (e.g. `"string|null"`) are not valid — the engine ignores unknown type values silently.
+- `expected_output_schema` maps field names to a type: `"string"`, `"number"`, `"boolean"`, `"array[<type>]"`, `"enum[a,b,c]"`, a nested object, or a field-definition object (`{"type": "...", "required": true}`). It is validated recursively; a response that does not match is retried, then fails the step.
 
 Run it:
 
@@ -486,7 +476,7 @@ The CLI's `llm` step:
 | Auditability | None | `audit.jsonl` records every call, output, and timestamp |
 | Reproducibility | Re-derive the prompt every time | `opensop run extract-action-items` — same file, same behavior |
 | Evolution | Edit the chat | `git diff`, `opensop fork`, `opensop lineage` |
-| Discovery | Grep chat history | `opensop search action items` or `opensop suggest "pull out tasks"` |
+| Discovery | Grep chat history | `opensop search action` or `opensop suggest "pull out tasks"` |
 
 ---
 
@@ -541,9 +531,9 @@ opensop diff <run_id_1> <run_id_2>           # diff outputs of two runs of the s
 
 Useful when iterating on prompt changes: run twice with different versions, diff the outputs.
 
-### Evolution policy
+### Hardening over time
 
-The mineralization tiers (m0–m6), transition rules, and lineage annotation conventions are documented in [EVOLUTION.md](../EVOLUTION.md). The `opensop evolve` command and the m-tier policy fields (`lineage.metadata.m`) described there are experimental — they are not yet frozen in the SPEC and may change before S0b.
+When a judgment call keeps going wrong, turn it into a script; when a rigid step needs nuance, hand it to a model. Record each move with `opensop annotate` so the lineage shows why the process changed. [`docs/EVOLUTION.md`](./EVOLUTION.md) is a design note (not shipped) for a tiered policy on top of this.
 
 ---
 
@@ -560,7 +550,7 @@ Run through these before committing or running a process. The engine rejects pro
 ### Structure
 - [ ] `name`, `version`, and `steps` are all present.
 - [ ] Every step has `id` and `type`.
-- [ ] `type` is one of the twelve listed in §5.
+- [ ] `type` is one of the types listed in §5.
 
 ### Data flow
 - [ ] Every `from: process.inputs.X` has a matching entry in `inputs`.
@@ -582,7 +572,7 @@ Run through these before committing or running a process. The engine rejects pro
 
 ## 9. Common mistakes
 
-**`run:` path doesn't resolve.** In server mode, `run:` is relative to the `sops/` library root, not to the process file. A YAML at `sops/examples/my-process.sop.yaml` must write `run: "./examples/steps/my-script.rb"`, not `"./steps/my-script.rb"`.
+**`run:` path doesn't resolve.** Locally, a relative `run:` path for an `automated` step resolves against the process file's directory. A server may resolve it differently (see its docs).
 
 **Condition always true/false.** The evaluator treats missing identifiers as `null`, which compares false to almost everything. Check the exact output key name on the upstream step.
 
@@ -592,7 +582,7 @@ Run through these before committing or running a process. The engine rejects pro
 
 **Unquoted version.** `version: 1.0` in YAML parses as a float. Always quote: `version: "1.0"`.
 
-**Webhook step never advances.** The callback URL was not given to the third party, or its payload keys don't match the step's declared `outputs`. Check `opensop show <run_id> --json | jq '.manifest.waiting'`.
+**Webhook step never advances.** Locally a callback-mode webhook pauses until you `opensop submit` its outputs. Check what it expects with `opensop status <run_id> --json | jq '.waiting'`.
 
 **`declare: -A: invalid option`.** bash 3.x is in use. Install bash 4+ (`brew install bash` on macOS).
 
@@ -618,40 +608,24 @@ Before starting any multi-step task (3+ distinct steps, clear inputs/outputs, li
 If a matching process exists, run it:
   opensop run <name|file.sop.json> --input k=v
 
-If a run pauses (form / approval / wait / webhook callback), check what it needs:
-  opensop show <run_id> --json | jq '.manifest.waiting'
+Poll a run: opensop status <run_id> --json   (read .state; .waiting / .error say why it stopped)
+
+If a run pauses (form / approval / escalated judgment / wait / webhook callback), check what it needs:
+  opensop status <run_id> --json | jq '.waiting'
   opensop submit <run_id> <step-id> --output k=v
 
 Check all local runs: opensop runs
 Full receipt: opensop show <run_id> --json
-llm steps require ANTHROPIC_API_KEY in the environment.
 
 If no process matches, propose writing a .sop.json before doing the task ad-hoc.
 ```
 
-**Remote server:**
-
-```markdown
-## OpenSOP (remote server)
-
-Check before any multi-step task:
-  opensop --remote search <keyword>
-  opensop --remote suggest "<task description>"
-  opensop --remote list
-
-Run a matching process:
-  opensop --remote run <name> --input k=v
-  opensop --remote status <run_id>
-  opensop --remote submit <run_id> <step-id> --output k=v
-  opensop --remote schema <name>          # full process definition
-
-If no process matches, write a .sop.json (see docs/AGENTS.md §6).
-```
+Against an optional server, add `--remote` to the same commands.
 
 **When to propose a new process:** a task has 3+ distinct steps, a clear input/output boundary, and will run again. Pause, propose writing a `.sop.json` first, then run it.
 
 **When to stop and ask:**
-- A step boundary needs a type not in the twelve. Don't invent types — flag it.
+- A step boundary needs a type not in §5. Don't invent types — flag it.
 - A condition requires operators beyond the supported set. Propose a spec extension.
 - The description is ambiguous about a boundary (form vs. approval?). One question is cheaper than a wrong guess.
 - A process file comes from a URL the user has not reviewed. Ask before running it.
@@ -681,10 +655,10 @@ SOPs live in `./sops/` (or alongside the code they relate to as `.sop.json` file
   opensop heal <run_id> --apply     # retry the failed step
 
 **Onboard** / first-run:
-  opensop onboard                   # scaffold a starter process and prove the reliability gain
+  opensop onboard                   # scaffold a starter process, validate it, show next steps
 
-**Pull and share SOPs** (the public library at github.com/opensop/sops):
-  opensop pull opensop/daily-standup-notes   # download an SOP
+**Pull and share SOPs** (examples in the opensop repo's sops/ directory):
+  opensop pull opensop/release-checklist     # download an SOP
   opensop import ./my-sop.sop.json           # import from a local file
   opensop info ./my-sop.sop.json             # inspect metadata
 
@@ -709,16 +683,20 @@ capability description automatically.  One command installs to the right place:
 ```bash
 opensop skill install --runtime <flavour>    # install for a specific runtime
 opensop skill paths                          # authoritative flavour → path table
+opensop skill install --runtime <flavour> --skill opensop-build-harness   # the process-authoring skill
 ```
+
+A Hermes Agent plugin is coming at [opensop/hermes-opensop](https://github.com/opensop/hermes-opensop): tools to start, inspect, submit and retry runs; it re-anchors the agent on the current step every turn, won't let the agent finish while its step is open, and won't let it decide a step reserved for a person.
 
 | Flavour | Scope | Canonical install path |
 |---|---|---|
 | `claude` | project | `.claude/skills/opensop/SKILL.md` |
 | `claude` | user | `~/.claude/skills/opensop/SKILL.md` |
 | `codex` / `agentskills` | project | `.agents/skills/opensop/SKILL.md` |
-| `codex` / `agentskills` | user | `~/.agents/skills/opensop/SKILL.md` |
+| `codex` | user | `$CODEX_HOME/skills/opensop/SKILL.md` (`~/.codex/skills` when unset) |
+| `agentskills` | user | `~/.agents/skills/opensop/SKILL.md` |
 | `hermes` | project | `.hermes/skills/opensop/SKILL.md` |
-| `hermes` | user | `~/.hermes/skills/opensop/SKILL.md` |
+| `hermes` | user | `$HERMES_HOME/skills/opensop/SKILL.md` (`~/.hermes/skills` when unset) |
 | `openclaw` | project | `skills/opensop/SKILL.md` |
 | `openclaw` | user | `~/.claw/skills/opensop/SKILL.md` |
 | `openhands` | project | `.openhands/skills/opensop/SKILL.md` |

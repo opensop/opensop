@@ -1,10 +1,10 @@
 # OpenSOP
 
-> Process as Infrastructure for agentic processes — declare, version, fork, run, and audit a process as a file in your repo.
+> OpenSOP turns your best agent workflow into a file anyone can run.
 
-OpenSOP makes agentic processes reproducible *as procedures*. A naive prompt re-derives the procedure on every invocation — different shape, different fields, invented items, no audit trail. An OpenSOP process pins the steps, validates step outputs against declared required/type/enum constraints (retrying LLM steps on mismatch), and writes an append-only receipt to disk: the same procedure, the same output contract, and a full audit trail on every run. (Step *values* still depend on models, commands, inputs, and external services — what OpenSOP fixes is the procedure, the schema, and the receipt, not the laws of nondeterminism.)
+Every process sits somewhere between a script and a judgment call. OpenSOP sets that dial step by step, in one file: scripts where the result must be certain, LLMs where it needs thinking, a person where it needs authority. The file holds the process and the run folder holds the state, so any agent from any vendor (or a person) can pick up any step, and every step leaves a receipt. A process pins the steps, validates step outputs against declared schemas (retrying LLM steps on mismatch), and stops when a step cannot meet its contract instead of improvising.
 
-**Terraform is to cloud resources what OpenSOP is to agentic processes.**
+Versions: spec **0.9.1**, CLI **0.10.0**.
 
 ---
 
@@ -12,9 +12,9 @@ OpenSOP makes agentic processes reproducible *as procedures*. A naive prompt re-
 
 A process is a `.sop.json` (or `.sop.yaml`) file declaring typed inputs, an ordered list of steps, and typed outputs. It lives in your repo, reviews in your PRs, ships in your commits.
 
-Step types executable by the local CLI today: `automated`, `shell`, `noop`, `form`, `approval`, `wait`, `llm`, `webhook`, `subprocess`. Additional types — `loop`, `judgment`, `notification` — are defined in the spec but run server-side (see the [SPEC.md](SPEC.md) §3 capability matrix for what runs where). Each step declares what it requires and what it returns. When a required upstream output is missing, execution stops — the runtime does not ask an LLM to fill the gap.
+Step types the local CLI runs: `automated`, `shell`, `noop`, `form`, `approval`, `wait`, `llm`, `judgment`, `loop`, `webhook`, `subprocess` (`notification` is specified but not yet run locally). `llm` calls the Anthropic API for `claude-*` models or drives a local CLI for `claude-code:`, `codex:`, `cursor:` and `kimi:` models; each call's receipt records provider, model, token usage and, where reported, cost. `judgment` lets a model decide with a confidence score and escalates to a person below a threshold. `loop` repeats a body of steps (`for_each`, `repeat_until`, `while`). Each step declares what it requires and what it returns. When a required upstream output is missing, execution stops — the runtime does not ask an LLM to fill the gap.
 
-Spec version: **0.7**. Full grammar in [SPEC.md](SPEC.md).
+Full grammar in [SPEC.md](SPEC.md) (v0.9.1).
 
 ---
 
@@ -23,35 +23,38 @@ Spec version: **0.7**. Full grammar in [SPEC.md](SPEC.md).
 - **Reproducibility of procedure, not luck.** The process file is the source of truth: the same steps, the same declared output schema, and the same audit format on every run. Where a naive prompt drifts run-to-run — different fields, invented items, unstructured prose — the process holds the contract: output that conforms to the schema every time (step *values* still depend on models and inputs).
 - **Scope discipline.** The prompt is part of the file. Output fields are declared. The LLM step validates its response against `expected_output_schema` and retries on mismatch — it cannot silently return the wrong shape.
 - **Auditability.** Every run writes `manifest.json`, `audit.jsonl`, and `context.json` under `$OPENSOP_LOCAL_HOME/runs/<run_id>/` — the active cell's `.opensop/runs/` when inside a cell, else `~/.opensop-local/runs/`. Inspect any run after the fact.
-- **Discovery before invention.** Before re-deriving a procedure, search for an existing process: `opensop search <keyword>` or `opensop suggest "<task description>"`. Write new only when no match clears a confidence threshold.
+- **Discovery before invention.** Before re-deriving a procedure, search the processes in the cell chain: `opensop search <keyword>` or `opensop suggest "<task description>"`. Write new only when no match clears a confidence threshold.
+- **Resumable by anyone.** `opensop status <run_id> --json` reports `.state`, what a paused run is `waiting` on, the `run_dir`, and on failure `error: {step, exit_code, message}`.
 - **Evolution without copy-paste.** Fork a process, adapt it, record lineage. `opensop fork`, `opensop lineage`, `opensop diff` — processes evolve like code.
 
 ---
 
 ## Quick start
 
-Install (deps: bash 4+, jq):
+Install (deps: bash 4+, jq; lands in ~/.local/bin):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/opensop/opensop/main/cli/bin/opensop \
-  -o /usr/local/bin/opensop && chmod +x /usr/local/bin/opensop
+curl -fsSL https://raw.githubusercontent.com/opensop/opensop/main/cli/install.sh | bash
 ```
 
 Discover existing processes before writing a new one:
 
 ```bash
-opensop search lead                          # ranked keyword search (local)
-opensop suggest "qualify an inbound lead"    # intent-based match
-opensop list                                 # enumerate all processes in cell chain
+opensop list                                 # processes in the cell chain
+opensop search <keyword>                     # ranked keyword search
+opensop pull opensop/release-checklist       # fetch an example from the repo's sops/ (never runs it)
 ```
 
 Run a process:
 
 ```bash
-opensop run ./extract-action-items.sop.json --input notes="$(cat meeting.txt)"
-opensop status <run_id>
+opensop run ./my-process.sop.json --input key=value
+opensop status <run_id> --json               # .state, .waiting, .error, .run_dir
+opensop submit <run_id> <step-id> --output key=value   # answer a paused step
 opensop show   <run_id> --json               # full receipt
 ```
+
+Install the agent skill: `opensop skill install --runtime claude` (or `codex`, `hermes`, …). Runnable coding-agent loops: [cli/examples/agent-loops/](cli/examples/agent-loops/).
 
 Machine-readable command index (for agent consumption):
 
@@ -73,10 +76,9 @@ opensop dry-run ./my-process.sop.json --input key=value
 
 | Document | Purpose |
 |---|---|
-| [SPEC.md](SPEC.md) | Authoritative format grammar, step-type semantics, and `/sop/*` HTTP API contract (v0.7) |
+| [SPEC.md](SPEC.md) | Authoritative format grammar, step-type semantics, and `/sop/*` HTTP API contract (v0.9.1) |
 | [MANIFESTO.md](MANIFESTO.md) | The thesis: why processes are infrastructure |
 | [docs/AGENTS.md](docs/AGENTS.md) | Agent guide: Discover → Run → Build → openSOP-ize → Iterate & Evolve |
-| [EVOLUTION.md](EVOLUTION.md) | Mineralization tiers (m0–m6), fork lineage, and evolution policy (experimental) |
 | [cli/README.md](cli/README.md) | Full CLI command reference, step type matrix, pause/resume protocol |
 | [README.md](README.md) | Project overview, quick start, step type table, optional server |
 
@@ -84,15 +86,4 @@ opensop dry-run ./my-process.sop.json --input key=value
 
 ## Optional
 
-The CLI runs processes locally with no server. For shared orchestration, a team audit log, or a monitoring UI, point the CLI at any server that implements the `/sop/*` API contract in [SPEC.md](SPEC.md) §4.2.
-
-There is no maintained reference server. SPEC.md §4 specifies an optional server profile — shared audit log, team visibility, webhook-triggered starts — for anyone who wants to implement it. Point the CLI at a conforming server with:
-
-```bash
-opensop config set url https://your-server.example.com
-opensop config set token <your-api-token>
-opensop --remote run lead-qualification --input lead_name="Alice"
-opensop --remote search lead
-```
-
-The server is optional infrastructure, not the core. `opensop run` never requires it.
+The CLI runs processes locally with no server. For a shared audit log or team visibility, point it at any server that implements the `/sop/*` API contract in [SPEC.md](SPEC.md) §4.2 (`opensop config set url https://sop.example.com`, then `--remote`). There is no maintained reference server. `opensop run` never requires one.
