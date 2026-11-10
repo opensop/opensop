@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- `help agents` and `help agents --json` point to `docs/AGENTS.md` (as a GitHub URL, so it works on a curl install). They named `docs/CLAUDE-INTEGRATION.md`, which does not exist.
 - **The embedded `opensop` skill and `help` match the local CLI.** Local `run` is synchronous, so the skill no longer says to poll `status` in a loop. Its example `opensop show <id> --json | jq '.status'` (always `null`) is now `opensop status <id> --json | jq .state`. `help` drops the "full SPEC parity" claim from the local step-types header.
 - **`skill install --runtime hermes --scope user` honours `$HERMES_HOME`** (default `~/.hermes`), the way codex honours `$CODEX_HOME`; `skill paths` and `doctor` show the resolved path.
 - A bad `--inputs`/`--inputs-file` (or `--outputs`/`--outputs-file`) prints only the CLI's own error, without jq's raw parse error before it.

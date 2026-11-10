@@ -841,7 +841,7 @@ _registry_command_json() {
 _registry_agents_json() {
   jq -nc '{topic:"agents",
            discovery:["search","suggest","list","help --json"],
-           guides:["docs/AGENTS.md","docs/CLAUDE-INTEGRATION.md"]}'
+           guides:["https://github.com/opensop/opensop/blob/main/docs/AGENTS.md"]}'
 }
 
 # --------------------------------------------------------------------------- #
@@ -1285,8 +1285,8 @@ ${C_BOLD}KEY PATTERNS FOR AGENTS${C_RESET}
   - Errors emit {error, message, hint?} to stderr when --json is set — parse them.
 
 ${C_BOLD}FULL GUIDE${C_RESET}
-  docs/AGENTS.md           — discover → build → run → iterate → evolve
-  docs/CLAUDE-INTEGRATION.md  — Claude Code / Claude agent integration recipe
+  https://github.com/opensop/opensop/blob/main/docs/AGENTS.md
+    — discover → build → run → iterate → evolve (Claude Code, Codex and other agents)
 
 ${C_DIM}⚠  local steps execute arbitrary shell — only run process files you trust${C_RESET}
 EOF

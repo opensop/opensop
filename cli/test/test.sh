@@ -10213,6 +10213,13 @@ HERMES_HOME=/h/x "$cli" skill paths --json | jq -e '.hermes.user == "/h/x/skills
 env -u HERMES_HOME HOME=/h/y "$cli" skill paths --json | jq -e '.hermes.user == "/h/y/.hermes/skills"' >/dev/null || { echo "FAIL: P0100-r hermes default"; exit 1; }
 echo "PASS: P0100-r — skill/help text match the local CLI; hermes honours HERMES_HOME"
 
+# (s) help agents points at a guide that exists (docs/AGENTS.md), by URL.
+"$cli" help agents --json | jq -e '.guides == ["https://github.com/opensop/opensop/blob/main/docs/AGENTS.md"]' >/dev/null \
+  || { echo "FAIL: P0100-s help agents --json guides"; exit 1; }
+[ -f "$here/../docs/AGENTS.md" ] || { echo "FAIL: P0100-s docs/AGENTS.md missing"; exit 1; }
+grep -q 'CLAUDE-INTEGRATION' <<<"$("$cli" help agents)$("$cli" help --json)" && { echo "FAIL: P0100-s help names a missing guide"; exit 1; }
+echo "PASS: P0100-s — help agents points at docs/AGENTS.md"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

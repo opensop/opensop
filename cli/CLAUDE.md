@@ -67,4 +67,4 @@ Follow [Semantic Versioning](https://semver.org/) and [Keep a Changelog](https:/
 
 ## Agent integration
 
-Agents use this CLI to run processes **locally** — no server, no HTTP — for the core loop. `docs/CLAUDE-INTEGRATION.md` is the canonical integration guide (run existing processes; recognize reusable multi-step work as a candidate `.sop.yaml`; author + register). The `--remote` path is opt-in for shared orchestration against a running OpenSOP server. For discovery prefer `opensop search` / `opensop suggest` (intent-based) over scanning `opensop list`.
+Agents use this CLI to run processes **locally** — no server, no HTTP — for the core loop. `docs/AGENTS.md` (repo root) is the canonical integration guide (run existing processes; recognize reusable multi-step work as a candidate `.sop.yaml`; author + register). The `--remote` path is opt-in for shared orchestration against a running OpenSOP server. For discovery prefer `opensop search` / `opensop suggest` (intent-based) over scanning `opensop list`.
