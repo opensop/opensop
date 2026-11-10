@@ -9930,6 +9930,34 @@ echo "PASS: P092-r — agent-loop examples (dev-loop, planner-worker) run end to
 unset FAKE_CLI_LOG
 rm -rf "$p092"
 
+# ── v0.10.0 ────────────────────────────────────────────────────────────────
+# (a) status says what an agent needs to act: run_dir, the paused step's
+# rendered description, and why a failed run failed (the step's stderr).
+# A {name: type} outputs map pauses cleanly instead of crashing the run.
+p0100="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+cat > "$p0100/check.sh" <<'SH'
+#!/bin/sh
+s="$(jq -r '.draft.summary')"; [ ${#s} -gt 3 ] && echo '{"ok":true}' || { echo "summary too short: $s" >&2; exit 1; }
+SH
+chmod +x "$p0100/check.sh"
+cat > "$p0100/p.sop.json" <<'JSON'
+{"opensop":"0.9.1","name":"p0100","version":"1.0.0","inputs":{"topic":"x"},
+ "steps":[{"id":"draft","type":"form","description":"Summarize {{ topic }}","outputs":{"summary":"string"}},
+          {"id":"check","type":"automated","run":"check.sh"}]}
+JSON
+a_id="$("$cli" run "$p0100/p.sop.json" --input topic=tides --json | jq -r .run_id)"
+"$cli" status "$a_id" --json | jq -e --arg d "$OPENSOP_LOCAL_HOME/runs/$a_id" '
+  .state == "waiting" and .run_dir == $d and .waiting.description == "Summarize tides"
+  and .waiting.expects.outputs == ["summary"] and .error == null' >/dev/null \
+  || { echo "FAIL: P0100-a waiting status: $("$cli" status "$a_id" --json)"; exit 1; }
+"$cli" submit "$a_id" draft --output summary=hi --json >/dev/null 2>&1 || true
+"$cli" status "$a_id" --json | jq -e '.state == "failed"
+  and .error == {step: "check", exit_code: 1, message: "summary too short: hi"}' >/dev/null \
+  || { echo "FAIL: P0100-a failed status: $("$cli" status "$a_id" --json)"; exit 1; }
+echo "PASS: P0100-a — status carries run_dir, the rendered waiting description and the failing step's stderr"
+rm -rf "$p0100"
+rm -rf "$p0100"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

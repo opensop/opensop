@@ -1736,6 +1736,11 @@ cmd_status() {
     printf '%sinstance:%s %s\n' "$C_BOLD" "$C_RESET" "$id"
     printf '%sprocess:%s  %s\n' "$C_BOLD" "$C_RESET" "$name"
     printf '%sstate:%s    %s%s%s%s\n' "$C_BOLD" "$C_RESET" "$color" "$state" "$C_RESET" "${ended:+ ($ended)}"
+    printf '%sreceipts:%s %s\n' "$C_BOLD" "$C_RESET" "$run_dir"
+    echo "$resp" | jq -r '
+      if .error then "\nfailed at \(.error.step) (exit \(.error.exit_code // "?")): \(.error.message)\nnext: opensop heal \(.id) --apply   (after fixing the cause)"
+      elif .waiting then "\nwaiting on \(.waiting.step) (\(.waiting.reason))\(if .waiting.description then ": " + .waiting.description else "" end)\nnext: opensop submit \(.id) \(.waiting.step)\([.waiting.expects.outputs[]? | " --output " + . + "=..."] | join(""))"
+      else empty end'
     echo
     echo "$resp" | jq -r '.steps[]? | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
       while IFS=$'\t' read -r step_id stype sstate sub; do
@@ -3229,7 +3234,9 @@ _local_mark_exited() {
 _local_wait_meta() {
   jq -c --argjson idx "$2" '
     .steps[$idx] as $s
-    | (if $s.type == "judgment" then $s.outputs else ($s.inputs // $s.outputs) end) as $decl
+    | (if $s.type == "judgment" then $s.outputs else ($s.inputs // $s.outputs) end
+       # a {name: type} map is read as the SPEC field list [{name, type}]
+       | if type == "object" then to_entries | map({name: .key, type: (.value | if type == "object" then (.type // "string") else . end)}) else . end) as $decl
     | { reason: ({form: "waiting_for_input", approval: "waiting_for_approval", judgment: "escalated"}[$s.type // "automated"]
                  // "waiting_for_callback"),
         expects: (if $decl != null and ($decl | length) > 0 then
@@ -3315,7 +3322,7 @@ local_run() {
   local run_id run_dir started started_ms
   run_id="$(_local_run_id)"; run_dir="$OPENSOP_LOCAL_HOME/runs/$run_id"
   mkdir -p "$run_dir"; started="$(_local_now)"; started_ms="$(_local_now_ms)"
-  trap '_local_finalize_trap "$run_dir"' EXIT    # safety net: never leave a run "running"
+  trap "_local_finalize_trap $(printf %q "$run_dir")" EXIT    # safety net: never leave a run "running"
   # started_at_ms: millisecond-precision epoch timestamp for the run start.
   # Written additively alongside started_at (second-granular ISO string) so that
   # local_submit can compute total wall time without the 0–999 ms rounding error
@@ -5519,7 +5526,7 @@ local_submit() {
      "$mf" > "$mf.tmp" && mv "$mf.tmp" "$mf"
 
   # Safety net: if we crash mid-resume, mark interrupted (not left as running).
-  trap '_local_finalize_trap "$run_dir"' EXIT
+  trap "_local_finalize_trap $(printf %q "$run_dir")" EXIT
 
   # Re-enter the step loop at resume_index (NEVER re-runs steps < resume_index).
   # Pass proc_dir as 5th arg so script paths resolve against the original process
@@ -5999,19 +6006,41 @@ local_status() {
   # Build response JSON that mirrors remote cmd_status's API response shape.
   # audit.jsonl → steps array: each line is one receipt; status → state;
   # waiting receipts carry .reason → sub_state.
-  local resp
+  # Local-only extras an agent needs to act: run_dir (where the receipts are),
+  # waiting.description (the paused step's own text) and error (why it failed).
+  local snap="$run_dir/process.snapshot.json" resp
+  [ -f "$snap" ] || snap="$(jq -r '.process_file // ""' "$mf")"
   resp="$(jq -nc \
     --argjson m "$(cat "$mf")" \
     --argjson steps "$(jq -s '[.[] | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
+    --argjson proc "$(jq -c '{steps: [(.steps // [])[]? | {id, description: (.description // .prompt // null)}]}' "$snap" 2>/dev/null || echo '{"steps":[]}')" \
+    --argjson fail "$(jq -sc '[.[] | select(.status == "failed")] | last' "$run_dir/audit.jsonl" 2>/dev/null || echo null)" \
+    --arg dir "$run_dir" \
     '{
        id:           $m.run_id,
        process:      {name: $m.process},
        state:        $m.status,
        started_at:   $m.started_at,
        completed_at: ($m.ended_at // null),
-       waiting:      ($m.waiting  // null),
+       waiting:      (if $m.waiting then
+                        $m.waiting + {description: ([$proc.steps[] | select(.id == $m.waiting.step) | .description][0] // null)}
+                      else null end),
+       error:        (if $m.status == "failed" and $fail != null then
+                        {step: $fail.step, exit_code: ($fail.exit_code // null),
+                         message: ([$fail.error, $fail.stderr, ($fail.output | if type == "object" then (.error // .stdout) else . end)]
+                                   | map(select(. != null and . != "") | if type == "string" then . else tojson end)
+                                   | first // "" | .[-2000:])}
+                      else null end),
+       run_dir:      $dir,
        steps:        $steps
      }')"
+  # Render {{ ref }} in the waiting step's text against the run's context.
+  local _wdesc _wrendered
+  _wdesc="$(jq -r '.waiting.description // empty' <<<"$resp")"
+  if [[ "$_wdesc" == *"{{"* && -f "$run_dir/context.json" ]] &&
+     _wrendered="$(_local_render "$_wdesc" "$(cat "$run_dir/context.json")" "$(jq -c '.inputs // {}' "$mf")")"; then
+    resp="$(jq -c --arg d "$_wrendered" '.waiting.description = $d' <<<"$resp")"
+  fi
 
   if is_tty && [[ "$OUTPUT_MODE" != "json" ]]; then
     local state ended
@@ -6024,6 +6053,11 @@ local_status() {
     printf '%sinstance:%s %s\n' "$C_BOLD" "$C_RESET" "$rid"
     printf '%sprocess:%s  %s\n' "$C_BOLD" "$C_RESET" "$(echo "$resp" | jq -r '.process.name')"
     printf '%sstate:%s    %s%s%s%s\n' "$C_BOLD" "$C_RESET" "$color" "$state" "$C_RESET" "${ended:+ ($ended)}"
+    printf '%sreceipts:%s %s\n' "$C_BOLD" "$C_RESET" "$run_dir"
+    echo "$resp" | jq -r '
+      if .error then "\nfailed at \(.error.step) (exit \(.error.exit_code // "?")): \(.error.message)\nnext: opensop heal \(.id) --apply   (after fixing the cause)"
+      elif .waiting then "\nwaiting on \(.waiting.step) (\(.waiting.reason))\(if .waiting.description then ": " + .waiting.description else "" end)\nnext: opensop submit \(.id) \(.waiting.step)\([.waiting.expects.outputs[]? | " --output " + . + "=..."] | join(""))"
+      else empty end'
     echo
     echo "$resp" | jq -r '.steps[]? | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
       while IFS=$'\t' read -r step_id stype sstate sub; do
@@ -6757,7 +6791,7 @@ local_heal() {
   jq -c '.status="running" | del(.ended_at) | del(.fault_file)' \
     "$run_dir/manifest.json" > "$run_dir/manifest.json.tmp" \
     && mv "$run_dir/manifest.json.tmp" "$run_dir/manifest.json"
-  trap '_local_finalize_trap "$run_dir"' EXIT
+  trap "_local_finalize_trap $(printf %q "$run_dir")" EXIT
 
   # Re-run the step loop starting at heal_index.
   # Pass proc_dir as 5th arg so scripts resolve against the original process
