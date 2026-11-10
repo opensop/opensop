@@ -10330,6 +10330,13 @@ kill "$(cat "$p0100y/child.pid")" 2>/dev/null || true
 echo "PASS: P0100-y — an interrupted run stops its step, heals from that step, and cancels"
 rm -rf "$p0100y"
 
+# (z) init writes .opensop/.gitignore with runs/ (receipts hold process inputs).
+p0100z="$(mktemp -d)"
+( cd "$p0100z" && "$cli" init --json >/dev/null )
+[ "$(cat "$p0100z/.opensop/.gitignore" 2>/dev/null)" = "runs/" ] || { echo "FAIL: P0100-z .opensop/.gitignore"; exit 1; }
+echo "PASS: P0100-z — init gitignores .opensop/runs/"
+rm -rf "$p0100z"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

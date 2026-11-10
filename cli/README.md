@@ -268,7 +268,7 @@ Commands marked **[remote]** require `--remote` or `--server <url>`. All others 
 | `opensop register <process.yaml>` | **[remote]** POST a `.sop.yaml` to `/sop/processes/register` — requires `--remote` or `--server` |
 | `opensop schema validate <file.yaml>` | Client-side YAML lint — always local, no server round-trip |
 | **Cells (v0.6)** | |
-| `opensop init [--name N] [--parent PATH]` | Create `.opensop/` in cwd; cwd becomes the active cell. Auto-detects parent from ancestor cell when present. |
+| `opensop init [--name N] [--parent PATH]` | Create `.opensop/` in cwd; cwd becomes the active cell. Auto-detects parent from ancestor cell when present. Writes `.opensop/.gitignore` with `runs/` so run receipts stay out of git. |
 | `opensop scope` | Print the active cell + ancestor chain (nearest-first); errors if cwd is not inside a cell |
 | `opensop annotate <skill> <event-type> <json>` | Append a policy event to the skill's lineage history in the active cell. Event type is open-string; data is whatever JSON the policy needs. |
 | `opensop lineage <skill>` | Print a skill's lineage entry (status, metadata, history) in the active cell. Returns the empty default if no events have been recorded yet. |

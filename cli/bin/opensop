@@ -432,6 +432,8 @@ cmd_init() {
     fi
   } > "$cwd/.opensop/manifest.yaml"
   echo "{}" > "$cwd/.opensop/lineage.json"
+  # Run receipts and context.json hold process inputs: keep them out of git.
+  [ -e "$cwd/.opensop/.gitignore" ] || echo "runs/" > "$cwd/.opensop/.gitignore"
 
   if [[ "$OUTPUT_MODE" == "pretty" ]] || { [[ "$OUTPUT_MODE" == "auto" ]] && is_tty; }; then
     info "${C_GREEN}initialized cell '$name'${C_RESET} at $cwd/.opensop/"
