@@ -10294,6 +10294,42 @@ done
 echo "PASS: P0100-x — status/show/diff/steps give valid JSON before the first receipt"
 rm -rf "$p0100x"
 
+# (y) a run killed mid-step is "interrupted": the step's process tree is
+# stopped, status names heal/cancel as next, heal --apply re-runs the step it
+# was on and continues, and cancel accepts an interrupted run.
+p0100y="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100y/h"
+jq -n --arg d "$p0100y" '{opensop:"0.9.1",name:"yi",version:"1",steps:[
+  {id:"a",type:"shell",run:"echo {}"},
+  {id:"slow",type:"shell",run:("if [ -f " + $d + "/marker ]; then echo {}; else touch " + $d + "/marker; sleep 30 & echo $! > " + $d + "/child.pid; wait; fi")},
+  {id:"c",type:"shell",run:"echo {}"}]}' > "$p0100y/p.sop.json"
+y_start() {
+  rm -f "$p0100y/child.pid"
+  "$cli" run "$p0100y/p.sop.json" --json >/dev/null 2>&1 & y_pid=$!
+  for _ in $(seq 100); do [ -s "$p0100y/child.pid" ] && break; sleep 0.1; done
+  [ -s "$p0100y/child.pid" ] || { echo "FAIL: P0100-y step never started"; exit 1; }
+  kill -TERM "$y_pid"; wait "$y_pid" 2>/dev/null || true
+}
+y_start
+y_id="$(ls "$p0100y/h/runs" | head -1)"
+y_alive=false
+for _ in $(seq 20); do kill -0 "$(cat "$p0100y/child.pid")" 2>/dev/null && y_alive=true || { y_alive=false; break; }; sleep 0.1; done
+if command -v setsid >/dev/null 2>&1; then
+  $y_alive && { echo "FAIL: P0100-y the interrupted step's child is still running"; exit 1; }
+fi
+"$cli" status "$y_id" --json | jq -e --arg id "$y_id" '.state == "interrupted" and .interrupted.step == "slow"
+  and .next == ["opensop heal \($id) --apply", "opensop cancel \($id)"]' >/dev/null \
+  || { echo "FAIL: P0100-y status: $("$cli" status "$y_id" --json)"; exit 1; }
+"$cli" heal "$y_id" --json | jq -e '.interrupted and .step.id == "slow"' >/dev/null || { echo "FAIL: P0100-y heal diagnosis"; exit 1; }
+"$cli" heal "$y_id" --apply --json 2>/dev/null | jq -e '.status == "completed"' >/dev/null || { echo "FAIL: P0100-y heal --apply"; exit 1; }
+"$cli" show "$y_id" --json | jq -e '[.steps[] | select(.status == "completed") | .step] == ["a", "slow", "c"]' >/dev/null \
+  || { echo "FAIL: P0100-y receipts after heal: $("$cli" show "$y_id" --json | jq -c '[.steps[] | {step, status}]')"; exit 1; }
+rm -f "$p0100y/marker"; rm -rf "$p0100y/h/runs"; y_start
+y_id="$(ls "$p0100y/h/runs" | head -1)"
+"$cli" cancel "$y_id" --json | jq -e '.state == "cancelled"' >/dev/null || { echo "FAIL: P0100-y cancel interrupted"; exit 1; }
+kill "$(cat "$p0100y/child.pid")" 2>/dev/null || true
+echo "PASS: P0100-y — an interrupted run stops its step, heals from that step, and cancels"
+rm -rf "$p0100y"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

@@ -260,10 +260,10 @@ Commands marked **[remote]** require `--remote` or `--server <url>`. All others 
 | `opensop run <name\|file> [opts]` | Start a local run (or **[remote]** `POST /sop/<name>/start` with `--remote`) |
 | `opensop dry-run <name\|file> [opts]` | Validate inputs + preview steps — no run created |
 | `opensop submit <run_id> <step-id> [opts]` | Resume a paused local run (or **[remote]** with `--remote`) |
-| `opensop cancel <run_id> [--reason TEXT]` | Cancel a local run (or **[remote]** with `--remote`) |
+| `opensop cancel <run_id> [--reason TEXT]` | Cancel a running, waiting or interrupted local run (or **[remote]** with `--remote`) |
 | `opensop runs` | List all local runs |
 | `opensop show <run_id>` | Local run manifest + per-step receipts |
-| `opensop heal <run_id> [--apply] [--force-effects] [--input k=v ...]` | Diagnose a failed run (print fault + debug_prompt); `--apply` re-runs the failed step and continues from there (closed heal loop). Fault records may contain input data — local only, never committed (SPEC §11.4). If the failed step declares `effects` (SPEC §3.2 — it acts on the world, e.g. "publishes a post to LinkedIn"), `--apply` refuses and exits non-zero: the step may have already succeeded before the observed failure, so a blind retry can double-post/double-send/double-spend. Pass `--force-effects` to re-run it anyway. |
+| `opensop heal <run_id> [--apply] [--force-effects] [--input k=v ...]` | Diagnose a failed run (print fault + debug_prompt); `--apply` re-runs the failed step and continues from there (closed heal loop). On an `interrupted` run (the CLI was killed mid-step) `--apply` re-runs the step it was on. Fault records may contain input data — local only, never committed (SPEC §11.4). If the failed step declares `effects` (SPEC §3.2 — it acts on the world, e.g. "publishes a post to LinkedIn"), `--apply` refuses and exits non-zero: the step may have already succeeded before the observed failure, so a blind retry can double-post/double-send/double-spend. Pass `--force-effects` to re-run it anyway. |
 | **Authoring** | |
 | `opensop register <process.yaml>` | **[remote]** POST a `.sop.yaml` to `/sop/processes/register` — requires `--remote` or `--server` |
 | `opensop schema validate <file.yaml>` | Client-side YAML lint — always local, no server round-trip |

@@ -155,7 +155,7 @@ opensop steps  <run_id>                  # per-step state
 opensop steps  <run_id> --json
 ```
 
-`status --json` reports the run state in `.state`: `running` | `waiting` | `completed` | `failed` | `cancelled` | `interrupted`. It also carries `run_dir` (the receipts folder), `waiting` (step, reason, expected outputs, and the step's `description`) while paused, and `error: {step, exit_code, message}` after a failure.
+`status --json` reports the run state in `.state`: `running` | `waiting` | `completed` | `failed` | `cancelled` | `interrupted`. It also carries `run_dir` (the receipts folder), `waiting` (step, reason, expected outputs, and the step's `description`) while paused, and `error: {step, exit_code, message}` after a failure. An `interrupted` run (the CLI was killed mid-step) carries `interrupted: {step}` and `next: ["opensop heal <id> --apply", "opensop cancel <id>"]`: `heal --apply` re-runs that step and continues, `cancel` closes the run.
 
 Poll until the run stops moving:
 
@@ -652,7 +652,7 @@ SOPs live in `./sops/` (or alongside the code they relate to as `.sop.json` file
   opensop ps                        # running/waiting processes
   opensop show <run_id> --json      # full receipt
   opensop heal <run_id>             # diagnose a failure
-  opensop heal <run_id> --apply     # retry the failed step
+  opensop heal <run_id> --apply     # retry the failed or interrupted step
 
 **Onboard** / first-run:
   opensop onboard                   # scaffold a starter process, validate it, show next steps
