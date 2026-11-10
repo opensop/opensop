@@ -10154,6 +10154,24 @@ n_rc=0; OPENSOP_HOME="$p0100n" timeout 10 "$cli" --server http://127.0.0.1:9 wat
 echo "PASS: P0100-n — remote ps/watch fail fast on a dead server"
 rm -rf "$p0100n"
 
+# (o) fork copies the relative scripts the process's automated steps run
+# (same relative path, no-clobber), so the forked greet runs.
+p0100o="$(mktemp -d)"; o_team="$p0100o/org/team"; mkdir -p "$o_team"
+( cd "$p0100o/org" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+( cd "$o_team" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+mkdir -p "$p0100o/org/processes"
+cp "$here/examples/greet.sop.json" "$p0100o/org/processes/greet.sop.json"
+cp -r "$here/examples/steps" "$p0100o/org/processes/steps"
+mkdir -p "$o_team/processes/steps"; echo keep > "$o_team/processes/steps/other.sh"
+o_out="$(cd "$o_team" && env -u OPENSOP_LOCAL_HOME "$cli" fork greet --json)"
+jq -e --arg d "$o_team/processes/steps/build.sh" '.copied_scripts == [$d]' <<<"$o_out" >/dev/null \
+  || { echo "FAIL: P0100-o fork copied_scripts: $o_out"; exit 1; }
+[ "$(cat "$o_team/processes/steps/other.sh")" = keep ] || { echo "FAIL: P0100-o fork clobbered a file"; exit 1; }
+(cd "$o_team" && OPENSOP_LOCAL_HOME="$p0100o/home" "$cli" run greet --input name=o --json | jq -e '.status == "completed"' >/dev/null) \
+  || { echo "FAIL: P0100-o forked greet does not run"; exit 1; }
+echo "PASS: P0100-o — fork copies referenced relative scripts; the forked process runs"
+rm -rf "$p0100o"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

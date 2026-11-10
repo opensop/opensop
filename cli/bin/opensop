@@ -687,9 +687,26 @@ cmd_fork() {
     snapshot="$(jq -c '{status: (.status // ""), metadata: (.metadata // {})}' <<<"$parent_entry")"
   fi
 
-  # Copy the process file.
+  # Copy the process file, plus the relative `run:` scripts its automated
+  # steps (loop bodies included) reference, resolved the way the engine does
+  # (next to the process file, else the cell root) and kept at the same
+  # relative path. No-clobber: an existing file in the child is left alone.
   mkdir -p "$active_cell/processes"
   cp "$src_file" "$active_cell/processes/${name}.sop.json"
+  local -a copied=()
+  local rel src_base dst
+  while IFS= read -r rel; do
+    [[ -z "$rel" || "$rel" == /* || "$rel" == *..* ]] && continue
+    for src_base in "$src_cell/processes" "$src_cell"; do
+      [[ -f "$src_base/$rel" ]] || continue
+      dst="$active_cell${src_base#"$src_cell"}/$rel"
+      if [[ ! -e "$dst" ]]; then
+        mkdir -p "$(dirname "$dst")" && cp -p "$src_base/$rel" "$dst" && copied+=("$dst")
+      fi
+      break
+    done
+  done < <(jq -r '[.steps[]? | recurse(.body? | if type == "array" then .[] elif type == "object" then . else empty end)]
+                 | .[] | select(type == "object" and .type == "automated") | .run // empty' "$src_file")
 
   # Create the child lineage entry with forked_from set.
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -707,10 +724,12 @@ cmd_fork() {
     info "${C_GREEN}forked${C_RESET} '$name' from ${C_BOLD}$src_cell${C_RESET}"
     info "  into:     $active_cell/processes/${name}.sop.json"
     info "  snapshot: $snapshot"
+    (( ${#copied[@]} )) && info "  scripts:  ${copied[*]}"
     info "  ${C_DIM}(child's live status + metadata are empty — policy decides what to do with the snapshot)${C_RESET}"
   else
     jq -nc --arg name "$name" --arg src "$src_cell" --arg dst "$active_cell/processes/${name}.sop.json" --argjson snap "$snapshot" \
-      '{ok:true, name:$name, source_cell:$src, dest_file:$dst, snapshot:$snap}'
+      --argjson copied "$( (( ${#copied[@]} )) && printf '%s\n' "${copied[@]}" | jq -R . | jq -sc . || echo '[]')" \
+      '{ok:true, name:$name, source_cell:$src, dest_file:$dst, snapshot:$snap, copied_scripts:$copied}'
   fi
 }
 

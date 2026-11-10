@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`fork` copies the scripts a process runs.** Relative `run:` paths of its `automated` steps (loop bodies included) are copied alongside the `.sop.json` at the same relative path, without overwriting existing files; `--json` lists them as `copied_scripts`. Before, a forked `greet` failed with "step script not found".
 - **`--remote ps` and `--remote watch` fail on an unreachable server** (exit 1, one `network_error` line that includes curl's reason). Before, `ps` printed an empty result and exited 0, and `watch` retried forever.
 - `info` labels the file it read `file:` instead of `written to:` (it writes nothing).
 - **`doctor` flags two installs**: when the `opensop` on PATH is a different version from the one running, it says so; `--json` gains `path_version` and `path_version_mismatch`.
