@@ -206,12 +206,6 @@ There is no maintained reference server. The profile is specified so anyone can 
 
 ---
 
-## Used internally at Coba
-
-[Coba](https://coba.ai) runs internal operations and scheduled engineering agents on OpenSOP; improvements flow upstream first. Specialized agents review PRs, bump dependencies, resolve conflicts, re-run CI, and handle the chores humans defer — each as a typed `.sop` process with named steps, bounded I/O, structured prompts, size caps, git-diff checks, and append-only receipts. The agents do the creative work. OpenSOP provides the rails.
-
----
-
 ## Documentation
 
 | Doc | For | Covers |

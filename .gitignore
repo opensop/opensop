@@ -48,9 +48,7 @@
 # These directories exist only in private forks (e.g., a company's fork
 # with their internal processes). Reserve the names here so public clones
 # never accidentally track them.
-/processes/coba/
 /processes/private/
-/tools/denchclaw-bridge/
 /tools/private/
 
 # Agent/session working state and worktrees (local only — can carry private
