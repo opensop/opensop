@@ -775,7 +775,7 @@ dispatched or recognized in that profile.
 |---|---|---|
 | `id` | Yes | Step identifier. Pattern: `[a-z0-9][a-z0-9_-]*`. |
 | `name` | No | Human-readable label. |
-| `type` | Yes | One of the 10 types listed in §3.1. |
+| `type` | Yes | One of the types listed in §3.1. |
 | `inputs` | No | Array of field references resolved at runtime. |
 | `outputs` | No | Declared output fields (name, type, optional schema). |
 | `condition` | No | Boolean expression; step is skipped when false. |
@@ -953,7 +953,8 @@ fields apply to CLI providers:
 
 | Field | Values | Default |
 |---|---|---|
-| `workdir` | Directory the CLI runs in; `{{ ref }}`-templated | The run's working directory |
+| `workdir` | Directory the CLI runs in; `{{ ref }}`-templated | The directory the run was started from (`manifest.cwd`), also after a resume |
+| `timeout` | Wall-clock bound per CLI attempt: seconds, or `30s` / `2m` / `1h`. A timeout fails the step | None (unbounded) |
 | `permission` | `read-only` \| `workspace-write` \| `full-access` (the §2.9.2 `filesystem` vocabulary) | `read-only` |
 
 `permission` is mapped onto each CLI's own sandbox or permission flags. A CLI
@@ -969,7 +970,9 @@ sandbox, so a `kimi:` step must declare `full-access`:
 ```
 
 The step receipt records `provider`, `model`, `permission` and the CLI's
-`cli_version`.
+`cli_version`. Validation covers the full mini-grammar recursively for every
+provider: `object` (nested `properties`, or an object of field specs as
+shorthand), `array[<type>]` (each item checked), `enum[a,b]`, and the scalars.
 
 ---
 
@@ -1200,6 +1203,14 @@ A per-step field, not a step type. Applies to any step.
 If the predicate is true after step completion, the process terminates
 immediately with `instance.exited_early` and the literal `exit_outputs`. Not
 an error — `instance.state` becomes `"completed"`.
+
+**Local engine:** `condition` is evaluated before a step runs. False skips it
+with a `skipped` receipt and no output; an expression that does not parse fails
+the step. `exit_when` is evaluated after a step completes, over the run context
+plus `outputs` (this step's output). That includes a step resumed by `submit`,
+such as an escalated `judgment`. True ends the run as `completed` and records
+`manifest.exited_early = {step, exit_outputs}`. An `exit_when` inside a `loop`
+body ends the loop and the run.
 
 ---
 

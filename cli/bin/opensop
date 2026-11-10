@@ -3090,6 +3090,29 @@ _local_eval_cond() {
   ' 2>/dev/null || true
 }
 
+# _local_exit_check <step_json> <out_json> <ctx_json> <proc_inputs_json>
+# SPEC §3.15: when the step's exit_when holds — evaluated over the context plus
+# `outputs` (this step's output) — prints its exit_outputs ({} when absent).
+# Prints nothing when it does not hold or there is none; returns 1 when the
+# expression does not parse.
+_local_exit_check() {
+  local expr v; expr="$(jq -r '.exit_when // "" | tostring' <<<"$1")"
+  [[ -z "$expr" ]] && return 0
+  v="$(_local_eval_cond "$expr" "$(jq -c --argjson o "$2" '. + {outputs: $o}' <<<"$3")" "$4")"
+  case "$v" in
+    true)  jq -c '.exit_outputs // {}' <<<"$1" ;;
+    false) ;;
+    *)     return 1 ;;
+  esac
+}
+
+# _local_mark_exited <run_dir> <step_id> <exit_outputs_json> — record an
+# exit_when early exit on the manifest (the run then finalizes as completed).
+_local_mark_exited() {
+  jq -c --arg s "$2" --argjson o "$3" '.exited_early = {step: $s, exit_outputs: $o}' \
+    "$1/manifest.json" > "$1/manifest.json.tmp" && mv "$1/manifest.json.tmp" "$1/manifest.json"
+}
+
 # _local_wait_meta <proc_file> <index>
 # The manifest's waiting.reason + waiting.expects for the step that paused.
 # Shared by every path that finalizes a paused run (run, submit, heal, parent
@@ -3194,7 +3217,8 @@ local_run() {
   # if the original process file is later moved or deleted (#101 gap 3).
   jq -nc --arg n "$name" --arg p "$proc_file" --arg d "$proc_dir" --arg id "$run_id" --arg t "$started" \
         --argjson sms "$started_ms" --argjson inp "$ctx" \
-    '{run_id:$id, process:$n, process_file:$p, process_dir:$d, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp}' \
+        --arg cwd "$PWD" \
+    '{run_id:$id, process:$n, process_file:$p, process_dir:$d, cwd:$cwd, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp}' \
     > "$run_dir/manifest.json"
 
   # Snapshot the normalized process definition at run creation (#101).
@@ -3305,6 +3329,12 @@ _local_step_loop() {
   fi
   local audit="$run_dir/audit.jsonl"
   local n_steps; n_steps="$(jq '(.steps // []) | length' "$proc_file")"
+  # run_cwd: where the run was first invoked (manifest.cwd), so a resumed run or
+  # a continued parent defaults CLI workdirs to the same place, not to wherever
+  # `submit` happened to run. run_pinp: the run's initial inputs (process.inputs.*).
+  local run_cwd run_pinp
+  run_cwd="$(jq -r '.cwd // ""' "$run_dir/manifest.json" 2>/dev/null || true)"; [[ -z "$run_cwd" ]] && run_cwd="$PWD"
+  run_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
 
   local i="$start_index"
   while [ "$i" -lt "$n_steps" ]; do
@@ -3332,7 +3362,22 @@ _local_step_loop() {
     s_started="$(_local_now)"; s_started_ms="$(_local_now_ms)"
     # C1a: per-step metrics; llm-specific fields are set inside the llm case below.
     local s_llm_model="" s_llm_tokens_in=0 s_llm_tokens_out=0 s_llm_token_source="none"
-    local s_llm_provider="" s_llm_permission="" s_llm_cli_version=""
+    local s_llm_provider="" s_llm_permission="" s_llm_cli_version="" lp_exit=""
+
+    # SPEC §3.2 condition: evaluated before dispatch; false → the step is
+    # skipped (a "skipped" receipt, no output in context). An expression the
+    # §2.6 evaluator cannot parse fails the step rather than guessing.
+    local s_cond; s_cond="$(jq -r '.condition // "" | tostring' <<<"$step")"
+    if [[ -n "$s_cond" ]]; then
+      case "$(_local_eval_cond "$s_cond" "$ctx" "$run_pinp")" in
+        true) ;;
+        false)
+          jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg a "$s_started" --arg c "$s_cond" \
+            '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"skipped", condition:$c, started_at:$a, ended_at:$a, duration_ms:0}' >> "$audit"
+          i=$((i+1)); continue ;;
+        *) stype="__bad_condition__" ;;
+      esac
+    fi
 
     # SPEC §3.3: a script step receives its DECLARED inputs (resolved from prior
     # step outputs / process inputs via each entry's `from:` reference). The local
@@ -3516,7 +3561,7 @@ _local_step_loop() {
         # inside `while ... done` breaks the outer while loop (not the case block).
         local llm_ok=true llm_model llm_prompt_file llm_schema_json llm_max_retries llm_retry
         local jd_escalate="" jd_proposal="null"
-        local llm_cli="" llm_cli_model="" llm_perm="" llm_workdir="" llm_bin="" llm_bin_path=""
+        local llm_cli="" llm_cli_model="" llm_perm="" llm_workdir="" llm_bin="" llm_bin_path="" llm_timeout=""
         local llm_pinp; llm_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
         if [[ "$stype" == judgment ]] && ! jq -e '.judgment.allow_agent == true and (.model // "") != ""
               and ((.prompt // .prompt_file // "") != "")' <<<"$step" >/dev/null; then
@@ -3540,7 +3585,7 @@ _local_step_loop() {
         # optional, half-enforcement is not: a permission the CLI cannot back is
         # refused, never run with more access. Mapping (verified against each
         # CLI's --help and a write probe):
-        #   claude-code  read-only: --tools Read,Grep,Glob   workspace-write: --permission-mode acceptEdits
+        #   claude-code  read-only: --tools Read,Grep,Glob   workspace-write: --permission-mode auto
         #                full-access: --permission-mode bypassPermissions
         #   codex        -s read-only | workspace-write | danger-full-access
         #   cursor       read-only: --mode ask   workspace-write: --sandbox enabled
@@ -3557,9 +3602,21 @@ _local_step_loop() {
         if [[ "$llm_ok" == true && "$llm_cli" == kimi && "$llm_perm" != full-access ]]; then
           out_raw="{\"error\":\"kimi cannot enforce permission '$llm_perm' (kimi -p has no sandbox) — refusing to run with more access; declare permission: full-access to run it unconfined\"}"; rc=1; llm_ok=false
         fi
+        # timeout (SPEC §3.8 example `timeout: 2m`): bounds every CLI attempt via
+        # coreutils timeout (TERM, KILL 10s later, to the CLI's whole process
+        # group). Absent → unbounded, as before. Declared but no `timeout` binary
+        # → refused rather than run unbounded.
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          llm_timeout="$(jq -r '.timeout // "" | tostring' <<<"$step")"
+          if [[ -n "$llm_timeout" && ! "$llm_timeout" =~ ^[0-9]+(\.[0-9]+)?[smhd]?$ ]]; then
+            out_raw="{\"error\":\"timeout must be a number of seconds or look like 30s, 2m, 1h; got '$llm_timeout'\"}"; rc=1; llm_ok=false
+          elif [[ -n "$llm_timeout" ]] && ! command -v timeout >/dev/null 2>&1; then
+            out_raw='{"error":"step declares timeout but the timeout command (coreutils) is not installed — refusing to run unbounded"}'; rc=1; llm_ok=false
+          fi
+        fi
         if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
           llm_workdir="$(_local_render "$(jq -r '.workdir // ""' <<<"$step")" "$ctx" "$llm_pinp")"
-          [[ -z "$llm_workdir" ]] && llm_workdir="$PWD"
+          [[ -z "$llm_workdir" ]] && llm_workdir="$run_cwd"
           if [[ ! -d "$llm_workdir" ]]; then
             out_raw="$(jq -nc --arg d "$llm_workdir" '{error:("workdir not found: " + $d)}')"; rc=1; llm_ok=false
           fi
@@ -3671,8 +3728,6 @@ $llm_rendered_prompt"
           # CLI never blocks reading it.
           # ponytail: the prompt rides in argv, so one prompt is capped at Linux's
           # 128 KiB MAX_ARG_STRLEN; pipe it on stdin if prompts outgrow that.
-          # ponytail: no wall-clock timeout on the CLI call (the API path has
-          # curl --max-time); wire the step's `timeout` field if agents hang.
           local llm_argv=() llm_lastmsg=""
           if [[ -n "$llm_cli" ]]; then
             local llm_full_prompt="$llm_system_prompt
@@ -3684,7 +3739,7 @@ $llm_attempt_prompt"
                 [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
                 case "$llm_perm" in
                   read-only)       llm_argv+=(--tools Read,Grep,Glob) ;;
-                  workspace-write) llm_argv+=(--permission-mode acceptEdits) ;;
+                  workspace-write) llm_argv+=(--permission-mode auto) ;;  # acceptEdits would block Bash under -p
                   full-access)     llm_argv+=(--permission-mode bypassPermissions) ;;
                 esac
                 llm_argv+=(-- "$llm_full_prompt") ;;
@@ -3726,10 +3781,16 @@ $llm_attempt_prompt"
             llm_raw_text="$OSL_LLM_STUB"
             [[ -n "$llm_lastmsg" ]] && rm -f "$llm_lastmsg"
           elif [[ -n "$llm_cli" ]]; then
-            local llm_cli_out="" llm_cli_rc=0
-            llm_cli_out="$(cd "$llm_workdir" && "$llm_bin_path" "${llm_argv[@]:1}" </dev/null 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
+            local llm_cli_out="" llm_cli_rc=0 llm_to=()
+            [[ -n "$llm_timeout" ]] && llm_to=(timeout --kill-after=10 "$llm_timeout")
+            llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" </dev/null 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
+            # The codex -o file is read and removed here on every outcome (success,
+            # failure, timeout) — nothing below may `continue` past it.
             if [[ "$llm_cli" == codex && -n "$llm_lastmsg" ]]; then
               llm_cli_out="$(cat "$llm_lastmsg" 2>/dev/null || true)"; rm -f "$llm_lastmsg"
+            fi
+            if [[ -n "$llm_timeout" ]] && [[ "$llm_cli_rc" -eq 124 || "$llm_cli_rc" -eq 137 ]]; then
+              out_raw="{\"error\":\"$llm_bin timed out after $llm_timeout (step timeout)\"}"; rc=1; llm_failed=true; llm_ok=false; continue
             fi
             if [[ "$llm_cli_rc" -ne 0 ]]; then
               out_raw="{\"error\":\"$llm_bin exited $llm_cli_rc (stderr in this receipt)\"}"; rc=1; llm_failed=true; llm_ok=false; continue
@@ -3823,27 +3884,44 @@ $llm_attempt_prompt"
             continue
           fi
 
-          # Validate against expected_output_schema (required + type + enum checks).
-          # Schema here is an object {field_name: {type, required, ...}} or {} for any.
+          # Validate against expected_output_schema — the full SPEC §3.8 mini-grammar,
+          # recursively. A field spec is an object {type, required, values,
+          # properties, items} or a shorthand string: string | number | boolean |
+          # object | enum[a,b] | array[<type>]. An object with none of the spec keys
+          # is a nested object's properties. Fields are required only when
+          # required:true. Same check for the API and every CLI provider.
           local llm_schema_errors
           llm_schema_errors="$(jq -rn \
             --argjson schema "$llm_schema_json" \
-            --argjson parsed "$llm_parsed" \
-            '[ $schema | to_entries[] |
-               . as $e | $e.key as $k | $e.value as $fdef |
-               ($parsed[$k]) as $val |
-               (if ($fdef.required == true) and ($val == null) then
-                  "required field missing: " + $k
-                else null end),
-               (if $val != null then
-                 if   $fdef.type == "number"  and ($val | type) != "number"  then $k + " must be a number"
-                 elif $fdef.type == "boolean" and ($val | type) != "boolean" then $k + " must be a boolean"
-                 elif $fdef.type == "string"  and ($val | type) != "string"  then $k + " must be a string"
-                 elif $fdef.type == "enum" and ($fdef.values != null) and ([$fdef.values[] | . == $val] | any | not) then
-                   $k + " must be one of: " + ($fdef.values | join(", "))
-                 else null end
-               else null end)
-            ] | map(select(. != null)) | join("; ")')"
+            --argjson parsed "$llm_parsed" '
+            def trim: gsub("^\\s+|\\s+$"; "");
+            def norm:
+              if type == "string" then
+                (capture("^\\s*enum\\[(?<v>.*)\\]\\s*$") | {type: "enum", values: (.v | split(",") | map(trim))})
+                // (capture("^\\s*array\\[(?<v>.*)\\]\\s*$") | {type: "array", items: .v})
+                // {type: trim}
+              elif type == "object" and ((has("type") or has("required") or has("values") or has("properties") or has("items")) | not)
+                then {type: "object", properties: .}
+              elif type == "object" then .
+              else {} end;
+            def verrs($v; $path):
+              norm as $s
+              | if $v == null then (if $s.required == true then ["required field missing: " + $path] else [] end)
+                elif $s.type == "number"  then (if ($v | type) == "number"  then [] else [$path + " must be a number"] end)
+                elif $s.type == "boolean" then (if ($v | type) == "boolean" then [] else [$path + " must be a boolean"] end)
+                elif $s.type == "string"  then (if ($v | type) == "string"  then [] else [$path + " must be a string"] end)
+                elif $s.type == "enum" then
+                  (if $s.values == null or any($s.values[]; . == $v) then []
+                   else [$path + " must be one of: " + ($s.values | map(tostring) | join(", "))] end)
+                elif $s.type == "object" then
+                  (if ($v | type) != "object" then [$path + " must be an object"]
+                   else [($s.properties // {}) | to_entries[] as $e | $e.value | verrs($v[$e.key]; $path + "." + $e.key)[]] end)
+                elif $s.type == "array" then
+                  (if ($v | type) != "array" then [$path + " must be an array"]
+                   elif $s.items == null then []
+                   else [range(0; $v | length) as $i | $s.items | verrs($v[$i]; $path + "[" + ($i | tostring) + "]")[]] end)
+                else [] end;
+            [$schema | to_entries[] as $e | $e.value | verrs($parsed[$e.key]; $e.key)[]] | join("; ")')"
 
           if [[ -n "$llm_schema_errors" ]]; then
             llm_last_errors="$llm_schema_errors"
@@ -4398,7 +4476,8 @@ $llm_attempt_prompt"
             --arg prid "$run_id" \
             --arg psid "$sid" \
             --argjson pidx "$i" \
-            '{run_id:$id, process:$n, process_file:$p, process_dir:$d, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp,
+            --arg cwd "$run_cwd" \
+            '{run_id:$id, process:$n, process_file:$p, process_dir:$d, cwd:$cwd, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp,
               parent_run_id:$prid, parent_step_id:$psid, parent_step_index:$pidx}' \
             > "$sp_child_run_dir/manifest.json"
 
@@ -4536,12 +4615,15 @@ $llm_attempt_prompt"
             lp_ok=false; lp_err="loop reached max_iterations ($lp_max) without its $lp_kind predicate being satisfied: $lp_expr"
           else
             lp_dir="$run_dir/loop/$sid/iter-$lp_n"; mkdir -p "$lp_dir"
-            jq -nc --arg id "iter-$lp_n" --arg p "$sid" --argjson inp "$lp_pinp" \
-              '{run_id:$id, process:$p, status:"running", inputs:$inp}' > "$lp_dir/manifest.json"
+            jq -nc --arg id "iter-$lp_n" --arg p "$sid" --argjson inp "$lp_pinp" --arg cwd "$run_cwd" \
+              '{run_id:$id, process:$p, cwd:$cwd, status:"running", inputs:$inp}' > "$lp_dir/manifest.json"
             lp_status="$(_local_step_loop "$lp_dir" "$lp_file" 0 "$lp_ctx" "$proc_dir")" || lp_status="failed"
             case "$lp_status" in
               completed)
                 [[ -f "$lp_dir/context.json" ]] && lp_ctx="$(cat "$lp_dir/context.json")"
+                # A body step's exit_when ends the loop and, through lp_exit, the run.
+                lp_exit="$(jq -c '.exited_early.exit_outputs // empty' "$lp_dir/manifest.json")"
+                [[ -n "$lp_exit" ]] && lp_done=true
                 lp_vals="$(jq -c --argjson c "$lp_ctx" --argjson b "$lp_body" --argjson agg "$lp_agg" '
                   reduce ($agg | keys_unsorted[]) as $k (.;
                     ([$b[] | $c[.id // ""] | objects | select(has($k)) | .[$k]] | last) as $v
@@ -4577,6 +4659,9 @@ $llm_attempt_prompt"
         fi
         if [[ "$lp_ok" == true ]]; then rc=0
         else out_raw="$(jq -nc --arg e "loop '$sid': $lp_err" '{error:$e}')"; rc=1; fi ;;
+      __bad_condition__)
+        stype="$(jq -r '.type // "automated"' <<<"$step")"
+        out_raw="$(jq -nc --arg c "$s_cond" '{error:("cannot evaluate condition: " + $c)}')"; rc=1 ;;
       *)    out_raw="unsupported step type for local execution: $stype"; rc=2 ;;
     esac
 
@@ -4585,6 +4670,17 @@ $llm_attempt_prompt"
       out_json="$(jq -c 'if type=="object" then . else {value:.} end' <<<"$out_raw")"
     else
       out_json="$(jq -nc --arg s "$out_raw" '{stdout:$s}')"
+    fi
+
+    # SPEC §3.15 exit_when: after a step completes, a true predicate ends the
+    # run early as completed, recording exit_outputs (manifest.exited_early).
+    # A loop whose body exited early propagates the exit (lp_exit).
+    local s_exit=""
+    if [ "$rc" -eq 0 ]; then
+      if ! s_exit="$(_local_exit_check "$step" "$out_json" "$ctx" "$run_pinp")"; then
+        out_json="$(jq -nc --arg e "$(jq -r '.exit_when' <<<"$step")" '{error:("cannot evaluate exit_when: " + $e)}')"; rc=1
+      fi
+      [[ -z "$s_exit" ]] && s_exit="$lp_exit"
     fi
     local s_ended_ms; s_ended_ms="$(_local_now_ms)"
     s_ended="$(_local_now)"
@@ -4621,10 +4717,11 @@ $llm_attempt_prompt"
     fi
     jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg st "$sstatus" --argjson rc "$rc" \
       --arg a "$s_started" --arg b "$s_ended" --argjson out "$out_json" --arg se "$serr" \
-      --argjson dur "$step_duration_ms" --arg rh "$result_hash" --argjson llmm "$llm_metrics" \
+      --argjson dur "$step_duration_ms" --arg rh "$result_hash" --argjson llmm "$llm_metrics" --arg xo "$s_exit" \
       '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:$st, exit_code:$rc,
         started_at:$a, ended_at:$b, duration_ms:$dur, result_hash:$rh, output:$out}
        + (if $se=="" then {} else {stderr:$se} end)
+       + (if $xo=="" then {} else {exited_early:true, exit_outputs:($xo | fromjson)} end)
        + $llmm' >> "$audit"
 
     if [ "$rc" -eq 0 ]; then
@@ -4632,6 +4729,10 @@ $llm_attempt_prompt"
       # Live checkpoint: atomic write (temp+mv) so a truncated write never silently
       # strips outputs — a future resume can re-enter at the cursor safely.
       printf '%s' "$ctx" > "$run_dir/context.json.tmp" && mv "$run_dir/context.json.tmp" "$run_dir/context.json"
+      if [[ -n "$s_exit" ]]; then
+        _local_mark_exited "$run_dir" "$sid" "$s_exit"
+        echo "completed"; return 0
+      fi
     else
       [[ "$OUTPUT_MODE" != json ]] && err "[$sid] failed (exit $rc): $(jq -rc '.stdout // .' <<<"$out_json" | head -c 160)"
       if [ "$scont" != "true" ]; then
@@ -5090,6 +5191,20 @@ local_submit() {
   local waiting_step; waiting_step="$(jq -r '.waiting.step // ""' "$mf")"
   [ "$waiting_step" = "$step_id" ] || die "run $run_id is waiting on '$waiting_step', not '$step_id'" "usage_error" "submit step id must match manifest.waiting.step"
 
+  # Child gate: a parent paused on a still-waiting subprocess child resumes only
+  # through the child (its completion continues the parent, #107). Submitting to
+  # the parent would skip the child's remaining steps. The child run id lives on
+  # the parent step's waiting receipt.
+  local waiting_child
+  waiting_child="$(jq -r --arg s "$step_id" 'select(.step == $s and .status == "waiting") | .child_run_id // empty' \
+    "$run_dir/audit.jsonl" 2>/dev/null | tail -1)"
+  if [[ -n "$waiting_child" ]] \
+     && [ "$(jq -r '.status // ""' "$OPENSOP_LOCAL_HOME/runs/$waiting_child/manifest.json" 2>/dev/null)" = "waiting" ]; then
+    local child_step; child_step="$(jq -r '.waiting.step // "<step>"' "$OPENSOP_LOCAL_HOME/runs/$waiting_child/manifest.json")"
+    die "run $run_id is waiting on subprocess child run $waiting_child (step '$child_step') — submit to the child, not the parent" \
+        "usage_error" "opensop submit $waiting_child $child_step --output k=v"
+  fi
+
   # Parse submitted outputs.
   local built; built="$(build_payload_object output "$@")"
   local submitted; submitted="$(jq -c '.payload' <<<"$built")"
@@ -5193,6 +5308,12 @@ local_submit() {
   fi
   ctx="$(jq -c --arg id "$step_id" --argjson o "$out_json" '.[$id]=$o' <<<"$ctx")"
 
+  # SPEC §3.15: exit_when on the resumed step (e.g. an escalated judgment a human
+  # just decided) ends the run here. Checked before anything is written.
+  local submit_exit=""
+  submit_exit="$(_local_exit_check "$(jq -c ".steps[$wait_index]" "$proc_file")" "$out_json" "$ctx" "$(jq -c '.inputs // {}' "$mf")")" \
+    || die "cannot evaluate exit_when on step '$step_id'" "parse_error" "exit_when must be \"<ref> <op> <literal>\" (SPEC §2.6)"
+
   # Append a completed receipt for the step we're resuming from.
   # Derive type + executor dynamically from the process file (matches _local_step_loop
   # receipts). The executor uses the same per-type default logic as the step loop.
@@ -5254,7 +5375,11 @@ local_submit() {
   # Pass proc_dir as 5th arg so script paths resolve against the original process
   # directory even when proc_file is the per-run snapshot (#101).
   local loop_status
-  loop_status="$(_local_step_loop "$run_dir" "$proc_file" "$resume_index" "$ctx" "$proc_dir")"
+  if [[ -n "$submit_exit" ]]; then
+    _local_mark_exited "$run_dir" "$step_id" "$submit_exit"; loop_status="completed"
+  else
+    loop_status="$(_local_step_loop "$run_dir" "$proc_file" "$resume_index" "$ctx" "$proc_dir")"
+  fi
 
   local run_status
   case "$loop_status" in
