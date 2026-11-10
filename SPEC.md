@@ -324,7 +324,7 @@ required_if: "status == 'rejected'"
 exit_when: "outputs.score < 0.4"
 ```
 
-Evaluated by `Opensop::ConditionEvaluator` (server) or jq (CLI local engine).
+Evaluated by the server's condition evaluator or by jq (CLI local engine).
 No `eval`, no arbitrary code — the evaluator handles `==`, `!=`, `>=`, `<=`, `>`, `<` against literal scalars.
 
 ---
@@ -1224,13 +1224,13 @@ body ends the loop and the run.
 
 | Component | Responsibility |
 |---|---|
-| **Definition Registry** (`Opensop::Registry`) | Loads `.sop.yaml` from `processes/`, upserts into `sop_processes`. `bin/rails opensop:load_processes` re-syncs. _(Illustrative of a server implementation; not a command of this repo, and no maintained server implements it today.)_ |
-| **Instance Executor** (`Opensop::InstanceExecutor`) | Orchestrates an instance: resolves inputs, evaluates conditions, dispatches step executors, handles early exit. |
-| **Step Executors** (`Opensop::StepExecutors::*`) | One class per step type. See §3. |
-| **Condition Evaluator** (`Opensop::ConditionEvaluator`) | The only safe path for user-authored expressions. No `eval`, no `instance_eval`. |
-| **Input Resolver** (`Opensop::InputResolver`) | Resolves `from:` references against instance state. |
-| **LLM Provider** (`Opensop::LlmProviders::Anthropic`) | Calls Anthropic for `llm` steps. Provider resolved by model name prefix (`claude-*`). |
-| **API Gateway** | Rails controllers under `/sop/*`. Auto-generated from process definitions. |
+| **Definition Registry** | Loads `.sop.yaml` from `processes/`, upserts into `sop_processes`, and can re-sync on demand. _(Illustrative of a server implementation; no maintained server implements it today.)_ |
+| **Instance Executor** | Orchestrates an instance: resolves inputs, evaluates conditions, dispatches step executors, handles early exit. |
+| **Step Executors** | One executor per step type. See §3. |
+| **Condition Evaluator** | The only safe path for user-authored expressions. No `eval`, no dynamic code execution. |
+| **Input Resolver** | Resolves `from:` references against instance state. |
+| **LLM Provider** | Calls the model provider for `llm` steps (e.g. Anthropic). Provider resolved by model name prefix (`claude-*`). |
+| **API Gateway** | HTTP handlers under `/sop/*`. Auto-generated from process definitions. |
 
 ### 4.2 Server HTTP API
 
@@ -2049,7 +2049,7 @@ A process has exactly one of these states at any moment:
 | State | Meaning |
 |---|---|
 | `open` | Declared and available on-demand; no active scheduler is watching it. Starts when called explicitly (`opensop run`, `POST /sop/:name/start`, or a webhook trigger). A process with a trigger configured but no active scheduler is also `open` (see derivation rules below). |
-| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: the Rails dispatcher is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved — not yet implemented) is active and watching the process. |
+| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: its scheduler is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved — not yet implemented) is active and watching the process. |
 | `running` | One or more instances are currently active (state `running` per §4.3). A process can be both `scheduled` and `running` simultaneously; when displaying, `running` takes precedence as the visible state. |
 
 A process with an `interval` or cron trigger declared in its definition but **no active scheduler** must be reported as `open`, not `scheduled`. Implementations may surface the configured trigger as an informational field (e.g. `"configured_trigger": "interval"` / `null`) alongside the `open` state so that tooling can distinguish "open with no trigger" from "open with a trigger pending a scheduler."
@@ -2161,9 +2161,8 @@ scheduler (A3) is active.
 Each run produces a receipt. This section defines the additional per-run fields
 that every conforming implementation must capture to support reproducibility
 comparison and cost visibility. These fields extend the existing local run
-receipt (§5.6, `audit.jsonl`) and are already present in the reference server's
-`sop_llm_calls` table (the Rails `Sop::LlmCall` model captures `model`,
-`input_tokens`, `output_tokens`, `duration_ms`).
+receipt (§5.6, `audit.jsonl`); a server typically already records them per LLM
+call (`model`, `input_tokens`, `output_tokens`, `duration_ms`).
 
 ### 10.2 Per-run captured fields
 
@@ -2229,7 +2228,7 @@ This is complementary to the pre-pause `duration_ms` already in the waiting
 event; analysis tools may sum both segments for total active time across a pause.
 
 **Note:** this is a CLI-local receipt contract. A server implementation
-tracks step timing separately in `sop_llm_calls` and step records; the exact
+tracks step timing separately in its LLM-call and step records; the exact
 server-side API for resumed-completion metrics is part of the observability
 terminal (G1/A2, reserved — not yet implemented).
 
@@ -2269,8 +2268,8 @@ fields (§10.2). Do not rely on a `manifest.metrics` object on current receipts.
 
 ### 10.4 Server — no new columns required
 
-The Rails reference server already captures `model`, `input_tokens`,
-`output_tokens`, and timing in `sop_llm_calls`. Conforming servers must expose
+A server that already records `model`, `input_tokens`, `output_tokens`, and
+timing per LLM call needs no new storage. Conforming servers must expose
 these fields on the instance event stream once §10 is implemented. The exact
 server API for querying per-run metrics is reserved — not yet implemented; it lands with
 the observability terminal (G1/A2).
