@@ -9469,7 +9469,7 @@ for b in claude codex cursor-agent kimi; do
   cat > "$p092/bin/$b" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = "--version" ] && { echo "fake-$(basename "$0") 1.0"; exit 0; }
-echo "$(basename "$0") cwd=$PWD" >> "$FAKE_CLI_LOG"
+echo "$(basename "$0") cwd=$PWD stdin=$(grep -c 'Say ok' || true)" >> "$FAKE_CLI_LOG"
 [ -n "${FAKE_SLEEP:-}" ] && exec sleep "$FAKE_SLEEP"
 # FAKE_BAD_FIRST=<file>: the first call answers schema-invalid JSON (forces one retry).
 ans='{"ok":true}'
@@ -9506,12 +9506,12 @@ for spec in "claude-code:opus-x read-only" "claude-code: workspace-write" "codex
     "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json >/dev/null \
     || { echo "FAIL: P092-a $1 $2 stub run should complete"; exit 1; }
 done
-_argv() { sed -n "${1}p" "$p092/argv.jsonl" | jq -c '.argv[:-1]'; }   # drop the prompt
-[ "$(_argv 1)" = '["claude","-p","--output-format","json","--no-session-persistence","--model","opus-x","--tools","Read,Grep,Glob","--"]' ] \
+_argv() { sed -n "${1}p" "$p092/argv.jsonl" | jq -c '.argv'; }
+[ "$(_argv 1)" = '["claude","-p","--output-format","json","--no-session-persistence","--model","opus-x","--tools","Read,Grep,Glob"]' ] \
   || { echo "FAIL: P092-a claude-code read-only argv: $(_argv 1)"; exit 1; }
-[ "$(_argv 2)" = '["claude","-p","--output-format","json","--no-session-persistence","--permission-mode","auto","--"]' ] \
+[ "$(_argv 2)" = '["claude","-p","--output-format","json","--no-session-persistence","--permission-mode","auto"]' ] \
   || { echo "FAIL: P092-a claude-code workspace-write argv (empty model → no --model): $(_argv 2)"; exit 1; }
-_argv 3 | jq -e --arg w "$p092/work" '.[0:2] == ["codex","exec"] and (index(["-C",$w])) and (index(["-s","read-only"])) and (index(["-m","gpt-x"])) and (index("-o"))' >/dev/null \
+_argv 3 | jq -e --arg w "$p092/work" '.[0:2] == ["codex","exec"] and (index(["-C",$w])) and (index(["-s","read-only"])) and (index(["-m","gpt-x"])) and (index("-o")) and .[-1] == "-"' >/dev/null \
   || { echo "FAIL: P092-a codex read-only argv: $(_argv 3)"; exit 1; }
 _argv 4 | jq -e '(index(["-s","workspace-write"])) and (index("-m") | not)' >/dev/null \
   || { echo "FAIL: P092-a codex workspace-write argv: $(_argv 4)"; exit 1; }
@@ -9521,8 +9521,10 @@ _argv 6 | jq -e '(index(["--sandbox","enabled"])) and (index("--mode") | not)' >
   || { echo "FAIL: P092-a cursor workspace-write argv: $(_argv 6)"; exit 1; }
 [ "$(sed -n 7p "$p092/argv.jsonl" | jq -c '.argv[:-1]')" = '["kimi","--output-format","text","-m","k3","-p"]' ] \
   || { echo "FAIL: P092-a kimi argv: $(sed -n 7p "$p092/argv.jsonl")"; exit 1; }
-sed -n 1p "$p092/argv.jsonl" | jq -e '.argv[-1] | test("precise JSON generator") and test("Say ok.")' >/dev/null \
-  || { echo "FAIL: P092-a the prompt arg should carry the schema instruction + rendered prompt"; exit 1; }
+jq -se '.[0:6] | all(.[]; .stdin | test("precise JSON generator") and test("Say ok."))' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-a claude/codex/cursor should get the schema instruction + rendered prompt on stdin"; exit 1; }
+sed -n 7p "$p092/argv.jsonl" | jq -e '.stdin == "" and (.argv[-1] | test("Say ok."))' >/dev/null \
+  || { echo "FAIL: P092-a kimi's prompt should stay its -p argument"; exit 1; }
 jq -se --arg w "$p092/work" 'all(.[]; .cwd == $w)' "$p092/argv.jsonl" >/dev/null \
   || { echo "FAIL: P092-a every CLI call should run in the declared workdir"; exit 1; }
 echo "PASS: P092-a — argv per provider prefix and permission (model flag omitted for an empty model)"
@@ -9547,6 +9549,8 @@ c_out="$(PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc kimi: full-access "$p09
   || { echo "FAIL: P092-c kimi fake-CLI run should complete (bullet stripped), got: $c_out"; exit 1; }
 [ "$(grep -c "cwd=$p092/work" "$FAKE_CLI_LOG")" -eq 4 ] \
   || { echo "FAIL: P092-c each CLI should run once in the workdir, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
+[ "$(grep -cE '^(claude|codex|cursor-agent) .* stdin=1$' "$FAKE_CLI_LOG")" -eq 3 ] && grep -q '^kimi .* stdin=0$' "$FAKE_CLI_LOG" \
+  || { echo "FAIL: P092-c claude/codex/cursor should read the prompt on stdin, kimi not, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
 echo "PASS: P092-c — claude/codex/cursor/kimi final text captured from each CLI's real output channel"
 
 # (d) model templating: an earlier shell step picks the model.
@@ -9842,6 +9846,42 @@ jq -e 'select(.step=="ask") | .usage == {input_tokens:null, output_tokens:null, 
   "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_stub")/audit.jsonl" >/dev/null \
   || { echo "FAIL: P092-n the stub path should record null usage and attempts 1"; exit 1; }
 echo "PASS: P092-n — per-call usage (tokens, cache reads, cost) is normalized, summed across retries, with attempts, per CLI"
+
+# (o) a context over 256 KiB (past Linux's 128 KiB per-argv-string cap) inside a
+# loop body: templated model + prompt still render, the prompt reaches the CLI
+# on stdin, and a shell step runs with $OSL_CONTEXT unset (stdin carries it).
+cat > "$p092/big.sop.json" <<'JSON'
+{ "name": "p092-big", "steps": [
+  { "id": "big", "type": "shell", "run": "printf '{\"blob\":\"%s\",\"tail\":\"BIGTAIL\"}' \"$(head -c 300000 /dev/zero | tr '\\0' a)\"" },
+  { "id": "cyc", "type": "loop", "loop": { "for_each": [1, 2], "as": "n", "aggregate": { "ok": "last" } },
+    "body": [
+      { "id": "pick", "type": "shell", "run": "jq -c '{m: \"claude-code:big-model\", env: (env.OSL_CONTEXT != null), blob: (.big.blob | length)}'" },
+      { "id": "ask", "type": "llm", "model": "{{ pick.m }}", "prompt": "Item {{ loop.n }} tail {{ big.tail }} {{ big.blob }}",
+        "expected_output_schema": { "ok": { "type": "boolean", "required": true } } } ] } ] }
+JSON
+: > "$p092/argv.jsonl"
+o_out="$(OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/big.sop.json" --json)" \
+  || { echo "FAIL: P092-o a run with a >256 KiB context should complete, got: $o_out"; exit 1; }
+o_dir="$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$o_out")"
+[ "$(wc -c < "$o_dir/loop/cyc/iter-0/context.json")" -gt 262144 ] \
+  || { echo "FAIL: P092-o the loop body's context should be over 256 KiB"; exit 1; }
+jq -se 'length == 2 and all(.[]; (.argv | index(["--model","big-model"])) and (.stdin | test("Item [12] tail BIGTAIL a") and length > 300000))' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-o the templated model and >256 KiB prompt should render in both iterations"; exit 1; }
+jq -e '.pick.env == false and .pick.blob == 300000' "$o_dir/loop/cyc/iter-1/context.json" >/dev/null \
+  && jq -e 'select(.step=="pick") | .stderr | test("OSL_CONTEXT unset")' "$o_dir/loop/cyc/iter-1/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-o a shell step should read the big context on stdin with \$OSL_CONTEXT unset (and say so)"; exit 1; }
+echo "PASS: P092-o — a >256 KiB context in a loop body renders templated model + prompt (prompt on stdin), shell steps read it on stdin"
+
+# (p) a failed template render reports the real error, never "missing model".
+# A >16 KiB prompt needs a temp file; an unusable TMPDIR makes that render fail.
+jq -n --arg p "$(printf 'x%.0s' $(seq 1 20000)) {{ x }}" '{name:"p092-rf", steps:[
+  {id:"ask", type:"llm", model:"claude-code:x", prompt:$p, expected_output_schema:{ok:{type:"boolean", required:true}}}]}' > "$p092/rf.sop.json"
+p_out="$(TMPDIR="$p092/no-such-dir" OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/rf.sop.json" --json 2>/dev/null)" \
+  && { echo "FAIL: P092-p a failed render should fail the step"; exit 1; }
+p_err="$(jq -r 'select(.step=="ask") | .output.error' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$p_out")/audit.jsonl")"
+[[ "$p_err" == "cannot render prompt: template render failed"*"too large for argv"* && "$p_err" != *"missing model"* ]] \
+  || { echo "FAIL: P092-p render failure should carry the jq error, got: $p_err"; exit 1; }
+echo "PASS: P092-p — a failed template render reports the real error, not \"missing model\""
 
 unset FAKE_CLI_LOG
 rm -rf "$p092"

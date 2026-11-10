@@ -12,6 +12,38 @@
 
 set -euo pipefail
 
+# Linux caps ONE argv/env string at 128 KiB (MAX_ARG_STRLEN), and a long run's
+# context, prompts and step outputs outgrow that — jq then fails to exec. This
+# wrapper moves every large --arg/--argjson value into a temp file
+# (--rawfile / --slurpfile, rebound to the same $name), so call sites stay as
+# written. 16384 chars is ≤ 64 KiB even at 4 bytes/char.
+jq() {
+  local a=() pre="" d="" f n=0 filter_at=-1
+  while (( $# )); do
+    case "$1" in
+      --arg|--argjson)
+        if (( ${#3} > 16384 )); then
+          [[ -n "$d" ]] || d="$(mktemp -d 2>/dev/null)" \
+            || { echo "jq: argument --$2 is too large for argv and no temp file could be created (TMPDIR=${TMPDIR:-/tmp})" >&2; return 2; }
+          f="$d/$n"; n=$((n + 1)); printf '%s' "$3" > "$f"
+          if [[ "$1" == --arg ]]; then a+=(--rawfile "$2" "$f")
+          else a+=(--slurpfile "_osl_big_$2" "$f"); pre+="(\$_osl_big_$2[0]) as \$$2 | "; fi
+        else a+=("$1" "$2" "$3"); fi
+        shift 3 ;;
+      --slurpfile|--rawfile) a+=("$1" "$2" "$3"); shift 3 ;;
+      --indent|-L) a+=("$1" "$2"); shift 2 ;;
+      -*) a+=("$1"); shift ;;
+      *) (( filter_at >= 0 )) || filter_at=${#a[@]}; a+=("$1"); shift ;;
+    esac
+  done
+  if [[ -n "$pre" ]]; then
+    if (( filter_at >= 0 )); then a[filter_at]="$pre${a[filter_at]}"; else a+=("$pre."); fi
+  fi
+  local rc=0; command jq "${a[@]}" || rc=$?
+  [[ -z "$d" ]] || rm -rf "$d"
+  return "$rc"
+}
+
 # --------------------------------------------------------------------------- #
 # Constants & paths
 # --------------------------------------------------------------------------- #
@@ -127,7 +159,7 @@ emit_pretty_or_json() {
 # --------------------------------------------------------------------------- #
 
 require_jq() {
-  command -v jq >/dev/null 2>&1 || die "jq is required — install it first" "missing_dependency" "brew install jq"
+  type -P jq >/dev/null 2>&1 || die "jq is required — install it first" "missing_dependency" "brew install jq"
 }
 
 require_curl() {
@@ -3068,12 +3100,19 @@ def ref($ctx; $pinp):
 
 # _local_render <template> <ctx_json> [<proc_inputs_json>]
 # {{ ref }} substitution (SPEC §3.8): each token is replaced by its value
-# (stringified) when present, and left as-is when absent.
+# (stringified) when present, and left as-is when absent. On failure returns 1
+# and prints the jq error instead, so callers never mistake it for an empty value.
 _local_render() {
-  jq -rn --arg tmpl "$1" --argjson ctx "$2" --argjson pinp "${3:-{\}}" "$_OSL_JQ_REF"'
+  local out rc=0
+  out="$(jq -rn --arg tmpl "$1" --argjson ctx "$2" --argjson pinp "${3:-{\}}" "$_OSL_JQ_REF"'
     $tmpl | gsub("\\{\\{\\s*(?<v>[a-zA-Z_][a-zA-Z0-9_-]*(\\.[a-zA-Z0-9_-]+)*)\\s*\\}\\}";
-      (.v | ref($ctx; $pinp)) as $x | if $x != null then ($x | tostring) else "{{" + .v + "}}" end)'
+      (.v | ref($ctx; $pinp)) as $x | if $x != null then ($x | tostring) else "{{" + .v + "}}" end)' 2>&1)" || rc=$?
+  if (( rc )); then printf 'template render failed (jq exit %s): %s' "$rc" "${out:-no message}"; return 1; fi
+  printf '%s' "$out"
 }
+
+# _local_render_err <field> <message> → the step's {error} JSON for a failed render.
+_local_render_err() { jq -nc --arg f "$1" --arg m "$2" '{error:("cannot render " + $f + ": " + $m)}'; }
 
 # _local_eval_cond <expr> <ctx_json> <proc_inputs_json>
 # SPEC §2.6 condition: "<ref> <op> <literal>", op one of == != >= <= > <, the
@@ -3478,6 +3517,14 @@ _local_step_loop() {
         fi
       fi
     fi
+    # $OSL_CONTEXT is one env string, capped at 128 KiB (MAX_ARG_STRLEN) like an
+    # argv string; past that it is left unset (stdin still carries the context)
+    # instead of failing the exec with "Argument list too long".
+    local step_env=(-u OSL_CONTEXT)
+    if [[ "$stype" == automated || "$stype" == shell ]]; then
+      if (( $(printf '%s' "$step_input_ctx" | wc -c) < 131000 )); then step_env=(OSL_CONTEXT="$step_input_ctx")
+      else echo "opensop: context is over 128 KiB — \$OSL_CONTEXT unset for this step; read the context from stdin" >>"$run_dir/$sid.stderr.log"; fi
+    fi
 
     case "$stype" in
       automated)
@@ -3497,14 +3544,14 @@ _local_step_loop() {
         # without +x keep working).
         if [ ! -f "$script" ]; then out_raw="step script not found: $script"; rc=127
         elif [ -x "$script" ]; then
-          out_raw="$(OSL_CONTEXT="$step_input_ctx" OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" "$script" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?
+          out_raw="$(env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" "$script" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?
         else
-          out_raw="$(OSL_CONTEXT="$step_input_ctx" OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash "$script" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?
+          out_raw="$(env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash "$script" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?
         fi
         fi ;;
       shell)
         if [[ -n "$_decl_input_error" ]]; then out_raw="$_decl_input_error"; rc=1
-        else out_raw="$(OSL_CONTEXT="$step_input_ctx" OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash -c "$srun" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?; fi ;;
+        else out_raw="$(env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash -c "$srun" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?; fi ;;
       noop) out_raw="{}"; rc=0 ;;
       form)
         # Pause — append a "waiting" receipt and return the waiting signal.
@@ -3608,8 +3655,11 @@ _local_step_loop() {
               and ((.prompt // .prompt_file // "") != "")' <<<"$step" >/dev/null; then
           jd_escalate="no_agent"; llm_ok=false
         fi
-        llm_model="$(_local_render "$(jq -r '.model // ""' <<<"$step")" "$ctx" "$llm_pinp")"
-        if [[ "$llm_ok" == true && -z "$llm_model" ]]; then
+        if ! llm_model="$(_local_render "$(jq -r '.model // ""' <<<"$step")" "$ctx" "$llm_pinp")"; then
+          # (a judgment already escalating no_agent keeps that outcome)
+          [[ "$llm_ok" == true ]] && { out_raw="$(_local_render_err model "$llm_model")"; rc=1; llm_ok=false; }
+          llm_model=""
+        elif [[ "$llm_ok" == true && -z "$llm_model" ]]; then
           out_raw='{"error":"llm step is missing model"}'; rc=1; llm_ok=false
         fi
         if [[ "$llm_ok" == true ]]; then
@@ -3637,11 +3687,14 @@ _local_step_loop() {
           # {{ ref }}-templated like model/workdir, so an earlier step can choose it;
           # the rendered value must still be in the closed vocabulary below (an
           # unresolved token stays literal and is refused).
-          llm_perm="$(_local_render "$(jq -r '.permission // "read-only"' <<<"$step")" "$ctx" "$llm_pinp")"; s_llm_permission="$llm_perm"
-          case "$llm_perm" in
+          if ! llm_perm="$(_local_render "$(jq -r '.permission // "read-only"' <<<"$step")" "$ctx" "$llm_pinp")"; then
+            out_raw="$(_local_render_err permission "$llm_perm")"; rc=1; llm_ok=false; llm_perm=""
+          fi
+          s_llm_permission="$llm_perm"
+          if [[ "$llm_ok" == true ]]; then case "$llm_perm" in
             read-only|workspace-write|full-access) ;;
             *) out_raw="{\"error\":\"permission must be read-only, workspace-write or full-access, got '$llm_perm'\"}"; rc=1; llm_ok=false ;;
-          esac
+          esac; fi
         fi
         if [[ "$llm_ok" == true && "$llm_cli" == kimi && "$llm_perm" != full-access ]]; then
           out_raw="{\"error\":\"kimi cannot enforce permission '$llm_perm' (kimi -p has no sandbox) — refusing to run with more access; declare permission: full-access to run it unconfined\"}"; rc=1; llm_ok=false
@@ -3659,9 +3712,10 @@ _local_step_loop() {
           fi
         fi
         if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
-          llm_workdir="$(_local_render "$(jq -r '.workdir // ""' <<<"$step")" "$ctx" "$llm_pinp")"
-          [[ -z "$llm_workdir" ]] && llm_workdir="$run_cwd"
-          if [[ ! -d "$llm_workdir" ]]; then
+          if ! llm_workdir="$(_local_render "$(jq -r '.workdir // ""' <<<"$step")" "$ctx" "$llm_pinp")"; then
+            out_raw="$(_local_render_err workdir "$llm_workdir")"; rc=1; llm_ok=false
+          elif [[ -z "$llm_workdir" ]]; then llm_workdir="$run_cwd"; fi
+          if [[ "$llm_ok" == true && ! -d "$llm_workdir" ]]; then
             out_raw="$(jq -nc --arg d "$llm_workdir" '{error:("workdir not found: " + $d)}')"; rc=1; llm_ok=false
           fi
         fi
@@ -3704,7 +3758,9 @@ _local_step_loop() {
         # Substitute {{ var }} tokens from the current context.
         local llm_rendered_prompt=""
         if [[ "$llm_ok" == true ]]; then
-          llm_rendered_prompt="$(_local_render "$llm_prompt_body" "$ctx" "$llm_pinp")"
+          if ! llm_rendered_prompt="$(_local_render "$llm_prompt_body" "$ctx" "$llm_pinp")"; then
+            out_raw="$(_local_render_err prompt "$llm_rendered_prompt")"; rc=1; llm_ok=false
+          fi
         fi
 
         # Schema (optional). A judgment's schema is its declared outputs (each
@@ -3769,11 +3825,12 @@ $llm_rendered_prompt"
 
           # CLI providers: one prompt (schema instruction + rendered prompt),
           # non-interactive, only the final text captured. argv[0] is the bare
-          # command name; it is exec'd via llm_bin_path. stdin is /dev/null so a
-          # CLI never blocks reading it.
-          # ponytail: the prompt rides in argv, so one prompt is capped at Linux's
-          # 128 KiB MAX_ARG_STRLEN; pipe it on stdin if prompts outgrow that.
-          local llm_argv=() llm_lastmsg=""
+          # command name; it is exec'd via llm_bin_path. The prompt goes on stdin
+          # (no 128 KiB MAX_ARG_STRLEN cap) for claude, codex (`-`) and cursor —
+          # each verified to read a piped prompt.
+          # ponytail: kimi -p takes the prompt only as an argument, so a kimi
+          # prompt is still capped at 128 KiB; move it to stdin once kimi reads one.
+          local llm_argv=() llm_lastmsg="" llm_stdin=""
           if [[ -n "$llm_cli" ]]; then
             local llm_full_prompt="$llm_system_prompt
 
@@ -3787,7 +3844,7 @@ $llm_attempt_prompt"
                   workspace-write) llm_argv+=(--permission-mode auto) ;;  # acceptEdits would block Bash under -p
                   full-access)     llm_argv+=(--permission-mode bypassPermissions) ;;
                 esac
-                llm_argv+=(-- "$llm_full_prompt") ;;
+                llm_stdin="$llm_full_prompt" ;;
               codex)
                 llm_lastmsg="$(mktemp)"
                 llm_argv=(codex exec --skip-git-repo-check --ephemeral --color never --json -C "$llm_workdir" -o "$llm_lastmsg")
@@ -3797,7 +3854,7 @@ $llm_attempt_prompt"
                   workspace-write) llm_argv+=(-s workspace-write) ;;
                   full-access)     llm_argv+=(-s danger-full-access) ;;
                 esac
-                llm_argv+=(-- "$llm_full_prompt") ;;
+                llm_argv+=(-); llm_stdin="$llm_full_prompt" ;;
               cursor)
                 llm_argv=(cursor-agent -p --output-format json --trust --workspace "$llm_workdir")
                 [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
@@ -3806,7 +3863,7 @@ $llm_attempt_prompt"
                   workspace-write) llm_argv+=(--sandbox enabled) ;;
                   full-access)     llm_argv+=(--force --sandbox disabled) ;;
                 esac
-                llm_argv+=(-- "$llm_full_prompt") ;;
+                llm_stdin="$llm_full_prompt" ;;
               kimi)
                 # No --auto/--yolo/--plan: kimi rejects each alongside --prompt; plain -p
                 # already runs every tool without asking (hence full-access only).
@@ -3815,8 +3872,8 @@ $llm_attempt_prompt"
                 llm_argv+=(-p "$llm_full_prompt") ;;
             esac
             if [[ -n "${OSL_LLM_ARGV_FILE:-}" ]]; then
-              printf '%s\0' "${llm_argv[@]}" | jq -cRs --arg cli "$llm_cli" --arg cwd "$llm_workdir" \
-                '{cli:$cli, cwd:$cwd, argv:(split("\u0000")[:-1])}' >> "$OSL_LLM_ARGV_FILE"
+              printf '%s\0' "${llm_argv[@]}" | jq -cRs --arg cli "$llm_cli" --arg cwd "$llm_workdir" --arg in "$llm_stdin" \
+                '{cli:$cli, cwd:$cwd, argv:(split("\u0000")[:-1]), stdin:$in}' >> "$OSL_LLM_ARGV_FILE"
             fi
           fi
 
@@ -3828,7 +3885,7 @@ $llm_attempt_prompt"
           elif [[ -n "$llm_cli" ]]; then
             local llm_cli_out="" llm_cli_rc=0 llm_to=()
             [[ -n "$llm_timeout" ]] && llm_to=(timeout --kill-after=10 "$llm_timeout")
-            llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" </dev/null 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
+            llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" < <(printf '%s' "$llm_stdin") 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
             # Usage first: a failed or timed-out call may still have spent tokens.
             _local_llm_add_usage "$llm_cli" "$llm_cli_out"
             # The codex -o file is read and removed here on every outcome (success,
@@ -3878,8 +3935,8 @@ $llm_attempt_prompt"
               -H "content-type: application/json"
               -o "$llm_resp_tmp"
               -w "%{http_code}"
-              -d "$llm_req_body")
-            if ! llm_http_status="$(curl "${llm_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
+              --data-binary @-)   # body on stdin: it grows with the prompt (128 KiB argv cap)
+            if ! llm_http_status="$(printf '%s' "$llm_req_body" | curl "${llm_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
               rm -f "$llm_resp_tmp"
               out_raw='{"error":"curl failed calling Anthropic API"}'; rc=1; llm_failed=true; llm_ok=false; continue
             fi
@@ -4303,10 +4360,10 @@ $llm_attempt_prompt"
             # Body (not for GET/DELETE).
             case "$wh_method" in
               GET|DELETE) ;;
-              *)          wh_curl_args+=(--data-raw "$wh_body") ;;
+              *)          wh_curl_args+=(--data-binary @-) ;;  # body on stdin: no 128 KiB argv cap
             esac
 
-            if ! wh_resp_code="$(curl "${wh_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
+            if ! wh_resp_code="$(printf '%s' "$wh_body" | curl "${wh_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
               rm -f "$wh_curl_tmp"
               out_raw='{"error":"curl failed for webhook step"}'; rc=1; wh_ok=false; return
             fi
@@ -4632,8 +4689,11 @@ $llm_attempt_prompt"
           lp_ok=false; lp_err="loop.aggregate values must be sum, concat or last"
         fi
         if [[ "$lp_ok" == true ]]; then
-          lp_max="$(_local_render "$(jq -r '.loop.max_iterations // 100 | tostring' <<<"$step")" "$ctx" "$lp_pinp")"
-          [[ "$lp_max" =~ ^[1-9][0-9]*$ ]] || { lp_ok=false; lp_err="loop.max_iterations must be a positive integer, got '$lp_max'"; }
+          if ! lp_max="$(_local_render "$(jq -r '.loop.max_iterations // 100 | tostring' <<<"$step")" "$ctx" "$lp_pinp")"; then
+            lp_ok=false; lp_err="cannot render loop.max_iterations: $lp_max"
+          elif [[ ! "$lp_max" =~ ^[1-9][0-9]*$ ]]; then
+            lp_ok=false; lp_err="loop.max_iterations must be a positive integer, got '$lp_max'"
+          fi
         fi
         if [[ "$lp_ok" == true && "$lp_kind" == for_each ]]; then
           lp_as="$(jq -r '.loop.as // "item"' <<<"$step")"
@@ -8674,7 +8734,7 @@ cmd_doctor() {
 
   # jq: critical dependency.
   local jq_ok=false jq_version="absent"
-  if command -v jq >/dev/null 2>&1; then
+  if type -P jq >/dev/null 2>&1; then
     jq_ok=true
     jq_version=$(jq --version 2>/dev/null || echo "unknown")
   fi
