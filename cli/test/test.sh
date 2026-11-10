@@ -9907,6 +9907,26 @@ for spec in "claude-code:x read-only claude-limit" "kimi: full-access kimi-limit
 done
 echo "PASS: P092-q — a failed CLI call records stderr + provider message; usage limits are provider_limit, crashes are not"
 
+# (r) the agent-loop examples run end to end (stubbed models) in a scratch repo,
+# leave the user's git index alone, and refuse to start without a workdir.
+r_repo="$p092/r-repo"; mkdir -p "$r_repo"
+git -C "$r_repo" init -q && echo hi > "$r_repo/a.txt" && git -C "$r_repo" add a.txt \
+  && git -C "$r_repo" -c user.name=t -c user.email=t@example.com commit -qm init
+echo staged > "$r_repo/b.txt"; git -C "$r_repo" add b.txt
+r_stub='{"plan":"p","critique":"c","units":["u1"],"report":"r","findings":"none","blocking":0,"major":0,"verdict":"accept","feedback":"ok","summary":"s"}'
+for r_p in dev-loop planner-worker; do
+  r_out="$(OSL_LLM_STUB="$r_stub" "$cli" run "$here/examples/agent-loops/$r_p.sop.json" --input workdir="$r_repo" \
+    --input request="Add a greeting" --input test_command="test -f a.txt" --json)" \
+    || { echo "FAIL: P092-r $r_p example should complete, got: $r_out"; exit 1; }
+  jq -e '.cycle == {iterations: 1, done: 1}' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$r_out")/context.json" >/dev/null \
+    || { echo "FAIL: P092-r $r_p should accept in one cycle"; exit 1; }
+done
+[ "$(git -C "$r_repo" status --short)" = "A  b.txt" ] && [ -s "$r_repo/.agent-loop/full.diff" ] \
+  || { echo "FAIL: P092-r diffs.sh should write .agent-loop/full.diff (git-excluded) and leave the index alone: $(git -C "$r_repo" status --short)"; exit 1; }
+"$cli" run "$here/examples/agent-loops/planner-worker.sop.json" --input request=x --input test_command=true --json >/dev/null 2>&1 \
+  && { echo "FAIL: P092-r setup should refuse a missing workdir"; exit 1; }
+echo "PASS: P092-r — agent-loop examples (dev-loop, planner-worker) run end to end and leave the git index alone"
+
 unset FAKE_CLI_LOG
 rm -rf "$p092"
 

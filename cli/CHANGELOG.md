@@ -23,6 +23,8 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 - **`timeout` bounds each CLI-provider attempt** (coreutils `timeout`, TERM then KILL to the CLI's process group). A timeout fails the step with a clear error, and the codex `-o` temp file is removed on every outcome. Without `timeout`, calls stay unbounded.
 - `manifest.cwd` records where the run was started; a CLI step's default `workdir` uses it, including after `submit`, parent continuation, and inside loop bodies and subprocess children.
 
+- **Agent-loop examples** in `cli/examples/agent-loops/`: `planner-worker` (plan, workers, test gate, fresh reviewer, repeat) and `dev-loop` (plan, fresh critique, revise, workers, gate, adversarial review, fresh rating, delta-judged fix rounds). Both run on local CLI providers against a git checkout; see its README.
+
 ### Changed
 
 - **`expected_output_schema` is validated recursively against the full mini-grammar** (`object` with nested `properties`, `array[<type>]`, `enum[...]` shorthand, nested shorthand objects) for the API and every CLI provider. Before, `{x: {type: object}}` accepted a string. This is stricter: e.g. the shipped `meeting-action-items` SOP now fails when the model returns a non-array `items`.
