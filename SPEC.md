@@ -749,7 +749,7 @@ exists and the instance transitions to a terminal/waiting state, but the core
 business logic is not implemented. "Not in profile" means the step type is not
 dispatched or recognized in that profile.
 
-| Step type | Server profile | Local profile (CLI v0.9.2) | Primary waiting reason |
+| Step type | Server profile | Local profile (CLI v0.10.0) | Primary waiting reason |
 |---|---|---|---|
 | `automated` | Working | Working | — (synchronous) |
 | `shell` | Not in profile | Working (local-only extension) | — (synchronous) |

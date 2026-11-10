@@ -994,7 +994,7 @@ work; v0.6 features only activate inside a cell.
 - **Multi-word `search` and `suggest`** — queries are now tokenized on
   whitespace and scored per-token, with hyphenated process names also
   tokenized on `-`/`_`. `search "morning briefing"` now correctly
-  matches `darwin-morning-briefing`. Single-word queries unchanged.
+  matches `team-morning-briefing`. Single-word queries unchanged.
 
 ### Changed
 
@@ -1002,7 +1002,7 @@ work; v0.6 features only activate inside a cell.
   `outputs_summary` (already in the `/sop/` discovery response, just
   unused) are now indexed alongside name + description + tags.
   Expected ~30% recall lift on "what produces X?" / "I want Y"
-  intent queries. Reported by the Darwin agent.
+  intent queries. Reported by an agent user.
 
 ---
 

@@ -50,7 +50,7 @@ Mixing vendors is the point of the fresh reviewer and rater. A reviewer from a
 different model family catches more than one sharing the worker's blind spots:
 
 ```bash
---input reviewer=codex:gpt-6.1-sol --input worker=cursor:
+--input reviewer=codex: --input worker=cursor:
 ```
 
 `kimi -p` has no sandbox, so OpenSOP only runs kimi with `full-access`. To use it
