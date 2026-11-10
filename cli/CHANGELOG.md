@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- `info` labels the file it read `file:` instead of `written to:` (it writes nothing).
 - **`doctor` flags two installs**: when the `opensop` on PATH is a different version from the one running, it says so; `--json` gains `path_version` and `path_version_mismatch`.
 - **`upgrade` installs the latest GitHub release**, as it says, instead of whatever is on `main`. It asks the GitHub API for the latest release tag, and when the running CLI is already newer it says so instead of "upgrading" backwards. `--pin X.Y.Z` is unchanged and can still downgrade. The downloaded binary's embedded version must match the tag either way. `help` labels local commands "no OpenSOP server needed" (it said "no curl", which is wrong for `upgrade` and `pull`).
 - **`run`/`submit`/`heal` "next" hints name the fields to submit** (`--output email=...`, `--output decision=<approve|reject>`) instead of `--output k=v`. For an escalated judgment they say why (low confidence vs. threshold, required human review, no agent) and show the agent's proposal.

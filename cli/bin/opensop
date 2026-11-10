@@ -9352,7 +9352,7 @@ cmd_pull() {
 # `sop.*` is the current distribution-metadata object (SPEC 2.8); `recipe.*` is
 # a deprecated alias. If both are present in the file, `sop` wins.
 _sop_print_summary() {
-  local file="$1" source_url="$2" sha256="$3"
+  local file="$1" source_url="$2" sha256="$3" file_label="${4:-written to:}"
   local meta
   meta=$(jq -c '
     (if has("process") then .process else . end) as $p |
@@ -9385,7 +9385,7 @@ _sop_print_summary() {
   if [[ -n "$sha256" ]]; then
     printf '  %-16s %s\n' "sha256:"  "$sha256"
   fi
-  printf '  %-16s %s\n' "written to:" "$file"
+  printf '  %-16s %s\n' "$file_label" "$file"
 }
 
 # --------------------------------------------------------------------------- #
@@ -9563,7 +9563,7 @@ cmd_info() {
   if _output_is_json; then
     _sop_json "$file" "$sop_source" "$file_hash" "$sop_install" "$sop_tags"
   else
-    _sop_print_summary "$file" "$sop_source" "$file_hash"
+    _sop_print_summary "$file" "$sop_source" "$file_hash" "file:"
     if [[ -n "$sop_install" ]]; then
       printf '  %-16s %s\n' "install:" "$sop_install"
     fi

@@ -10136,6 +10136,14 @@ PATH="$p0100l:$PATH" "$cli" doctor --json | jq -e '.path_version_mismatch == fal
 echo "PASS: P0100-l — doctor flags a different opensop version on PATH"
 rm -rf "$p0100l"
 
+# (m) info writes nothing, so it does not say "written to:".
+if script -qec true /dev/null >/dev/null 2>&1; then
+  m_out="$(script -qec "'$cli' info '$here/examples/greet.sop.json'" /dev/null)"
+  grep -q 'written to' <<<"$m_out" && { echo "FAIL: P0100-m info says written to: $m_out"; exit 1; }
+  grep -q 'file: .*greet.sop.json' <<<"$m_out" || { echo "FAIL: P0100-m info file line: $m_out"; exit 1; }
+  echo "PASS: P0100-m — info labels the file it read, not \"written to\""
+fi
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
