@@ -9798,6 +9798,25 @@ set -e
   || { echo "FAIL: P092-l submitting to the child should still continue the parent"; exit 1; }
 echo "PASS: P092-l — parent submit is refused while its subprocess child waits (error names the child run)"
 
+# (m) permission is {{ ref }}-templated (one shell step picks model + permission) and still vocabulary-checked.
+_m_run() {  # <picked permission> <permission field> → prints the ask step's receipt
+  jq -n --arg pp "$1" --arg pf "$2" '{name:"p092-m", steps:[
+    {id:"pick", type:"shell", run:("echo " + ({model:"kimi:", permission:$pp} | tojson | @sh))},
+    {id:"ask", type:"llm", model:"{{ pick.model }}", permission:$pf, prompt:"Say ok.",
+     expected_output_schema:{ok:{type:"boolean", required:true}}}]}' > "$p092/m.sop.json"
+  local o; set +e; o="$(OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/m.sop.json" --json 2>/dev/null)"; set -e
+  jq -c 'select(.step=="ask")' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$o")/audit.jsonl"
+}
+_m_run full-access '{{ pick.permission }}' | jq -e '.status == "completed" and .provider == "kimi" and .permission == "full-access"' >/dev/null \
+  || { echo "FAIL: P092-m {{ pick.permission }} = full-access should let a kimi step run"; exit 1; }
+_m_run admin '{{ pick.permission }}' | jq -e '.status == "failed" and (.output.error | contains("permission must be")) and .permission == "admin"' >/dev/null \
+  || { echo "FAIL: P092-m a rendered permission outside the vocabulary should be refused"; exit 1; }
+_m_run full-access '{{ nope.permission }}' | jq -e '.status == "failed" and (.output.error | contains("permission must be"))' >/dev/null \
+  || { echo "FAIL: P092-m an unresolved permission template should be refused, not defaulted"; exit 1; }
+_m_run workspace-write '{{ pick.permission }}' | jq -e '.status == "failed" and (.output.error | contains("kimi cannot enforce"))' >/dev/null \
+  || { echo "FAIL: P092-m a templated permission kimi cannot back should still be refused"; exit 1; }
+echo "PASS: P092-m — permission is {{ ref }}-templated from an earlier step and the rendered value is vocabulary-checked"
+
 unset FAKE_CLI_LOG
 rm -rf "$p092"
 
