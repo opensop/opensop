@@ -9956,7 +9956,22 @@ a_id="$("$cli" run "$p0100/p.sop.json" --input topic=tides --json | jq -r .run_i
   || { echo "FAIL: P0100-a failed status: $("$cli" status "$a_id" --json)"; exit 1; }
 echo "PASS: P0100-a — status carries run_dir, the rendered waiting description and the failing step's stderr"
 rm -rf "$p0100"
-rm -rf "$p0100"
+
+# (b) auto output mode is decided by the caller's stdout, not by the $(...)
+# pipe inside the CLI: in a terminal, `ps` and `steps` print their human views.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  p0100b="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100b/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+  b_id="$("$cli" run "$here/examples/greet.sop.json" --input name=b --json | jq -r .run_id)"
+  b_ps="$(cd "$here/examples" && script -qec "'$cli' ps" /dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+  printf '%s' "$b_ps" | head -1 | grep -q '^NAME ' || { echo "FAIL: P0100-b ps in a TTY is not the table: $b_ps"; exit 1; }
+  b_steps="$(script -qec "'$cli' steps $b_id" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  [ "$(printf '%s\n' "$b_steps" | head -1)" = "{" ] || { echo "FAIL: P0100-b steps in a TTY is not pretty: $b_steps"; exit 1; }
+  "$cli" ps | jq -e 'type == "array"' >/dev/null || { echo "FAIL: P0100-b piped ps is not JSON"; exit 1; }
+  echo "PASS: P0100-b — ps/steps print human views in a terminal, JSON when piped"
+  rm -rf "$p0100b"
+else
+  echo "SKIP: P0100-b — no util-linux script(1)"
+fi
 
 # Cleanup.
 unset OPENSOP_SOPS_BASE

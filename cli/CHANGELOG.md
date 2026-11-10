@@ -9,6 +9,10 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pretty output in a terminal works again.** The TTY check ran inside `$(...)`, where stdout is always a pipe, so `ps`, `steps`, `watch` and every other auto-mode view printed compact JSON even in a terminal. Whether stdout is a terminal is now decided once at startup.
+
 ## [0.9.2] — 2026-10-18
 
 ### Added

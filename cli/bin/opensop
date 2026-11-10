@@ -60,7 +60,10 @@ readonly CACHE_FILE="$OPENSOP_HOME/instances.tsv"
 # Output helpers
 # --------------------------------------------------------------------------- #
 
-is_tty() { [[ -t 1 ]]; }
+# Decided once, at startup: callers often run inside $(...), where fd 1 is a
+# pipe even when the user's terminal is a TTY.
+_STDOUT_TTY=false; [[ -t 1 ]] && _STDOUT_TTY=true
+is_tty() { [[ "$_STDOUT_TTY" == true ]]; }
 
 # Color support — only when stdout is a TTY and NO_COLOR is unset.
 if is_tty && [[ -z "${NO_COLOR:-}" ]]; then
@@ -8981,7 +8984,7 @@ cmd_doctor() {
 _output_is_json() {
   case "$OUTPUT_MODE" in
     json) return 0 ;;
-    auto) [[ -t 1 ]] && return 1 || return 0 ;;
+    auto) is_tty && return 1 || return 0 ;;
     *)    return 1 ;;
   esac
 }
