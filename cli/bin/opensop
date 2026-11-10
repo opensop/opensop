@@ -6582,11 +6582,17 @@ local_cancel() {
 
 # opensop runs  — list local runs (always local; the server analogue is `instances`)
 local_runs() {
-  [ -d "$OPENSOP_LOCAL_HOME/runs" ] || { info "(no local runs yet — opensop run <process.sop.json>)"; return 0; }
+  local json=false; [[ "$(_resolve_output_mode)" == json ]] && json=true
+  if [ ! -d "$OPENSOP_LOCAL_HOME/runs" ]; then
+    $json && echo '[]' || info "(no local runs yet — opensop run <process.sop.json>)"
+    return 0
+  fi
+  local d
   for d in "$OPENSOP_LOCAL_HOME"/runs/*/; do
     [ -f "$d/manifest.json" ] || continue
-    jq -r '"\(.run_id)\t\(.status)\t\(.process)\t\(.started_at)"' "$d/manifest.json"
-  done | sort
+    if $json; then jq -c '{run_id, status, process, started_at}' "$d/manifest.json"
+    else jq -r '"\(.run_id)\t\(.status)\t\(.process)\t\(.started_at)"' "$d/manifest.json"; fi
+  done | if $json; then jq -sc 'sort_by(.run_id)'; else sort; fi
 }
 
 # opensop show <run_id>  — a local run's manifest + per-step receipts
@@ -6594,7 +6600,7 @@ local_show() {
   local rid="${1:-}"; [ -n "$rid" ] || die "usage: opensop show <run_id>" "usage_error" "run opensop runs"
   local d="$OPENSOP_LOCAL_HOME/runs/$rid"
   [ -d "$d" ] || die "no such local run: $rid (see: opensop runs)" "instance_not_found"
-  if [[ "$OUTPUT_MODE" == "json" ]]; then
+  if [[ "$(_resolve_output_mode)" == "json" ]]; then
     jq -nc --argjson m "$(cat "$d/manifest.json")" --argjson s "$(jq -s '.' "$d/audit.jsonl" 2>/dev/null || echo '[]')" \
       '{manifest:$m, steps:$s}'
   else

@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`runs` and `show` follow the output contract**: JSON with `--json` or when piped, human text in a terminal. `runs --json` is an array of `{run_id, status, process, started_at}` (it printed TSV); piped `show` prints `{manifest, steps}` (it printed prose).
 - **A failing step's stderr reaches you.** The terminal failure line shows its last lines (it used to print `failed (exit 2): ` and nothing else), and `fault.json` gains `stderr` (last 4 KiB), which the `debug_prompt` and `heal` also show.
 - **`dry-run` reports step types the local engine cannot run** (e.g. `notification`, or a typo), including inside loop bodies, as `valid: false` with a `steps.<id>.type` error. Before, it said `valid: true` and `run` then failed.
 - **`dry-run` no longer crashes on a `loop` whose `body` is an array** (both agent-loop examples hit it) or on a `{name: type}` outputs map. The loop preview names its `for_each`/`repeat_until`/`while` and every body step.

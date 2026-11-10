@@ -10036,6 +10036,17 @@ grep -q 'the-real-reason' <<<"$("$cli" heal "$f_id")" || { echo "FAIL: P0100-f h
 echo "PASS: P0100-f — a failing step's stderr is in the failure line, fault.json and heal"
 rm -rf "$p0100f"
 
+# (g) runs and show honour "JSON when piped or with --json".
+p0100g="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100g/home"
+[ "$("$cli" runs --json)" = "[]" ] || { echo "FAIL: P0100-g runs --json with no runs"; exit 1; }
+g_id="$("$cli" run "$here/examples/greet.sop.json" --input name=g --json | jq -r .run_id)"
+"$cli" runs --json | jq -e --arg id "$g_id" '.[0].run_id == $id and .[0].status == "completed" and .[0].process == "greet"' >/dev/null \
+  || { echo "FAIL: P0100-g runs --json: $("$cli" runs --json)"; exit 1; }
+"$cli" runs | jq -e 'length == 1' >/dev/null || { echo "FAIL: P0100-g piped runs is not JSON"; exit 1; }
+"$cli" show "$g_id" | jq -e '.manifest.run_id and (.steps | length) == 2' >/dev/null || { echo "FAIL: P0100-g piped show is not JSON"; exit 1; }
+echo "PASS: P0100-g — runs and show print JSON when piped or with --json"
+rm -rf "$p0100g"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
