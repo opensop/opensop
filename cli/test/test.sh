@@ -9973,6 +9973,29 @@ else
   echo "SKIP: P0100-b — no util-linux script(1)"
 fi
 
+# (c) run enforces required inputs the way dry-run does, and the object form
+# {"x": {"type": ..., "required": true}} (what onboard scaffolds) is a typed
+# definition, not a default value. The onboard scaffold runs end to end.
+p0100c="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100c/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+cat > "$p0100c/p.sop.json" <<'JSON'
+{"name":"p0100c","inputs":{"text":{"type":"string","required":true},"n":{"type":"number"},"greeting":"hi"},
+ "steps":[{"id":"s","type":"shell","run":"jq -c '{text, greeting}'"}]}
+JSON
+c_err="$("$cli" run "$p0100c/p.sop.json" --json 2>&1 >/dev/null)" && { echo "FAIL: P0100-c run without a required input succeeded"; exit 1; }
+jq -e '.error == "usage_error" and (.message | test("required field missing: text"))' <<<"$c_err" >/dev/null \
+  || { echo "FAIL: P0100-c missing-input error: $c_err"; exit 1; }
+[ -z "$(ls "$OPENSOP_LOCAL_HOME/runs" 2>/dev/null)" ] || { echo "FAIL: P0100-c a refused run left a run dir"; exit 1; }
+"$cli" run "$p0100c/p.sop.json" --input text=a --input n=x --json >/dev/null 2>&1 && { echo "FAIL: P0100-c n=x accepted for a number"; exit 1; }
+c_id="$("$cli" run "$p0100c/p.sop.json" --input text=a --json | jq -r .run_id)"
+jq -e '.s == {text: "a", greeting: "hi"} and (has("n") | not)' "$OPENSOP_LOCAL_HOME/runs/$c_id/context.json" >/dev/null \
+  || { echo "FAIL: P0100-c typed defs leaked into context: $(cat "$OPENSOP_LOCAL_HOME/runs/$c_id/context.json")"; exit 1; }
+(cd "$p0100c" && "$cli" onboard --stub --n 1 --json >/dev/null) || { echo "FAIL: P0100-c onboard scaffold"; exit 1; }
+c_ob="$(cd "$p0100c" && OSL_LLM_STUB='{"result":"ok"}' "$cli" run my-process.sop.json --input input_text=hello --json | jq -r .run_id)"
+jq -e '.input_text == "hello" and .extract.result == "ok"' "$OPENSOP_LOCAL_HOME/runs/$c_ob/context.json" >/dev/null \
+  || { echo "FAIL: P0100-c onboard scaffold run: $(cat "$OPENSOP_LOCAL_HOME/runs/$c_ob/context.json")"; exit 1; }
+echo "PASS: P0100-c — run refuses missing/invalid inputs; typed object-form inputs are definitions; the onboard scaffold runs"
+rm -rf "$p0100c"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

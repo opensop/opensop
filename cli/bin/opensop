@@ -2695,29 +2695,7 @@ cmd_dry_run() {
 
   # 2. Validate inputs against process.inputs definition.
   local errors_json
-  errors_json=$(echo "$schema" | jq -c \
-    --argjson supplied "$inputs" '
-    [ .process.inputs[]? |
-      . as $field |
-      ($supplied[$field.name]) as $val |
-      # Required check.
-      (if ($field.required == true) and ($val == null) then
-        {path: ("inputs." + $field.name), message: ("required field missing: " + $field.name)}
-      else null end),
-      # Type check (best-effort).
-      (if $val != null then
-        if   $field.type == "number"  and ($val | type) != "number"  then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a number")}
-        elif $field.type == "boolean" and ($val | type) != "boolean" then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a boolean")}
-        elif $field.type == "enum" and ($field.values != null) and ([$field.values[] | . == $val] | any | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be one of: " + ($field.values | join(", ")))}
-        elif $field.type == "string" and $field.format == "email" and ($val | type) == "string" and ($val | test("^[^@]+@[^@]+\\.[^@]+$") | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " does not look like an email address")}
-        else null end
-      else null end)
-    ] | map(select(. != null))
-  ')
+  errors_json=$(_input_errors "$schema" "$inputs")
 
   local valid=true
   local err_count; err_count=$(echo "$errors_json" | jq 'length')
@@ -3261,6 +3239,51 @@ _local_finalize_trap() {
 }
 
 # opensop run <process.sop.json> --local [--input k=v ...]
+# _input_errors <schema-json {process:{inputs:[...]}}> <supplied-json>
+#   The required/type/enum/format checks shared by dry-run (local and remote)
+#   and local run. Prints a JSON array of {path, message}.
+_input_errors() {
+  jq -c --argjson supplied "$2" '
+    [ .process.inputs[]? |
+      . as $field |
+      ($supplied[$field.name]) as $val |
+      # Required check.
+      (if ($field.required == true) and ($val == null) then
+        {path: ("inputs." + $field.name), message: ("required field missing: " + $field.name)}
+      else null end),
+      # Type check (best-effort).
+      (if $val != null then
+        if   $field.type == "number"  and ($val | type) != "number"  then
+          {path: ("inputs." + $field.name), message: ($field.name + " must be a number")}
+        elif $field.type == "boolean" and ($val | type) != "boolean" then
+          {path: ("inputs." + $field.name), message: ($field.name + " must be a boolean")}
+        elif $field.type == "enum" and ($field.values != null) and ([$field.values[] | . == $val] | any | not) then
+          {path: ("inputs." + $field.name), message: ($field.name + " must be one of: " + ($field.values | join(", ")))}
+        elif $field.type == "string" and $field.format == "email" and ($val | type) == "string" and ($val | test("^[^@]+@[^@]+\\.[^@]+$") | not) then
+          {path: ("inputs." + $field.name), message: ($field.name + " does not look like an email address")}
+        else null end
+      else null end)
+    ] | map(select(. != null))
+  ' <<<"$1"
+}
+
+# _input_decls (jq def): normalise a process's `inputs` to the array form
+# [{name, type?, required?, default?, ...}]. The object form maps a name to
+# either a typed definition (an object with a "type" key, as `onboard`
+# scaffolds) or a plain default value.
+_INPUT_DECLS_JQ='def _input_decls:
+  if type == "array" then .
+  elif type == "object" then [to_entries[] |
+    if (.value | type) == "object" and (.value | has("type")) then {name: .key} + .value
+    else {name: .key, default: .value} end]
+  else [] end;'
+
+# _local_input_defaults <schema-json> <supplied-json>
+#   Declared defaults deep-merged under the supplied inputs.
+_local_input_defaults() {
+  jq -c --argjson i "$2" '[.process.inputs[]? | select(.name != null and has("default")) | {(.name): .default}] | add // {} | . * $i' <<<"$1"
+}
+
 local_run() {
   [[ $# -lt 1 ]] && die "usage: opensop run <name|process.sop.json> [--input KEY=VALUE ...]" "usage_error" "run opensop help"
   local proc_arg="$1"; shift
@@ -3289,12 +3312,13 @@ local_run() {
   # object (name → default) or, per SPEC v0.6, as an array of {name,type,default?}.
   # Normalise the array form to a name → default object first, otherwise the `*`
   # merge fails with "array and object cannot be multiplied".
-  ctx="$(jq -c --argjson i "$inputs" '
-    ((.inputs // {}) as $decl
-     | if ($decl | type) == "array"
-       then ($decl | map(select(.name != null and has("default"))) | map({(.name): .default}) | add // {})
-       else $decl end) * $i
-  ' "$proc_file")"
+  local in_schema in_errors
+  in_schema="$(jq -c "$_INPUT_DECLS_JQ"'{process: {inputs: ((.inputs // {}) | _input_decls)}}' "$proc_file")"
+  ctx="$(_local_input_defaults "$in_schema" "$inputs")"
+  # Same checks as dry-run: refuse before a run dir exists.
+  in_errors="$(_input_errors "$in_schema" "$ctx")"
+  [[ "$in_errors" == "[]" ]] || die "invalid inputs for $name: $(jq -r 'map(.message) | join("; ")' <<<"$in_errors")" "usage_error" \
+    "pass them with --input KEY=VALUE (see: opensop dry-run $proc_arg)"
 
   # Validate the steps array up front — before creating a run dir — so an empty
   # or malformed process fails loudly instead of "completing" trivially.
@@ -5891,44 +5915,17 @@ local_dry_run() {
   # The .sop.json may have inputs as an array (new style) or an object (dict-style).
   # Normalise to an array of {name, type?, required?, ...} for the validator.
   local schema_json
-  schema_json="$(jq -c '
+  schema_json="$(jq -c "$_INPUT_DECLS_JQ"'
     # Resolve process root — may be wrapped under "process" key or flat.
     (if has("process") then .process else . end) as $p |
     # Normalise inputs to array form for the validator.
-    (if ($p.inputs | type) == "array" then $p.inputs
-     elif ($p.inputs | type) == "object" then
-       [$p.inputs | to_entries[] | {name: .key} + (
-         if (.value | type) == "object" then .value else {} end)]
-     else []
-     end) as $inputs_arr |
+    ($p.inputs | _input_decls) as $inputs_arr |
     {process: ($p + {inputs: $inputs_arr})}
   ' "$proc_file")"
 
   # Validate inputs against process.inputs definition — same jq as cmd_dry_run.
   local errors_json
-  errors_json=$(echo "$schema_json" | jq -c \
-    --argjson supplied "$inputs" '
-    [ .process.inputs[]? |
-      . as $field |
-      ($supplied[$field.name]) as $val |
-      # Required check.
-      (if ($field.required == true) and ($val == null) then
-        {path: ("inputs." + $field.name), message: ("required field missing: " + $field.name)}
-      else null end),
-      # Type check (best-effort).
-      (if $val != null then
-        if   $field.type == "number"  and ($val | type) != "number"  then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a number")}
-        elif $field.type == "boolean" and ($val | type) != "boolean" then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a boolean")}
-        elif $field.type == "enum" and ($field.values != null) and ([$field.values[] | . == $val] | any | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be one of: " + ($field.values | join(", ")))}
-        elif $field.type == "string" and $field.format == "email" and ($val | type) == "string" and ($val | test("^[^@]+@[^@]+\\.[^@]+$") | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " does not look like an email address")}
-        else null end
-      else null end)
-    ] | map(select(. != null))
-  ')
+  errors_json=$(_input_errors "$schema_json" "$(_local_input_defaults "$schema_json" "$inputs")")
 
   local valid=true
   local err_count; err_count=$(echo "$errors_json" | jq 'length')
@@ -7693,16 +7690,10 @@ cmd_onboard() {
   # We inject placeholder values matching each field's declared type.
   local -a onboard_dry_run_args=("$proc_file")
   local proc_inputs_json
-  proc_inputs_json="$(jq -c '
+  proc_inputs_json="$(jq -c "$_INPUT_DECLS_JQ"'
     (if has("process") then .process else . end) as $p |
-    ($p.inputs // {}) |
-    if type == "object" then
-      to_entries[] |
-      select(.value.required == true) |
-      {key: .key, type: (.value.type // "string")}
-    elif type == "array" then
-      .[] | select(.required == true) | {key: .name, type: (.type // "string")}
-    else empty end
+    ($p.inputs // {}) | _input_decls[] |
+    select(.required == true and has("default") == false) | {key: .name, type: (.type // "string")}
   ' "$proc_file" 2>/dev/null || true)"
   while IFS= read -r field_entry; do
     [[ -z "$field_entry" ]] && continue
