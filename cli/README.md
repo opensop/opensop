@@ -215,8 +215,8 @@ opensop run ./my-process.sop.json \
 A process is a `.sop.json` file. The loop is: write it, `dry-run` it, run it, read the receipts.
 
 ```bash
-opensop dry-run ./my-process.sop.json --input foo=bar   # validate inputs + preview the steps, no run
-opensop run ./my-process.sop.json --input foo=bar
+opensop dry-run my-process.sop.json --input foo=bar    # validate inputs + preview the steps, no run
+opensop run my-process.sop.json --input foo=bar
 opensop show <run_id>
 ```
 
