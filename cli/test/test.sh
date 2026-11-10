@@ -10383,6 +10383,21 @@ ac_id="$(cd "$p0100ac/proj" && "$cli" run ac.json --json | jq -r .run_id)"
 echo "PASS: P0100-ac — resumed runs execute script steps in the run's own directory"
 rm -rf "$p0100ac"
 
+# (ad) a script step's receipt records the script's sha256, and status lists
+# steps only (a heal event is not a step row).
+p0100ad="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100ad/h"
+printf '#!/bin/sh\ntest -f ok && echo {}\n' > "$p0100ad/t.sh"
+echo '{"name":"ad","version":"1","steps":[{"id":"t","type":"automated","run":"t.sh"}]}' > "$p0100ad/ad.json"
+ad_id="$( (cd "$p0100ad" && "$cli" run ad.json --json 2>/dev/null) | jq -r .run_id || true)"
+touch "$p0100ad/ok"; (cd "$p0100ad" && "$cli" heal "$ad_id" --apply --json >/dev/null 2>&1 || true)
+ad_sha="$(sha256sum "$p0100ad/t.sh" | cut -c1-64)"
+jq -s -e --arg s "$ad_sha" '[.[] | select(.step=="t" and .status != null) | .script_sha256] == [$s, $s]' "$p0100ad/h/runs/$ad_id/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P0100-ad script_sha256"; exit 1; }
+"$cli" status "$ad_id" --json | jq -e '[.steps[].state] == ["failed","completed"]' >/dev/null \
+  || { echo "FAIL: P0100-ad status rows: $("$cli" status "$ad_id" --json | jq -c '[.steps[].state]')"; exit 1; }
+echo "PASS: P0100-ad — script receipts carry script_sha256; status has no heal pseudo-rows"
+rm -rf "$p0100ad"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

@@ -3647,6 +3647,7 @@ _local_step_loop() {
     local s_llm_model="" s_llm_tokens_in=0 s_llm_tokens_out=0 s_llm_token_source="none"
     local s_llm_provider="" s_llm_permission="" s_llm_cli_version="" lp_exit=""
     local s_llm_usage="null" s_llm_attempts=0   # summed across retries; see _local_llm_add_usage
+    local s_script_sha=""   # automated: the script file's sha256, so a changed script shows in the receipt
 
     # SPEC §3.2 condition: evaluated before dispatch; false → the step is
     # skipped (a "skipped" receipt, no output in context). An expression the
@@ -3746,6 +3747,7 @@ _local_step_loop() {
         # file is executable, invoke it directly so the shebang applies (Ruby,
         # Python, etc.); otherwise fall back to bash (so shell scripts committed
         # without +x keep working).
+        [ -f "$script" ] && s_script_sha="$(_sha256 <"$script" 2>/dev/null || true)"
         if [ ! -f "$script" ]; then out_raw="step script not found: $script"; rc=127
         elif [ -x "$script" ]; then
           out_raw="$(_local_exec_step "$run_dir" "$loop_pid" "$step_input_ctx" "$run_dir/$sid.stderr.log" env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" "$script")" || rc=$?
@@ -5044,11 +5046,12 @@ $llm_attempt_prompt"
     fi
     jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg st "$sstatus" --argjson rc "$rc" \
       --arg a "$s_started" --arg b "$s_ended" --argjson out "$out_json" --arg se "$serr" \
-      --argjson dur "$step_duration_ms" --arg rh "$result_hash" --argjson llmm "$llm_metrics" --arg xo "$s_exit" \
+      --argjson dur "$step_duration_ms" --arg rh "$result_hash" --argjson llmm "$llm_metrics" --arg xo "$s_exit" --arg ss "${s_script_sha:0:64}" \
       '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:$st, exit_code:$rc,
         started_at:$a, ended_at:$b, duration_ms:$dur, result_hash:$rh, output:$out}
        + (if $se=="" then {} else {stderr:$se} end)
        + (if $xo=="" then {} else {exited_early:true, exit_outputs:($xo | fromjson)} end)
+       + (if $ss=="" then {} else {script_sha256:$ss} end)
        + $llmm' >> "$audit"
 
     if [ "$rc" -eq 0 ]; then
@@ -6171,14 +6174,14 @@ local_status() {
 
   # Build response JSON that mirrors remote cmd_status's API response shape.
   # audit.jsonl → steps array: each line is one receipt; status → state;
-  # waiting receipts carry .reason → sub_state.
+  # waiting receipts carry .reason → sub_state. Event rows (heal) aren't steps; `show` has them.
   # Local-only extras an agent needs to act: run_dir (where the receipts are),
   # waiting.description (the paused step's own text) and error (why it failed).
   local snap="$run_dir/process.snapshot.json" resp
   [ -f "$snap" ] || snap="$(jq -r '.process_file // ""' "$mf")"
   resp="$(jq -nc \
     --argjson m "$(cat "$mf")" \
-    --argjson steps "$([ -f "$run_dir/audit.jsonl" ] && jq -s '[.[] | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
+    --argjson steps "$([ -f "$run_dir/audit.jsonl" ] && jq -s '[.[] | select(.event == null) | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
     --argjson proc "$(jq -c '{steps: [(.steps // [])[]? | {id, description: (.description // .prompt // null)}]}' "$snap" 2>/dev/null || echo '{"steps":[]}')" \
     --argjson fail "$([ -f "$run_dir/audit.jsonl" ] && jq -sc '[.[] | select(.status == "failed")] | last' "$run_dir/audit.jsonl" 2>/dev/null || echo null)" \
     --arg dir "$run_dir" \
