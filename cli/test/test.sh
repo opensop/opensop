@@ -9996,6 +9996,18 @@ jq -e '.input_text == "hello" and .extract.result == "ok"' "$OPENSOP_LOCAL_HOME/
 echo "PASS: P0100-c — run refuses missing/invalid inputs; typed object-form inputs are definitions; the onboard scaffold runs"
 rm -rf "$p0100c"
 
+# (d) dry-run previews loop steps whose body is an array (both agent-loop
+# examples) and steps with {name: type} outputs maps, instead of crashing.
+for f in "$here"/examples/agent-loops/*.sop.json; do
+  "$cli" dry-run "$f" --json | jq -e '.steps | length > 0' >/dev/null || { echo "FAIL: P0100-d dry-run $f"; exit 1; }
+done
+if script -qec true /dev/null >/dev/null 2>&1; then
+  d_out="$(script -qec "'$cli' dry-run '$here/examples/agent-loops/dev-loop.sop.json'" /dev/null)"
+  grep -q 'repeat until steps.judge.outputs.done == 1, body: todo, build' <<<"$d_out" \
+    || { echo "FAIL: P0100-d loop preview: $d_out"; exit 1; }
+fi
+echo "PASS: P0100-d — dry-run previews array-bodied loops (agent-loop examples)"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

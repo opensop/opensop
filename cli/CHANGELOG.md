@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`dry-run` no longer crashes on a `loop` whose `body` is an array** (both agent-loop examples hit it) or on a `{name: type}` outputs map. The loop preview names its `for_each`/`repeat_until`/`while` and every body step.
 - **`run` refuses missing or invalid inputs** with the same required/type/enum/format checks as `dry-run` (exit 1, `usage_error`), before a run directory is created. Declared defaults count as supplied.
 - **Object-form typed inputs** (`"inputs": {"x": {"type": "string", "required": true}}`, what `onboard` scaffolds) are definitions, not default values. Before, the definition object itself was fed to the steps as the value of `x`. An object value without a `type` key is still a default.
 - **Pretty output in a terminal works again.** The TTY check ran inside `$(...)`, where stdout is always a pipe, so `ps`, `steps`, `watch` and every other auto-mode view printed compact JSON even in a terminal. Whether stdout is a terminal is now decided once at startup.

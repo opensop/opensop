@@ -2622,8 +2622,10 @@ walk_steps_preview() {
     ($s.id // "?") as $id |
     ($s.type // "unknown") as $t |
     # Collect output field names; fall back to input field names for form steps.
-    ([($s.outputs // [])[]?.name // empty] |
-      if length == 0 then [($s.inputs // [])[]?.name // empty] else . end |
+    # outputs/inputs may be an array of {name,...} or a {name: type} map.
+    def field_names: if type == "array" then map(.name? // empty) elif type == "object" then keys else [] end;
+    (($s.outputs // []) | field_names |
+      if length == 0 then (($s.inputs // []) | field_names) else . end |
       map(select(. != null and . != "")) | join(", ")) as $fields |
     if   $t == "form" then
       "  \($id)  form          → would request input for fields: \($fields)"
@@ -2642,7 +2644,8 @@ walk_steps_preview() {
     elif $t == "subprocess" then
       "  \($id)  subprocess    → would start subprocess: \($s.process // $s.name // "(unspecified)")"
     elif $t == "loop" then
-      "  \($id)  loop          → would iterate over \($s.for_each_source // $s.for_each // "(unspecified)"), body: \($s.body.id // "(unspecified)")"
+      ($s.loop // {}) as $l |
+      "  \($id)  loop          → would \(if $l.for_each then "iterate over \($l.for_each)" elif $l.repeat_until then "repeat until \($l.repeat_until)" elif $l.while then "repeat while \($l.while)" else "loop (unspecified)" end), body: \($s.body | if type == "array" then (map(.id? // "?") | join(", ")) elif type == "object" then (.id // "?") else "(unspecified)" end)"
     elif $t == "llm" then
       "  \($id)  llm           → would call \($s.model // "default") with prompt template"
     elif $t == "wait" then
