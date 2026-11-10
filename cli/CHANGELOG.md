@@ -65,6 +65,7 @@ This release makes the local engine run agent loops end to end. `judgment` and `
 - **Object-form typed inputs** (`"inputs": {"x": {"type": "string", "required": true}}`, what `onboard` scaffolds) are definitions, not default values. Before, the definition object itself was fed to the steps as the value of `x`. An object value without a `type` key is still a default.
 - **Pretty output in a terminal works again.** The TTY check ran inside `$(...)`, where stdout is always a pipe, so `ps`, `steps`, `watch` and every other auto-mode view printed compact JSON even in a terminal. Whether stdout is a terminal is now decided once at startup.
 - A `{name: type}` outputs map on a pausing step is read as the SPEC field list instead of crashing the run.
+- **`status`, `show`, `diff` and `steps` work before a run has its first receipt** (first step still running, or the run killed during it). With jq 1.8 they failed with `invalid JSON text passed to --argjson`: jq prints `[]` for a missing slurped file and exits non-zero, so the fallback doubled the output.
 
 ## [0.9.1] — 2026-09-23
 

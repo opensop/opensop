@@ -6104,9 +6104,9 @@ local_status() {
   [ -f "$snap" ] || snap="$(jq -r '.process_file // ""' "$mf")"
   resp="$(jq -nc \
     --argjson m "$(cat "$mf")" \
-    --argjson steps "$(jq -s '[.[] | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
+    --argjson steps "$([ -f "$run_dir/audit.jsonl" ] && jq -s '[.[] | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
     --argjson proc "$(jq -c '{steps: [(.steps // [])[]? | {id, description: (.description // .prompt // null)}]}' "$snap" 2>/dev/null || echo '{"steps":[]}')" \
-    --argjson fail "$(jq -sc '[.[] | select(.status == "failed")] | last' "$run_dir/audit.jsonl" 2>/dev/null || echo null)" \
+    --argjson fail "$([ -f "$run_dir/audit.jsonl" ] && jq -sc '[.[] | select(.status == "failed")] | last' "$run_dir/audit.jsonl" 2>/dev/null || echo null)" \
     --arg dir "$run_dir" \
     '{
        id:           $m.run_id,
@@ -6214,7 +6214,7 @@ local_steps() {
 
   jq -nc \
     --arg rid "$rid" \
-    --argjson steps "$(jq -s '[.[] | {
+    --argjson steps "$([ -f "$run_dir/audit.jsonl" ] && jq -s '[.[] | {
         step_id:    .step,
         type,
         state:      .status,
@@ -6503,8 +6503,8 @@ local_diff() {
 
   # Read audit receipts for each run (one JSON object per line → array via jq -s).
   local steps1 steps2
-  steps1="$(jq -s '.' "$dir1/audit.jsonl" 2>/dev/null || echo '[]')"
-  steps2="$(jq -s '.' "$dir2/audit.jsonl" 2>/dev/null || echo '[]')"
+  steps1="$([ -f "$dir1/audit.jsonl" ] && jq -s '.' "$dir1/audit.jsonl" 2>/dev/null || echo '[]')"
+  steps2="$([ -f "$dir2/audit.jsonl" ] && jq -s '.' "$dir2/audit.jsonl" 2>/dev/null || echo '[]')"
 
   # Read final context for each run.
   local ctx1 ctx2
@@ -6688,11 +6688,11 @@ local_show() {
   local d="$OPENSOP_LOCAL_HOME/runs/$rid"
   [ -d "$d" ] || die "no such local run: $rid (see: opensop runs)" "instance_not_found"
   if [[ "$(_resolve_output_mode)" == "json" ]]; then
-    jq -nc --argjson m "$(cat "$d/manifest.json")" --argjson s "$(jq -s '.' "$d/audit.jsonl" 2>/dev/null || echo '[]')" \
+    jq -nc --argjson m "$(cat "$d/manifest.json")" --argjson s "$([ -f "$d/audit.jsonl" ] && jq -s '.' "$d/audit.jsonl" 2>/dev/null || echo '[]')" \
       '{manifest:$m, steps:$s}'
   else
     info "── manifest ──"; jq . "$d/manifest.json"
-    info "── steps ──";   jq -c '{step,status,exit_code} + (if .stderr then {stderr:(.stderr|.[0:200])} else {} end)' "$d/audit.jsonl" 2>/dev/null
+    info "── steps ──";   [ ! -f "$d/audit.jsonl" ] || jq -c '{step,status,exit_code} + (if .stderr then {stderr:(.stderr|.[0:200])} else {} end)' "$d/audit.jsonl" 2>/dev/null
   fi
 }
 

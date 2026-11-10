@@ -10279,6 +10279,21 @@ echo '{"opensop":"0.9.1","name":"wb","version":"1","inputs":[{"name":"enabled","
 echo "PASS: P0100-w — status names the nested step that failed; boolean inputs accept false"
 rm -rf "$p0100w"
 
+# (x) a run with a manifest but no audit.jsonl yet (first step still running, or
+# killed during it) must still give valid JSON from status/show/diff (jq 1.8
+# prints [] AND exits 2 on a missing slurp file, which used to double the output).
+p0100x="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100x"
+for x_id in rx1 rx2; do
+  mkdir -p "$p0100x/runs/$x_id"
+  jq -n --arg id "$x_id" '{run_id:$id, process:"px", status:"running", started_at:"2026-01-01T00:00:00Z", inputs:{}}' > "$p0100x/runs/$x_id/manifest.json"
+done
+"$cli" status rx1 --json | jq -e '.state == "running" and .steps == []' >/dev/null || { echo "FAIL: P0100-x status without audit.jsonl"; exit 1; }
+"$cli" show rx1 --json | jq -e '.steps == []' >/dev/null || { echo "FAIL: P0100-x show without audit.jsonl"; exit 1; }
+"$cli" diff rx1 rx2 --json | jq -e 'type == "object"' >/dev/null || { echo "FAIL: P0100-x diff without audit.jsonl"; exit 1; }
+"$cli" steps rx1 --json | jq -e '.steps == []' >/dev/null || { echo "FAIL: P0100-x steps without audit.jsonl"; exit 1; }
+echo "PASS: P0100-x — status/show/diff/steps give valid JSON before the first receipt"
+rm -rf "$p0100x"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
