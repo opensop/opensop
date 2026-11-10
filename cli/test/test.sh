@@ -10337,6 +10337,18 @@ p0100z="$(mktemp -d)"
 echo "PASS: P0100-z — init gitignores .opensop/runs/"
 rm -rf "$p0100z"
 
+# (aa) --input keeps the raw string for an input declared type string (array
+# and object-form defs); undeclared and non-string inputs are still JSON-parsed.
+p0100aa="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100aa/h"
+echo '{"opensop":"0.9.1","name":"aa","version":"1","inputs":[{"name":"zip","type":"string"},{"name":"n","type":"number"}],"steps":[{"id":"s","type":"noop"}]}' > "$p0100aa/a.sop.json"
+echo '{"opensop":"0.9.1","name":"ao","version":"1","inputs":{"test_command":{"type":"string"},"flag":true},"steps":[{"id":"s","type":"noop"}]}' > "$p0100aa/o.sop.json"
+"$cli" run "$p0100aa/a.sop.json" --input zip=02134 --input n=5 --input extra=7 --json | jq -e '.inputs == {zip: "02134", n: 5, extra: 7}' >/dev/null \
+  || { echo "FAIL: P0100-aa array-form string input"; exit 1; }
+"$cli" run "$p0100aa/o.sop.json" --input test_command=false --input flag=false --json | jq -e '.inputs == {test_command: "false", flag: false}' >/dev/null \
+  || { echo "FAIL: P0100-aa object-form string input"; exit 1; }
+echo "PASS: P0100-aa — --input keeps declared string inputs verbatim"
+rm -rf "$p0100aa"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

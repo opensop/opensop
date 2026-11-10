@@ -1688,7 +1688,9 @@ build_payload_object() {
       [[ "$kv" != *=* ]] && die "--$noun expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
       # If value parses as JSON (number, bool, null, object, array), use raw; else string.
-      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
+      # An input the process declares as type string stays the raw string
+      # (zip=02134, flag=false); callers set _string_inputs (see _string_input_names).
+      if [[ " ${_string_inputs:-} " != *" $k "* ]] && echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         payload=$(echo "$payload" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         payload=$(echo "$payload" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -3388,6 +3390,13 @@ _INPUT_DECLS_JQ='def _input_decls:
     else {name: .key, default: .value} end]
   else [] end;'
 
+# _string_input_names <proc_file> — space-separated names of the inputs the
+# process declares as type string, so --input keeps their values verbatim.
+_string_input_names() {
+  jq -r "$_INPUT_DECLS_JQ"'(if has("process") then .process else . end).inputs // {} | _input_decls
+    | map(select(.type == "string") | .name) | join(" ")' "$1" 2>/dev/null || true
+}
+
 # Step types _local_step_loop can execute.
 _LOCAL_STEP_TYPES="automated shell noop form approval wait llm judgment loop webhook subprocess"
 
@@ -3419,6 +3428,7 @@ local_run() {
   local proc_dir name built inputs ctx
   proc_dir="$(cd "$(dirname "$proc_file")" && pwd)"
   name="$(jq -r '.name // "unnamed"' "$proc_file")"
+  local _string_inputs; _string_inputs="$(_string_input_names "$proc_file")"   # read by build_payload_object
   built="$(build_payload_object input "$@")"          # reuse the same input parsing as remote run
   inputs="$(echo "$built" | jq -c '.payload')"
   # Declared defaults, overridden by --input. `inputs` may be declared as an
@@ -6020,7 +6030,7 @@ local_dry_run() {
   done
 
   # Build input object.
-  local inputs="{}"
+  local inputs="{}" _string_inputs; _string_inputs="$(_string_input_names "$proc_file")"
   if [[ -n "$json_blob" ]]; then
     inputs=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --inputs" "invalid_json"
   elif [[ -n "$file_path" ]]; then
@@ -6030,7 +6040,7 @@ local_dry_run() {
     for kv in "${kv_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--input expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
+      if [[ " $_string_inputs " != *" $k "* ]] && echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         inputs=$(echo "$inputs" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         inputs=$(echo "$inputs" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -6951,6 +6961,7 @@ local_heal() {
 
   # Merge any caller-supplied --input overrides.
   if (( ${#extra_args[@]} > 0 )); then
+    local _string_inputs; _string_inputs="$(_string_input_names "$proc_file")"   # read by build_payload_object
     local _heal_built; _heal_built="$(build_payload_object input "${extra_args[@]}")"
     local _heal_inp; _heal_inp="$(echo "$_heal_built" | jq -c '.payload')"
     ctx="$(jq -c --argjson i "$_heal_inp" '. * $i' <<<"$ctx")"

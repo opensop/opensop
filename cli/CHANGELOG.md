@@ -69,6 +69,7 @@ This release makes the local engine run agent loops end to end. `judgment` and `
 - **A run interrupted mid-step can be resumed or closed.** `heal --apply` accepts an `interrupted` run (the CLI was killed by SIGTERM, SIGINT or a timeout): it re-runs the first step without a completed receipt and continues; the `--force-effects` rule still applies to a step with `effects`. `cancel` accepts `interrupted`. `status` names the step and `next: opensop heal <id> --apply` / `opensop cancel <id>` (`--json` adds `interrupted: {step}` and a `next` array). Before, `heal` said "is 'interrupted', not 'failed'" and `cancel` said "unexpected status".
 - **Killing `opensop run` no longer orphans the running step.** Script steps (`automated`, `shell`) run in their own process group (`setsid`, where available), and the interrupted-run handler stops the step loop and that group. Before, the step and its children kept running, and the step loop could keep executing later steps. Without `setsid` (macOS) only the step process itself is stopped.
 - **`init` writes `.opensop/.gitignore` containing `runs/`.** Run receipts and `context.json` hold process inputs, so they are no longer committed by accident.
+- **`--input` keeps the raw string for an input the process declares as `type: string`** (array or object-form definitions), in `run`, `dry-run` and `heal --apply`. Before, `--input zip=02134` became the number `2134` and `--input test_command=false` the boolean `false`. Undeclared and non-string inputs are still parsed as JSON.
 
 ## [0.9.1] — 2026-09-23
 
