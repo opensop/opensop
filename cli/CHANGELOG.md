@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`upgrade` installs the latest GitHub release**, as it says, instead of whatever is on `main`. It asks the GitHub API for the latest release tag, and when the running CLI is already newer it says so instead of "upgrading" backwards. `--pin X.Y.Z` is unchanged and can still downgrade. The downloaded binary's embedded version must match the tag either way. `help` labels local commands "no OpenSOP server needed" (it said "no curl", which is wrong for `upgrade` and `pull`).
 - **`run`/`submit`/`heal` "next" hints name the fields to submit** (`--output email=...`, `--output decision=<approve|reject>`) instead of `--output k=v`. For an escalated judgment they say why (low confidence vs. threshold, required human review, no agent) and show the agent's proposal.
 - A `judgment` with a `{name: type}` outputs map no longer prints a jq error; the map is used as the agent's output schema.
 - **`status` in a terminal** labels the id `run:`, shows one row per step with its latest state (it replayed the audit log, so a resumed step showed a waiting and a completed row, and cancel/heal events showed `null` rows), and after `heal --apply` shows the new completion time.

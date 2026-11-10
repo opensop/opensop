@@ -720,7 +720,7 @@ cmd_fork() {
 #
 # category: discovery | inspection | execution | cells | authoring | admin | config
 # backend:  local | remote | dual
-#   local  — no server, no curl
+#   local  — no OpenSOP server needed
 #   remote — requires --remote or --server
 #   dual   — default local; add --remote for server mode
 #
@@ -963,7 +963,7 @@ _cmd_help_command() {
 
   local backend_label
   case "$backend" in
-    local)  backend_label="local only (no server, no curl)" ;;
+    local)  backend_label="local (no OpenSOP server needed)" ;;
     remote) backend_label="remote only (requires --remote or --server <url>)" ;;
     dual)   backend_label="local by default; add --remote or --server for server mode" ;;
     *)      backend_label="$backend" ;;
@@ -1364,12 +1364,29 @@ cmd_upgrade() {
   local install_dir
   install_dir="$(dirname "$real_path")"
 
-  # Determine the target ref (git tag or main).
+  # Determine the target tag: --pin, else the latest GitHub release.
   local target_ref
   if [[ -n "$pin_version" ]]; then
     target_ref="v${pin_version#v}"  # normalise: "0.8.1" → "v0.8.1"
   else
-    target_ref="main"
+    # OPENSOP_UPGRADE_LATEST (test seam): use this tag instead of asking GitHub.
+    target_ref="${OPENSOP_UPGRADE_LATEST:-}"
+    [[ -z "$target_ref" ]] && target_ref="$(curl -fsSL "https://api.github.com/repos/opensop/opensop/releases/latest" 2>/dev/null \
+                  | jq -r '.tag_name // empty' 2>/dev/null || true)"
+    target_ref="v${target_ref#v}"
+    [[ "$target_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] \
+      || die "could not find the latest release (GitHub API unreachable or rate-limited)" \
+             "network_error" "retry later, or pick a version: opensop upgrade --pin X.Y.Z"
+    local latest="${target_ref#v}"
+    if [[ "$latest" == "$OPENSOP_CLI_VERSION" ]]; then
+      ok "already at the latest release (${latest}) — nothing to do"
+      return 0
+    fi
+    if [[ "$(printf '%s\n%s\n' "$latest" "$OPENSOP_CLI_VERSION" | sort -V | tail -1)" == "$OPENSOP_CLI_VERSION" ]]; then
+      ok "${OPENSOP_CLI_VERSION} is newer than the latest release (${latest}) — nothing to do"
+      info "to install ${latest} anyway: opensop upgrade --pin ${latest}"
+      return 0
+    fi
   fi
 
   local raw_base="https://raw.githubusercontent.com/opensop/opensop/${target_ref}/cli/bin"
@@ -1404,14 +1421,10 @@ cmd_upgrade() {
   local new_version
   new_version="$(grep -m1 'OPENSOP_CLI_VERSION=' "$tmp_bin" | sed 's/.*OPENSOP_CLI_VERSION="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/')"
 
-  # ---- Fix 1a: --pin version must match the embedded version in the binary ----
-  if [[ -n "$pin_version" ]]; then
-    local normalized_pin="v${pin_version#v}"
-    local embedded_tag="v${new_version#v}"
-    if [[ "$normalized_pin" != "$embedded_tag" ]]; then
-      die "--pin ${pin_version} requested but downloaded binary embeds version ${new_version} — aborting" \
-          "cli_error" "verify the tag exists in github.com/opensop/opensop and retry"
-    fi
+  # ---- Fix 1a: the tag must match the version embedded in the binary ----
+  if [[ "$target_ref" != "v${new_version#v}" ]]; then
+    die "${target_ref} requested but the downloaded binary embeds version ${new_version} — aborting" \
+        "cli_error" "verify the tag exists in github.com/opensop/opensop and retry"
   fi
 
   # ---- Fix 1b: checksum verification ----

@@ -5876,7 +5876,7 @@ upg_cli_sha_before="$(_upg_sha256 "$cli")"
 # Run the upgrade from the throwaway copy with the decoy FIRST on PATH.
 set +e
 upg_src_out="$(PATH="${upg_decoy_dir}:${upg_curl_stub_dir}:${PATH}" \
-  "${upg_throwaway_dir}/opensop" upgrade --json 2>&1)"; upg_src_rc=$?
+  OPENSOP_UPGRADE_LATEST=v9.9.9 "${upg_throwaway_dir}/opensop" upgrade --json 2>&1)"; upg_src_rc=$?
 set -e
 
 # The controlled upgrade must succeed…
@@ -6079,7 +6079,7 @@ CURLSTUB2
 chmod +x "$upg_curl_nosum"
 
 set +e
-upg_nosumout="$(PATH="${upg_fake_dir}:${PATH}" "$upg_nosum_bin" upgrade --json 2>&1)"; upg_nosum_rc=$?
+upg_nosumout="$(PATH="${upg_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=99.0.0 "$upg_nosum_bin" upgrade --json 2>&1)"; upg_nosum_rc=$?
 set -e
 [ "$upg_nosum_rc" -ne 0 ] || { echo "FAIL: upgrade without checksum file (no --allow-unverified) should exit non-zero; got: $upg_nosumout"; exit 1; }
 echo "$upg_nosumout" | grep -q "cli_error" \
@@ -6121,7 +6121,7 @@ CURLSTUB3
 chmod +x "${upg_fake_dir}/curl"
 
 set +e
-upg_mmout="$(PATH="${upg_fake_dir}:${PATH}" "$upg_mismatch_bin" upgrade --json 2>&1)"; upg_mm_rc=$?
+upg_mmout="$(PATH="${upg_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=99.0.0 "$upg_mismatch_bin" upgrade --json 2>&1)"; upg_mm_rc=$?
 set -e
 [ "$upg_mm_rc" -ne 0 ] || { echo "FAIL: upgrade with checksum mismatch should exit non-zero; got: $upg_mmout"; exit 1; }
 echo "$upg_mmout" | grep -q "cli_error" \
@@ -6191,7 +6191,7 @@ chmod +x "${sym_fake_dir}/curl"
 sym_before="$(sha256sum "$sym_real_bin" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$sym_real_bin" | awk '{print $1}')"
 
 set +e
-sym_out="$(PATH="${sym_fake_dir}:${PATH}" "$sym_link" upgrade --json 2>&1)"; sym_rc=$?
+sym_out="$(PATH="${sym_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=0.99.0-symlink-test "$sym_link" upgrade --json 2>&1)"; sym_rc=$?
 set -e
 
 [ "$sym_rc" -eq 0 ] || {
@@ -6278,7 +6278,7 @@ CURLSTUB_MODE
   chmod +x "${mode_fake_dir}/curl"
 
   set +e
-  mode_out="$(PATH="${mode_fake_dir}:${PATH}" "$mode_bin" upgrade --allow-unverified --json 2>&1)"; mode_rc=$?
+  mode_out="$(PATH="${mode_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=0.99.0 "$mode_bin" upgrade --allow-unverified --json 2>&1)"; mode_rc=$?
   set -e
   [ "$mode_rc" -eq 0 ] || {
     echo "FAIL: upgrade (mode ${test_mode}) should exit 0 (upgrade completed); got $mode_rc: $mode_out"
@@ -10093,6 +10093,37 @@ if script -qec true /dev/null >/dev/null 2>&1; then
   echo "PASS: P0100-j — next hints name the expected fields and explain an escalation"
 fi
 rm -rf "$p0100j"
+
+# (k) upgrade with no --pin fetches the latest GitHub release tag (not main),
+# and never "upgrades" backwards to an older release.
+p0100k="$(mktemp -d)"; mkdir -p "$p0100k/bin" "$p0100k/inst"
+cp "$cli" "$p0100k/inst/opensop"
+printf '#!/usr/bin/env bash\nreadonly OPENSOP_CLI_VERSION="99.1.0"\n' > "$p0100k/new"
+_upg_sha256 "$p0100k/new" > "$p0100k/new.sha256"
+cat > "$p0100k/bin/curl" <<CURL
+#!/usr/bin/env bash
+dest=""; url=""
+while [ \$# -gt 0 ]; do case "\$1" in -o) dest="\$2"; shift 2 ;; -*) shift ;; *) url="\$1"; shift ;; esac; done
+echo "\$url" >> "$p0100k/urls"
+case "\$url" in
+  *api.github.com/repos/opensop/opensop/releases/latest) echo "{\"tag_name\":\"\$(cat "$p0100k/tag")\"}" ;;
+  */v99.1.0/cli/bin/opensop.sha256) cp "$p0100k/new.sha256" "\$dest" ;;
+  */v99.1.0/cli/bin/opensop) cp "$p0100k/new" "\$dest" ;;
+  *) exit 22 ;;
+esac
+CURL
+chmod +x "$p0100k/bin/curl"
+echo v0.0.1 > "$p0100k/tag"
+k_out="$(PATH="$p0100k/bin:$PATH" "$p0100k/inst/opensop" upgrade 2>&1)" || { echo "FAIL: P0100-k older latest: $k_out"; exit 1; }
+grep -q 'newer than the latest release (0.0.1)' <<<"$k_out" && cmp -s "$cli" "$p0100k/inst/opensop" \
+  || { echo "FAIL: P0100-k must not downgrade: $k_out"; exit 1; }
+echo v99.1.0 > "$p0100k/tag"
+PATH="$p0100k/bin:$PATH" "$p0100k/inst/opensop" upgrade --json >/dev/null 2>&1 || { echo "FAIL: P0100-k upgrade to latest"; exit 1; }
+grep -q '99.1.0' "$p0100k/inst/opensop" && ! grep -q '/main/' "$p0100k/urls" \
+  || { echo "FAIL: P0100-k did not install the latest release tag: $(cat "$p0100k/urls")"; exit 1; }
+grep -q 'no OpenSOP server needed' <<<"$("$cli" help upgrade)" || { echo "FAIL: P0100-k help upgrade backend text"; exit 1; }
+echo "PASS: P0100-k — upgrade installs the latest release tag and never downgrades by default"
+rm -rf "$p0100k"
 
 # Cleanup.
 unset OPENSOP_SOPS_BASE
