@@ -1,40 +1,21 @@
 # OpenSOP CLI
 
-A bash CLI for running and managing OpenSOP processes — locally on your machine, or against any OpenSOP server. One file; only `jq` required for local use.
+A bash CLI that runs OpenSOP processes on your machine. One file; `bash` 4+ and `jq` are all it needs. It can also talk to an optional OpenSOP server.
 
 ## Why
 
-OpenSOP is an open standard for executable processes — define a YAML, get a typed REST API. This CLI runs those processes locally (no server, no daemon, no network) and can also talk to a running OpenSOP server over its `/sop/*` HTTP API. It exists so agents (and humans) can drive OpenSOP from any terminal, immediately.
-
-## Two backends: local (default) and remote (`--remote`)
-
-The CLI is one interface to **two backends**. By default it runs processes **locally on your machine** — no Rails app, no daemon, no network, no `curl`:
+OpenSOP is an open standard for processes as files: each step is either a script that must come out the same every time or a model call that needs judgment, and every step leaves a receipt. This CLI runs those `.sop.json` files locally (no server, no daemon, no account) so agents and people can drive them from any terminal.
 
 ```bash
-opensop run ./greet.sop.json --input name=Ana       # local: runs on this machine, no server
-opensop run lead-qualification --input lead_name=Ana # local: looks up the process in the cell chain
+opensop run ./greet.sop.json --input name=Ana        # run a file
+opensop run greet --input name=Ana                   # inside a cell: look the process up by name
+opensop runs                                         # list local runs
+opensop show <run_id>                                # a run's manifest + per-step receipts
 ```
 
-Add `--remote` (or `--server <url>`) to talk to an OpenSOP server instead:
+Local is the default. `--remote` / `--server <url>` route commands to an optional server instead; see [Optional server](#optional-server---remote).
 
-```bash
-opensop --remote run lead-qualification --input lead_name=Ana   # remote: hits the configured server
-opensop --server https://demo.opensop.ai list                    # remote: one-call server override
-```
-
-Local execution needs only `bash` + `jq`. Remote needs `curl` too.
-
-```bash
-opensop run ./greet.sop.json           # run a process locally
-opensop list [dir]                     # list .sop.json processes in the cell chain
-opensop runs                           # list local runs
-opensop show <run_id>                  # a local run's manifest + per-step receipts
-bash test/test.sh                      # golden test
-```
-
-> **`--local` flag:** accepted for backwards compatibility but now a no-op (local is already the default). Scripts using `opensop run ./x.sop.json --local` continue to work; they will see a deprecation note on stderr. Drop `--local` from new scripts.
-
-**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.9.1. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT` (left unset past Linux's 128 KiB env-string cap; stdin always has it); its JSON stdout merges back under the step id. **Step types (local — v0.7 full SPEC parity):**
+**Process format:** `.sop.json` (jq-native), mirroring `SPEC.md` v0.9.1. **Step I/O contract:** each step gets the accumulated context (inputs + prior outputs) on stdin and in `$OSL_CONTEXT` (left unset past Linux's 128 KiB env-string cap; stdin always has it); its JSON stdout merges back under the step id. **Step types (local):**
 
 | Type | Pause? | Resume trigger | Notes |
 |---|---|---|---|
@@ -48,6 +29,7 @@ bash test/test.sh                      # golden test
 | `loop` | No | — | `for_each` (+`as`) / `repeat_until` / `while` over `body` steps; `max_iterations` (default 100); `aggregate` sum\|concat\|last. A pausing body step fails the loop |
 | `webhook` | sync → No; callback → Yes — `waiting_for_callback` | `submit --output k=v` | sync asserts 2xx; poll mode not yet implemented |
 | `subprocess` | Propagates child pause | child resume | Recursive local execution; depth-guarded (max 16) |
+| `notification` | — | — | Not implemented locally yet; fails the run with a clear error |
 
 **Try it with coding agents:** [`examples/agent-loops/`](examples/agent-loops/) has two ready-to-run loops (`planner-worker`, `dev-loop`) that drive local `claude` / `codex` / `cursor-agent` / `kimi` CLIs against a git checkout, using `llm`, `loop` and a test-command gate.
 
@@ -63,11 +45,11 @@ Execution re-enters at `cursor.next_index` — never re-runs completed steps.
 
 **Step effects (v0.7.x):** each step may declare `effects: "<plain-string description>"` (e.g. `"publishes a post to LinkedIn"`) to mark it as irreversible — it acts on the world, not just on the run's data. The presence of the field is the signal; there is no enum or boolean form. `opensop heal --apply` refuses to re-run a step that declares `effects` (see the `heal` row above) because it may have already succeeded remotely before the CLI observed the failure.
 
-**Receipts:** `$OPENSOP_LOCAL_HOME/runs/<id>/{manifest.json, audit.jsonl, context.json}`. As of v0.6: when cwd is inside an OpenSOP cell, `$OPENSOP_LOCAL_HOME` defaults to the active cell's `.opensop/` (receipts land alongside the processes that produced them); outside any cell it defaults to `~/.opensop-local`. Explicit env override always wins. **Name resolution (v0.6):** inside a cell, `opensop run <name>` looks up `processes/<name>.sop.json` in the active cell, then each ancestor cell (nearest wins). Explicit file paths still work as before. The same process file is meant to run on a server runtime *and* locally — portability is the point.
+**Receipts:** `$OPENSOP_LOCAL_HOME/runs/<id>/{manifest.json, audit.jsonl, context.json}`. As of v0.6: when cwd is inside an OpenSOP cell, `$OPENSOP_LOCAL_HOME` defaults to the active cell's `.opensop/` (receipts land alongside the processes that produced them); outside any cell it defaults to `~/.opensop-local`. Explicit env override always wins. **Name resolution (v0.6):** inside a cell, `opensop run <name>` looks up `processes/<name>.sop.json` in the active cell, then each ancestor cell (nearest wins). Explicit file paths still work as before. The same process file is meant to run locally *and* on any conforming server — portability is the point.
 
 > **⚠ Trust boundary:** local steps execute as shell **on your machine** — a `.sop.json`'s `shell`/`automated` steps run arbitrary commands. Only run process files you trust (same posture as a `Makefile` or an npm `postinstall`). This matters most for agents: don't `opensop run` a process file you just fetched from an untrusted source.
 >
-> **Note on `--local`:** accepted for backwards compatibility but now a deprecated no-op (v0.9.1+ default is local). In v0.5–v0.7 `--local` opted into local execution; in v0.9.1 local is the default so `--local` can simply be dropped from scripts — no other migration needed. For a local dev *server*, use `opensop --server http://localhost:3000` or `opensop config set url http://localhost:3000`.
+> **Note on `--local`:** accepted for backwards compatibility but a deprecated no-op (local has been the default since v0.8). Drop it from scripts; it prints a deprecation note on stderr.
 
 ## Install
 
@@ -97,7 +79,7 @@ Installs to `~/.local/bin/opensop` (user-writable, no sudo). Options:
 
 ```bash
 # Pin to a specific release
-curl -fsSL .../install.sh | bash -s -- --version 0.8.1
+curl -fsSL .../install.sh | bash -s -- --version 0.10.0
 
 # Install system-wide (requires write access to /usr/local/bin)
 curl -fsSL .../install.sh | bash -s -- --prefix /usr/local
@@ -131,14 +113,14 @@ Once installed, keep it current with:
 
 ```bash
 opensop upgrade              # latest release
-opensop upgrade --pin 0.9.1  # specific version
+opensop upgrade --pin 0.10.0 # specific version
 ```
 
 ### Requirements
 
 - `bash` 4+ (Linux default; macOS needs `brew install bash` — see above)
 - `jq` — `brew install jq` / `apt install jq` / `dnf install jq`
-- `curl` — needed by `install.sh`, `opensop upgrade`, and the **remote backend** (`--remote` / `--server`); local execution does not need it
+- `curl` — needed by `install.sh`, `opensop upgrade`, `opensop pull`, `webhook` steps, `claude-*` `llm` steps, and the remote backend; other local execution does not need it
 
 ## Install verification & threat model
 
@@ -151,16 +133,14 @@ There is no cryptographic authenticity check available today — if that is a ha
 
 ## Quick start
 
-### Local (no server)
-
 Drop a process file and run it — no config required:
 
 ```bash
 # Write a minimal process
 cat > greet.sop.json <<'JSON'
 { "name": "greet", "inputs": [{"name":"name","type":"string","required":true}],
-  "steps": [{ "id": "say", "type": "shell", "executor": "external",
-              "run": "echo \"hello, $name\"" }] }
+  "steps": [{ "id": "say", "type": "shell",
+              "run": "jq '{greeting: (\"hello, \" + .name)}'" }] }
 JSON
 
 opensop run ./greet.sop.json --input name=Ana
@@ -168,151 +148,15 @@ opensop runs               # list all local runs
 opensop show <run_id>      # receipts + audit log
 ```
 
+Each step reads the run context (inputs plus earlier outputs) as JSON on stdin; its JSON stdout lands in the context under the step id (`say.greeting` here).
+
 Inside an OpenSOP cell (`opensop init`), bare process names resolve automatically:
 
 ```bash
 opensop run greet --input name=Ana   # looks up processes/greet.sop.json in the cell chain
 ```
 
-### Remote server
-
-Point the CLI at a server (the public demo is at `demo.opensop.ai`):
-
-```bash
-opensop config set url https://demo.opensop.ai
-opensop config set token demo-public-token-resets-daily
-```
-
-Discover what processes are registered:
-
-```bash
-$ opensop --remote list
-agent-pr-review                  developer-tooling, code-review, agent-harness, ai  An agent reviews a PR diff…
-lead-qualification               growth, sales, qualification              Qualify an inbound lead and score…
-```
-
-Search by intent (works locally too — scans the cell chain):
-
-```bash
-$ opensop --remote search lead
-2     lead-qualification           (growth, sales, qualification)  Qualify an inbound lead and score their fit
-```
-
-Start a remote run:
-
-```bash
-opensop --remote run lead-qualification \
-  --input lead_name="Ana García" \
-  --input lead_email=ana@example.com \
-  --input source=website
-```
-
-You'll get a run ID back. The CLI caches the ID → process name mapping so subsequent commands take just the ID:
-
-```bash
-opensop --remote status <run-id>
-opensop --remote steps <run-id>
-```
-
-Advance a paused step (form / judgment / approval):
-
-```bash
-opensop --remote submit <run-id> collect-context \
-  --output budget=12000 \
-  --output timeline=immediate \
-  --output notes="Strong fit, spoke to CEO" \
-  --decided-by agent:my-bot \
-  --confidence 0.92
-```
-
-Preview a remote process without executing it:
-
-```bash
-opensop --remote dry-run lead-qualification \
-  --input lead_name="Ana García" \
-  --input lead_email=ana@example.com \
-  --input source=website
-```
-
-This validates inputs against the process schema and describes each step — no run is created. Exit code 1 if validation fails.
-
-Cancel a run:
-
-```bash
-opensop --remote cancel <run-id> --reason "lead unresponsive"
-```
-
-List all runs on the server:
-
-```bash
-opensop --remote instances --state running --limit 20
-```
-
-## Worked example
-
-A full `lead-qualification` run from start to completion on the remote server — what each command returns and what to do next.
-
-**Step 1: start the run**
-
-```
-$ opensop --remote run lead-qualification \
-    --input lead_name="Ana García" \
-    --input lead_email=ana@example.com \
-    --input source=website
-
-✓ started lead-qualification
-  id:    e33baee4-84d3-4d04-b902-2f50437d8191
-  state: running
-
-waiting:
-  collect-context (form): waiting_for_input
-
-next:  opensop status e33baee4-84d3-4d04-b902-2f50437d8191
-```
-
-The run is paused at the first step — a `form` step waiting for human or agent input.
-
-**Step 2: inspect the steps**
-
-```
-$ opensop --remote steps e33baee4-84d3-4d04-b902-2f50437d8191
-
-collect-context    form           active    waiting_for_input
-score-lead         automated      pending
-notify-team        notification   pending
-```
-
-**Step 3: submit the paused step**
-
-```
-$ opensop --remote submit e33baee4-84d3-4d04-b902-2f50437d8191 collect-context \
-    --output budget=12000 \
-    --output timeline=immediate \
-    --output notes="Strong fit, spoke to CEO" \
-    --decided-by agent:my-bot \
-    --confidence 0.92
-
-✓ submitted collect-context (completed) — run running
-next:  opensop status e33baee4-84d3-4d04-b902-2f50437d8191
-```
-
-The form step is complete. The runtime moves to `score-lead` (automated) and `notify-team` (notification) automatically.
-
-**Step 4: poll until done**
-
-```
-$ opensop --remote status e33baee4-84d3-4d04-b902-2f50437d8191
-
-run:      e33baee4-84d3-4d04-b902-2f50437d8191
-process:  lead-qualification
-state:    completed (2026-05-08T20:28:41Z)
-
-  ✓ collect-context              form
-  ✓ score-lead                   automated
-  ✓ notify-team                  notification
-```
-
-That's the run-pause-submit-poll lifecycle. The receipt is stored in the runtime's database; `opensop --remote instances --process lead-qualification` will show all historical runs.
+A paused run (a `form`, `approval`, or escalated `judgment`) waits for `opensop submit`. `opensop status <run_id>` shows what it is waiting on and prints the command to continue; `opensop status <run_id> --json` carries the same as `waiting` (with the step's `description`), `run_dir`, and on failure `error: {step, exit_code, message}`.
 
 ## Output modes
 
@@ -321,7 +165,7 @@ By default the CLI is **TTY-aware**: pretty-printed in a terminal, JSON when pip
 ```bash
 opensop list                    # pretty in terminal, JSON when piped
 opensop list --json             # always JSON
-opensop list --pretty           # always pretty (well, always indented JSON outside a TTY)
+opensop list --pretty           # force the human form when piped (some commands, e.g. status, print indented JSON)
 opensop status <id> | jq ...    # piping → JSON automatically
 ```
 
@@ -334,7 +178,7 @@ $ opensop --json schema validate /nonexistent.yaml 2>&1 1>/dev/null
 
 Set `NO_COLOR=1` to disable ANSI color.
 
-**`OPENSOP_SOPS_BASE`** overrides the base URL used by `opensop pull` (default: `https://raw.githubusercontent.com/opensop/sops`). Set it to a `file://` URL pointing at a local directory with the same `<ref>/<author>/<slug>/<slug>.sop.json` layout for offline testing or air-gapped environments. `OPENSOP_RECIPES_BASE` is a deprecated alias — honoured (with a stderr deprecation warning) only when `OPENSOP_SOPS_BASE` is unset.
+**`OPENSOP_SOPS_BASE`** overrides the base URL used by `opensop pull` (default: this repo's [`sops/`](../sops/) directory on GitHub). Set it to a `file://` URL pointing at a local directory with the same `<ref>/<author>/<slug>/<slug>.sop.json` layout for offline testing or air-gapped environments. `OPENSOP_RECIPES_BASE` is a deprecated alias — honoured (with a stderr deprecation warning) only when `OPENSOP_SOPS_BASE` is unset.
 
 ## Input forms
 
@@ -360,78 +204,38 @@ For `submit`, swap `--inputs/--input` for `--outputs/--output`, plus optional `-
 You can also attach metadata to a `run`:
 
 ```bash
-opensop run lead-qualification \
+opensop run ./my-process.sop.json \
   --input lead_name=Ana \
   --metadata source_system=crm \
   --metadata external_id=lead_8821
 ```
 
-## Configuration
-
-Config lives at `~/.opensop/config` (or `$OPENSOP_HOME/config` if set). Two values:
-
-```
-OPENSOP_URL="https://your-server"
-OPENSOP_TOKEN="your-x-sop-token"
-```
-
-Override per-call via env vars:
-
-```bash
-OPENSOP_URL=https://prod.opensop.ai opensop --remote list
-```
-
-> **Note:** `OPENSOP_URL` alone does not enable remote mode — pair it with `--remote` or `--server`.
-
-To point at a local dev **server** for a single call, use `--server` or set `OPENSOP_URL`:
-
-```bash
-opensop --server http://localhost:3000 list                       # hit your dev server
-OPENSOP_URL=http://localhost:3000 opensop --remote run lead-qualification ... # test against it before prod
-```
-
 ## Process authoring
 
-The CLI supports the full authoring loop for `.sop.yaml` files — from lint to registration.
-
-**Step 1: lint your file**
-
-`schema validate` is fully client-side (no server round-trip). It checks structural requirements using `yq` (mikefarah/yq v4+) if installed, or `python3` + PyYAML as a fallback:
+A process is a `.sop.json` file. The loop is: write it, `dry-run` it, run it, read the receipts.
 
 ```bash
-opensop schema validate ./my-process.sop.yaml
+opensop dry-run my-process.sop.json --input foo=bar    # validate inputs + preview the steps, no run
+opensop run my-process.sop.json --input foo=bar
+opensop show <run_id>
 ```
 
-What it checks:
+`dry-run` exits 1 if validation fails. To have an agent write processes for you, install the authoring skill: `opensop skill install --runtime claude --skill opensop-build-harness`.
 
-- Top-level `opensop` version field present
-- `process` object with `name`, `version`, `description`, `inputs` (array), `steps` (array)
-- Each step has `id` and `type`; `type` is one of the known values (`form`, `automated`, `judgment`, `approval`, `webhook`, `notification`, `subprocess`, `loop`, `llm`, `wait`)
-- Each input has `name` and `type`
-- All `from:` reference strings match `steps.X.outputs.Y` or `process.inputs.Y`
+For the wrapped `.sop.yaml` form a server accepts, `opensop schema validate ./my-process.sop.yaml` is a client-side lint (needs `yq` v4+ or `python3` + PyYAML): it checks the `opensop` version field, the `process` object, each step's `id` and `type`, each input's `name` and `type`, and that `from:` references look like `steps.X.outputs.Y` or `process.inputs.Y`. `opensop --server <url> register ./my-process.sop.yaml` POSTs it to a server (below).
 
-Exit 0 if valid, 1 if errors. Use `--json` to get a structured `{file, valid, errors}` object.
+## Optional server (`--remote`)
 
-**Step 2: preview execution**
-
-Run `dry-run` to validate inputs against the process schema and walk through each step's description without creating an instance:
+Everything above runs locally. To share runs with a team, point the CLI at any server that implements the [`SPEC.md`](../SPEC.md) `/sop/*` contract. There is no maintained reference server.
 
 ```bash
-opensop dry-run my-process --input foo=bar
+opensop config set url https://sop.example.com          # saved to ~/.opensop/config (or $OPENSOP_HOME/config)
+opensop config set token <your-token>                   # sent as X-SOP-Token
+opensop --remote run my-process --input k=v             # dual commands take --remote
+opensop --server http://localhost:3000 list             # or a one-call server override
 ```
 
-Exit 0 if inputs are valid, 1 if validation fails.
-
-**Step 3: register** (requires a remote server)
-
-```bash
-opensop --remote register ./my-process.sop.yaml
-# or: opensop --server https://your-server register ./my-process.sop.yaml
-```
-
-POSTs the file to `/sop/processes/register`. On success, prints `registered <name>@<version>`. If the server returns 401/403, registration may be admin-only — check your token scope or use the dashboard at `<OPENSOP_URL>/admin`.
-
-`register` always requires `--remote` or `--server`; calling it without either exits with `usage_error`.
+`OPENSOP_URL` / `OPENSOP_TOKEN` override the config per call, but `OPENSOP_URL` alone does not enable remote mode. `register` and `schema <name>` are remote-only; `runs` and `show` are always local. For remote runs the CLI caches `id → process name` in `~/.opensop/instances.tsv` (safe to delete) so later commands take just the run ID. Server errors (HTTP ≥ 400) come back verbatim plus `_meta.http_status`.
 
 ## Subcommand reference
 
@@ -440,7 +244,7 @@ Commands marked **[remote]** require `--remote` or `--server <url>`. All others 
 | Command | Purpose |
 |---|---|
 | **Discovery** | |
-| `opensop list [--tag <tag>]` | List processes in the cell chain (local) or from the server (**[remote]** with `--remote`) |
+| `opensop list [dir]` | List processes in the cell chain (local) or from the server (**[remote]** with `--remote`) |
 | `opensop search <keyword> [...]` | Ranked text search over process names, descriptions, and tags |
 | `opensop suggest "<task description>"` | Describe a task in prose; get the top-matching process back |
 | `opensop schema <name>` | **[remote]** Full process definition (`GET /sop/<name>/schema`) — requires `--remote` or `--server` |
@@ -474,19 +278,21 @@ Commands marked **[remote]** require `--remote` or `--server <url>`. All others 
 | `opensop instances [--state X] [--process Y]` | List runs — local by default; **[remote]** paginated `GET /sop/instances` with `--remote` |
 | **Config** | |
 | `opensop config [set <key> <value>]` | Manage remote server config (url + token) |
+| `opensop upgrade [--pin X.Y.Z]` | Verified, atomic self-update to the latest (or a pinned) release |
 | `opensop help [<command>\|agents] [--json]` | Full help, per-command detail, agent quick-start, or machine-readable JSON index |
 | **Bench** | |
-| `opensop bench [<task-dir>] [--n N] [--model MODEL] [--arm ARMNAME] [--stub]` | 3-arm reliability comparison: skill vs json_only vs opensop over N runs. Built-in default task: extract-action-items. `--stub` runs offline (no API key). |
+| `opensop bench [<task-dir>] [--n N] [--model MODEL] [--arm ARMNAME] [--stub]` | Run from a git clone of this repo: 3-arm reliability comparison (skill vs json_only vs opensop) over N runs on the task in [`bench/`](bench/). `--stub` runs offline (no API key). |
 | **Onboarding** | |
-| `opensop onboard [<process.sop.json>] [--stub] [--n N]` | First-run experience: scaffold a starter `.sop.json` if none given, validate it via dry-run, run the 3-arm bench comparison (built-in task only) to prove the reliability gain, and print next steps. Side-effect-safe: never executes your process against production. `--stub` runs offline. To benchmark a custom task use `opensop bench <task>` directly. |
+| `opensop onboard [<process.sop.json>]` | First-run experience: scaffold a starter `.sop.json` if none given, validate it via dry-run, and print next steps. Never executes your process. |
 | **Agent Skills** | |
-| `opensop skill show` | Print the embedded SKILL.md to stdout — no file written. Lets an agent read the skill content without installing it. |
+| `opensop skill show [--skill NAME]` | Print an embedded SKILL.md to stdout — no file written. Lets an agent read the skill content without installing it. |
 | `opensop skill install <dir> [--force]` | Write the embedded SKILL.md to `<dir>/opensop/SKILL.md` (creates dirs as needed). Requires `--force` to overwrite an existing file. |
+| `opensop skill install ... --skill opensop-build-harness` | Install the process-authoring skill (`opensop-build-harness`) instead of the default `opensop` skill. Works with `<dir>` or `--runtime`. |
 | `opensop skill install --runtime <flavour> [--scope user\|project] [--force]` | Install the SKILL.md at the canonical path for the given agent runtime (see table below). Rules-only runtimes (`cline`, `cursor`, `continue`, `aider`) print guidance instead (exit 0, no file written). Unknown flavour → `usage_error` listing valid names. |
 | `opensop skill paths [--json]` | Print the flavour→path registry as a TTY table or JSON object. This is the authoritative reference for where each runtime expects the skill file. |
 | `opensop doctor [--json]` | Self-check: opensop version + PATH, jq present, bash ≥4, per-runtime skill installation status. Exits non-zero only on CRITICAL failure (jq missing, bash too old). Missing skills are informational. |
 | **SOPs** | |
-| `opensop pull <author>/<slug>[@<ref>]` | Download an SOP from the [opensop/sops](https://github.com/opensop/sops) library (`<author>/<slug>/<slug>.sop.json`). Defaults to `main`; pin with a commit SHA: `opensop pull opensop/daily-standup-notes@a1b2c3d`. `--output <path>` overrides the default `./<slug>.sop.json`. No-clobber without `--force`. Prints a summary (name, version, step count + types, source, sha256) and a "review before running" note. **Never executes the file.** `--verify <sha256>` enforces a hash the user supplies out-of-band. Requires curl. |
+| `opensop pull <author>/<slug>[@<ref>]` | Download an SOP from this repo's [`sops/`](../sops/) directory (`<author>/<slug>/<slug>.sop.json`). Defaults to `main`; pin with a commit SHA: `opensop pull opensop/release-checklist@a1b2c3d`. `--output <path>` overrides the default `./<slug>.sop.json`. No-clobber without `--force`. Prints a summary (name, version, step count + types, source, sha256) and a "review before running" note. **Never executes the file.** `--verify <sha256>` enforces a hash the user supplies out-of-band. Requires curl. |
 | `opensop import [<file>\|-] [--output <path>] [--force]` | Read an SOP from a local file or stdin (`-`), validate it as a process, write to `./<name>.sop.json` or `--output <path>`, no-clobber without `--force`. Prints the same summary; **never executes the file.** Local-only (no curl). |
 | `opensop info <file.sop.json>` | Print an SOP's `sop.*` metadata (source, install hint, tags — `recipe.*` accepted as a deprecated alias) plus the process summary (name, version, step count + types, sha256). No writes; no curl. |
 
@@ -497,51 +303,25 @@ Commands marked **[remote]** require `--remote` or `--server <url>`. All others 
 | `claude` | project | `.claude/skills/opensop/SKILL.md` |
 | `claude` | user | `~/.claude/skills/opensop/SKILL.md` |
 | `codex` / `agentskills` | project | `.agents/skills/opensop/SKILL.md` (Agent Skills standard) |
-| `codex` / `agentskills` | user | `~/.agents/skills/opensop/SKILL.md` |
+| `codex` | user | `$CODEX_HOME/skills/opensop/SKILL.md` (`~/.codex/skills` when unset) |
+| `agentskills` | user | `~/.agents/skills/opensop/SKILL.md` |
 | `hermes` | project | `.hermes/skills/opensop/SKILL.md` |
-| `hermes` | user | `~/.hermes/skills/opensop/SKILL.md` |
+| `hermes` | user | `$HERMES_HOME/skills/opensop/SKILL.md` (`~/.hermes/skills` when unset) |
 | `openclaw` | project | `skills/opensop/SKILL.md` |
 | `openclaw` | user | `~/.claw/skills/opensop/SKILL.md` |
 | `openhands` | project | `.openhands/skills/opensop/SKILL.md` |
 | `goose` | user | `~/.config/goose/skills/opensop/SKILL.md` |
 | `cline`, `cursor`, `continue`, `aider` | — | Rules-only (no SKILL.md slot; see `opensop skill install --runtime cline`) |
 
-## Demo
+## Bench (from a clone)
 
-A reproducible ~55-second terminal recording of the `opensop bench` comparison
-(skill vs json_only vs openSOP, 3 arms, Claude Haiku) lives at
-[`bench/demo/`](bench/demo/). It replays outputs from the verified 60-run benchmark;
-see [`bench/NUMBERS.md`](bench/NUMBERS.md) for full methodology and results.
-
-```sh
-# Re-render the GIF/MP4 from scratch (requires asciinema + agg + ffmpeg):
-cd bench/demo && make demo
-
-# Or just watch the pre-rendered GIF:
-# bench/demo/comparison.gif
-```
-
-Headline: same model, same notes — naive prompt invents 3–5 phantom tasks on every
-run; openSOP returns exactly the 3 real ones, byte-identical, ~2× faster.
-
-## Local cache
-
-The CLI caches `id → process name` mappings in `~/.opensop/instances.tsv` — a plain TSV of `id`, `name`, `created_at`, `url`. This is used by the remote backend so `opensop --remote status <id>` doesn't require re-typing the process name. Safe to delete at any time; the CLI rebuilds it from `/sop/instances` on the next cache miss.
-
-## Authentication
-
-The CLI sends `X-SOP-Token` on every request when the token is set. The OpenSOP server can run in two modes:
-
-- **Token unset, dev/test environment** — server allows all requests (logs a warning)
-- **Token set** — every non-webhook request must match; mismatch returns 401
-
-In production the server **fails closed** (503 with `server_misconfigured`) when the token is unset, so `opensop list` against a misconfigured prod will return that error from the server, not a silent open API.
+`opensop bench`, run from a git clone of this repo, compares three ways of doing one task (a naive prompt, JSON-only, and an OpenSOP process). The task, fixtures, methodology and a reproducible terminal recording live in [`bench/`](bench/) — see [`bench/NUMBERS.md`](bench/NUMBERS.md) and [`bench/demo/`](bench/demo/).
 
 ## Use with Claude Code (and other agents)
 
 The CLI was designed so an agent can use OpenSOP without writing HTTP requests. See [`docs/AGENTS.md`](../docs/AGENTS.md) for the full agent guide — discovery, run lifecycle, building processes, the openSOP-ize pattern, and CLAUDE.md snippets.
 
-The short version: when an agent recognizes that what it's about to do is a multi-step process, it runs it with `opensop run`, polls `opensop status`, and submits step outputs as it works. Local runs need no server; add `--remote` to involve the runtime's database.
+The short version: when an agent recognizes that what it's about to do is a multi-step process, it runs it with `opensop run`, polls `opensop status --json` (read `.state`), and submits step outputs as it works. Local runs need no server.
 
 For discovery, agents should use `opensop search` or `opensop suggest` rather than scanning the full `list` output — they surface the right process from intent, not from name recall.
 
@@ -550,22 +330,23 @@ For discovery, agents should use `opensop search` or `opensop suggest` rather th
 ```bash
 opensop skill install --runtime claude   # Claude Code: .claude/skills/opensop/SKILL.md
 opensop skill install --runtime codex    # Codex: .agents/skills/opensop/SKILL.md
+opensop skill install --runtime hermes   # Hermes Agent: .hermes/skills/opensop/SKILL.md
 opensop skill paths                      # see all supported runtimes and their paths
 ```
 
 For runtimes without a SKILL.md slot (`cline`, `cursor`, `continue`, `aider`), add the AGENTS.md block from [`docs/AGENTS.md §11`](../docs/AGENTS.md#11-adopt-opensop-in-your-agent--agentsmd-block) to your rules file. Run `opensop doctor` to verify the installation.
 
-**SOP library** — shareable `.sop.json` processes live at [github.com/opensop/sops](https://github.com/opensop/sops) (a small set of examples/fixtures also live in-repo at [`sops/`](../sops/)). Pull one with:
+**Example SOPs** — shareable `.sop.json` processes live in this repo's [`sops/`](../sops/) directory, which is where `opensop pull` fetches from. Pull one with:
 
 ```bash
-opensop pull opensop/daily-standup-notes       # download to ./daily-standup-notes.sop.json
-opensop info ./daily-standup-notes.sop.json    # metadata: name, version, tags, source
+opensop pull opensop/release-checklist         # download to ./release-checklist.sop.json
+opensop info ./release-checklist.sop.json      # metadata: name, version, tags, source
 
 # A pulled SOP is UNTRUSTED code — READ its run commands before running it:
-jq '(.process.steps // .steps)[] | {id, type, run}' ./daily-standup-notes.sop.json
+jq '(.process.steps // .steps)[] | {id, type, run}' ./release-checklist.sop.json
 
-opensop dry-run ./daily-standup-notes.sop.json # THEN validate inputs + preview the flow (not command bodies)
-opensop run ./daily-standup-notes.sop.json     # only after reading the steps and confirming
+opensop dry-run ./release-checklist.sop.json   # THEN validate inputs + preview the flow (not command bodies)
+opensop run ./release-checklist.sop.json       # only after reading the steps and confirming
 ```
 
 `opensop pull` and `opensop import` only write the file — they never execute it. A pulled SOP is untrusted code: **read its `run` commands directly** (`jq '(.process.steps // .steps)[] | {id,type,run}' <file>`) before running it. `opensop dry-run <file>` previews the step flow but does **not** print command bodies, so it is not a substitute for reading the steps.
@@ -573,9 +354,9 @@ opensop run ./daily-standup-notes.sop.json     # only after reading the steps an
 ## Limitations
 
 - **Bash 4+** assumed. Default macOS bash is 3.2 — install a newer one (`brew install bash`) or run via `/usr/local/bin/bash`.
-- **`register` may be admin-only.** Some OpenSOP deployments restrict `/sop/processes/register` to admin tokens. If you get a 401/403, check your token scope or use the dashboard.
-- **No inbound webhook receiver.** The CLI doesn't run a server, so it can't receive webhook callbacks over the network. `webhook` steps in `callback` mode pause the run — resume manually with `opensop submit <run_id> <step-id>`. The OpenSOP server runtime handles live inbound callbacks at `/sop/webhooks/<callback_id>`.
-- **`webhook` poll mode** is not yet implemented in the local backend (mirrors the server runtime's current state). The step exits non-zero with a clear message.
+- **`register` may be admin-only** on a given server. A 401/403 means the token lacks that scope.
+- **No inbound webhook receiver.** The CLI doesn't run a server, so it can't receive webhook callbacks over the network. `webhook` steps in `callback` mode pause the run — resume manually with `opensop submit <run_id> <step-id>`. A server implementing SPEC §4 receives live callbacks at `/sop/webhooks/<callback_id>`.
+- **`webhook` poll mode** is not yet implemented in the local backend. The step exits non-zero with a clear message.
 - **`llm` step type** with a `claude*` model requires `ANTHROPIC_API_KEY` and outbound HTTPS to `api.anthropic.com`; CLI providers need that CLI installed and signed in. A CLI-provider prompt goes on stdin, except kimi's (`-p <prompt>`, capped at 128 KiB on Linux). Without a step `timeout`, CLI calls are unbounded.
 - **`loop` bodies cannot pause.** A `form`, `approval`, escalated `judgment`, or other pausing step inside a loop body fails the loop step.
 - **`notification` step type** is not yet implemented in the local backend; it fails the run with a clear error.

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`cli/` (this directory, inside the `opensop` repo) is the **primary execution surface** for OpenSOP: a single bash file, `bin/opensop` (~7,000 lines, 388 KB), that runs processes **locally** against `.sop.json` files with no server, no network, and no account required. There is no build step, no package manager, no compiled artifact — the file *is* the binary. It can also talk to an optional OpenSOP server via `--remote` or `--server <url>`. Read it top-to-bottom to understand it; it's organized into banner-delimited sections.
+`cli/` (this directory, inside the `opensop` repo) is the **primary execution surface** for OpenSOP: a single bash file, `bin/opensop` (~9.6k lines), that runs processes **locally** against `.sop.json` files with no server, no network, and no account required. There is no build step, no package manager, no compiled artifact — the file *is* the binary. It can also talk to an optional OpenSOP server via `--remote` or `--server <url>`. Read it top-to-bottom to understand it; it's organized into banner-delimited sections.
 
 ## Commands
 
@@ -17,12 +17,12 @@ bin/opensop --version           # must equal OPENSOP_CLI_VERSION at bin/opensop:
 ```
 
 - **Tests:** `test/test.sh` is a plain bash script, not a framework — it runs the `examples/greet.sop.json` process through `bin/opensop` and asserts on receipts. There is no per-test selector; to exercise one path, craft a small `.sop.json` and run `bin/opensop run <file> --json` the way the test does. It needs only `bash` + `jq` (no server, no curl). Always extend it when you touch the local engine — cover the **failure path**, not just the happy path (a happy-path-only test once hid a critical `set -e` bug).
-- **There is no CI.** `bash -n bin/opensop && bash test/test.sh` is the only gate, and it is manual — run it yourself before committing; nothing else will.
+- **CI** (`.github/workflows/cli-tests.yml`) runs `bash -n cli/bin/opensop && bash cli/test/test.sh` on every push and PR. Run it yourself before committing too.
 - **Known shellcheck warnings** are pre-existing and not blockers: `C_CYAN` unused, and `SC2254` (unquoted `$plural`/`$noun` in `build_payload_object`'s `case`). Don't "fix" these without intent.
 
 ## Architecture
 
-**Two backends behind one CLI.** Every command is dispatched from `main()` (bottom of the file). The default backend is **local** (v0.9.1+): commands run against local `.sop.json` files with no server, no network, no curl. `--remote` or `--server <url>` sets `REMOTE_MODE=true` and routes dual commands to call `api_call` (the single curl chokepoint) against a configured server's `/sop/*` REST API. `--local` is a deprecated no-op (local is now the default) — still accepted for script compatibility. Dual commands branch at their top: `if [[ "$REMOTE_MODE" != true ]]; then local_X "$@"; return $?; fi`. `runs` and `show` are always local. Understanding any feature means knowing which backend it lives in.
+**Two backends behind one CLI.** Every command is dispatched from `main()` (bottom of the file). The default backend is **local** (v0.8+): commands run against local `.sop.json` files with no server, no network, no curl. `--remote` or `--server <url>` sets `REMOTE_MODE=true` and routes dual commands to call `api_call` (the single curl chokepoint) against a configured server's `/sop/*` REST API. `--local` is a deprecated no-op (local is now the default) — still accepted for script compatibility. Dual commands branch at their top: `if [[ "$REMOTE_MODE" != true ]]; then local_X "$@"; return $?; fi`. `runs` and `show` are always local. Understanding any feature means knowing which backend it lives in.
 
 **File layout** (banner sections, in order): constants → output/error helpers → config → HTTP core (`api_call`) → local instance cache → one `cmd_*` per subcommand → the local execution engine (`local_*`) → `main()` dispatch.
 
@@ -33,7 +33,7 @@ bin/opensop --version           # must equal OPENSOP_CLI_VERSION at bin/opensop:
 
 **Remote state lives server-side; the only local state is a cache.** `~/.opensop/instances.tsv` maps `id → process name` so most commands take just an instance ID. It's primed from list/history/instances responses and rebuilt on a miss via `lookup_name`. Safe to delete.
 
-**Local execution engine contract.** A `.sop.json` process runs `automated`/`shell`/`noop` steps in order. Each step receives the accumulated JSON context on **stdin** and in **`$OSL_CONTEXT`** (unset when over 128 KiB, the Linux per-string exec cap); its JSON stdout is merged back under the step id (non-JSON stdout becomes `{stdout: "..."}`). Per-step append-only receipts are written under `$OPENSOP_LOCAL_HOME/runs/<id>/` (`manifest.json`, `audit.jsonl`, `context.json`; default `~/.opensop-local`). **Trust boundary:** local steps execute arbitrary shell on the host — same posture as a Makefile.
+**Local execution engine contract.** A `.sop.json` process runs its steps in order (`automated`/`shell`/`noop`, `llm`, `judgment`, `loop`, the pausing types, `webhook`, `subprocess`). Each step receives the accumulated JSON context on **stdin** and in **`$OSL_CONTEXT`** (unset when over 128 KiB, the Linux per-string exec cap); its JSON stdout is merged back under the step id (non-JSON stdout becomes `{stdout: "..."}`). Per-step append-only receipts are written under `$OPENSOP_LOCAL_HOME/runs/<id>/` (`manifest.json`, `audit.jsonl`, `context.json`; default `~/.opensop-local`). **Trust boundary:** local steps execute arbitrary shell on the host — same posture as a Makefile.
 
 ## Bash invariants (this script bites if you ignore them)
 
@@ -54,7 +54,7 @@ When you add or change a subcommand, treat it as not done until it clears this l
 
 ## Releasing
 
-Versions are tagged and mirrored to GitHub Releases (`v0.1.0` … current). To cut one:
+Versions are tagged and mirrored to GitHub Releases (`v0.4.0` … current). To cut one:
 
 1. Bump `OPENSOP_CLI_VERSION` (`bin/opensop:19`).
 2. Regenerate `bin/opensop.sha256` (`make checksum`) whenever `bin/opensop` changes; the installer and `opensop upgrade` both verify the download against it. A stale or missing checksum causes the default `curl … | bash` install to fail.
@@ -67,4 +67,4 @@ Follow [Semantic Versioning](https://semver.org/) and [Keep a Changelog](https:/
 
 ## Agent integration
 
-Agents use this CLI to run processes **locally** — no server, no HTTP — for the core loop. `docs/AGENTS.md` (repo root) is the canonical integration guide (run existing processes; recognize reusable multi-step work as a candidate `.sop.yaml`; author + register). The `--remote` path is opt-in for shared orchestration against a running OpenSOP server. For discovery prefer `opensop search` / `opensop suggest` (intent-based) over scanning `opensop list`.
+Agents use this CLI to run processes **locally** — no server, no HTTP — for the core loop. `docs/AGENTS.md` is the canonical integration guide (discover and run processes; recognize reusable multi-step work and encode it as a `.sop.json`). The `--remote` path is opt-in for shared orchestration against a running OpenSOP server. For discovery prefer `opensop search` / `opensop suggest` (intent-based) over scanning `opensop list`.

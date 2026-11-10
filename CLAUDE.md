@@ -21,9 +21,9 @@ This repo is the **OpenSOP standard**: the specification ([`SPEC.md`](./SPEC.md)
 
 All CLI work starts in `cli/`. Read `cli/CLAUDE.md` before touching `cli/bin/opensop`. Key points:
 
-- `cli/bin/opensop` is a single bash file (~1600 lines). No build step. The file is the binary.
+- `cli/bin/opensop` is a single bash file (~9.6k lines). No build step. The file is the binary.
 - Test gate: `bash -n cli/bin/opensop && bash cli/test/test.sh` — run this before committing.
-- Local is the default backend (v0.9.1+). `--remote`/`--server` routes to a server's `/sop/*` API.
+- Local is the default backend (v0.8+). `--remote`/`--server` routes to a server's `/sop/*` API.
 - When you add or change a subcommand, update `cmd_help`, `README.md`'s subcommand table, and `cli/CHANGELOG.md` in the same commit.
 
 ---
