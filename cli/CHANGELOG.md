@@ -9,6 +9,11 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ## [Unreleased]
 
+### Changed
+
+- **`onboard` no longer runs `bench`.** `bench` needs the repo's `bench/` fixtures, so on a curl install that step always failed, and with `--stub` its "reliability gain" was hard-coded fixtures. `--stub` and `--n` are still accepted for old scripts and ignored with a note. `--json` drops `bench_result_or_skipped`/`bench_result` and adds `next` (commands to run) and `requires` (e.g. `ANTHROPIC_API_KEY` for the scaffold's `claude-*` model). The printed next steps all work on a curl install: guide links are GitHub URLs, there is no bare `fork`, and the cell setup (`opensop init && mkdir -p processes && mv …`) runs as printed. When the scaffold's model needs an API key, onboard says so and names the `claude-code:`/`codex:` alternative.
+- `bench` outside a git clone fails with `bench runs from a git clone` and the clone command as the hint.
+
 ### Fixed
 
 - `help agents` and `help agents --json` point to `docs/AGENTS.md` (as a GitHub URL, so it works on a curl install). They named `docs/CLAUDE-INTEGRATION.md`, which does not exist.

@@ -790,7 +790,7 @@ config|show or set remote server config (url and token)|config [set url <URL>; s
 upgrade|upgrade the installed opensop CLI to the latest (or a pinned) release|upgrade [--pin X.Y.Z]|config|local
 help|show help for a command or the full command reference|help [<command>] [--json]|config|local
 bench|3-arm reliability comparison: skill vs json_only vs opensop over N runs|bench [<task-dir>] [--n N] [--model MODEL] [--arm ARMNAME] [--stub]|bench|local
-onboard|first-run experience: scaffold, validate, bench, and show next steps|onboard [<process.sop.json>] [--stub] [--n N]|onboarding|local
+onboard|first-run experience: scaffold, validate, and show next steps|onboard [<process.sop.json>]|onboarding|local
 skill|install an embedded SKILL.md (opensop or opensop-build-harness) into an agent runtime or directory|skill <install/paths/show> [--runtime FLAVOUR] [--scope user/project] [--skill NAME] [--force] [--json]|agent-skills|local
 doctor|self-check: version, jq, bash, and skill installation status|doctor [--json]|agent-skills|local
 pull|download an SOP from the opensop SOP library and write it locally|pull <author>/<slug>[@<ref>] [--output <path>] [--force] [--verify <sha256>]|sops|local
@@ -1215,9 +1215,8 @@ EX
       ;;
     onboard)
       cat <<'EX'
-  opensop onboard                              # scaffold a starter .sop.json + bench
-  opensop onboard ./my-process.sop.json        # validate + bench an existing process
-  opensop onboard ./my-process.sop.json --stub # no API key — offline bench self-test
+  opensop onboard                              # scaffold a starter .sop.json, validate it
+  opensop onboard ./my-process.sop.json        # validate an existing process
   opensop onboard --json                       # machine-readable summary
 EX
       ;;
@@ -7068,8 +7067,8 @@ cmd_bench() {
   local bench_dir
   if [[ -z "$task_dir" ]]; then
     bench_dir="$(_bench_find_dir)" \
-      || die "built-in bench dir not found (expected adjacent to bin/opensop at ../bench)" \
-             "file_not_found" "pass an explicit task-dir: opensop bench <path>"
+      || die "bench runs from a git clone (its fixtures are not part of a curl install)" \
+             "file_not_found" "git clone https://github.com/opensop/opensop && cd opensop && cli/bin/opensop bench"
     task_dir="$bench_dir"
   fi
 
@@ -7559,15 +7558,14 @@ cmd_bench() {
 #   1. Orient  — explain what onboarding does; scaffold a starter .sop.json if
 #                no process file given; point at docs/AGENTS.md §openSOP-ize.
 #   2. Validate — run dry-run on the process file; report inputs/steps.
-#   3. Compare  — invoke bench (built-in task only) with --stub when no API key;
-#                 surfaces bench's scoreboard or graceful message.
-#   4. Next steps — print run / show / fork / lineage commands to explore.
+#   3. Next steps — print commands that work on a curl install (run, inspect,
+#                 keep it in a cell) and the guide URLs.
 #
-# Side-effect safety: onboard NEVER executes the user's process against
-# production.  The comparison is the bench's controlled task only.
+# Side-effect safety: onboard NEVER executes the user's process.
+# `bench` is a separate command and needs a git clone (its fixtures).
 #
 # --json emits:
-#   {scaffolded, process_file, validated, bench_result_or_skipped, bench_result?}
+#   {scaffolded, process_file, validated, next: [<command>...]}
 # --------------------------------------------------------------------------- #
 
 # _onboard_scaffold_template — emit a starter .sop.json JSON string.
@@ -7603,28 +7601,27 @@ _onboard_scaffold_template() {
 }
 
 cmd_onboard() {
-  local proc_arg="" stub_mode=false n_runs=10
+  local proc_arg=""
   local json_out=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --stub)       stub_mode=true; shift ;;
-      --n)          [[ $# -ge 2 ]] || die "--n requires a value" "usage_error" "opensop onboard [--n N]"; n_runs="$2"; shift 2 ;;
-      --n=*)        n_runs="${1#--n=}"; shift ;;
+      # onboard no longer runs bench; accepted (ignored) so old scripts work.
+      --stub|--n=*) warn "onboard no longer runs bench; $1 is ignored"; shift ;;
+      --n)          [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--n requires a positive integer" "usage_error" "opensop onboard"
+                    warn "onboard no longer runs bench; --n is ignored"; shift 2 ;;
       --json)       OUTPUT_MODE="json"; shift ;;
       --help|-h)
-        printf 'usage: opensop onboard [<process.sop.json>] [--stub] [--n N] [--json]\n'
+        printf 'usage: opensop onboard [<process.sop.json>] [--json]\n'
         printf '\n'
         printf '  First-run experience: scaffold a starter process, validate it via dry-run,\n'
-        printf '  run the 3-arm bench comparison to see the reliability difference, and print\n'
-        printf '  next steps (run / show / fork / lineage).\n'
+        printf '  and print next steps (run / inspect / keep it in a cell).\n'
         printf '\n'
         printf '  If no process file is given, a starter .sop.json is scaffolded in cwd.\n'
         printf '  The transformation of an arbitrary prose skill into a .sop.json is an\n'
-        printf '  agent skill — see docs/AGENTS.md §6 (openSOP-ize) for the guide.\n'
+        printf '  agent skill — see %s §6 (openSOP-ize).\n' "$_ONBOARD_AGENTS_URL"
         printf '\n'
-        printf '  SIDE-EFFECT SAFE: onboard never executes your process against production.\n'
-        printf '  The comparison uses the bench built-in controlled task only.\n'
+        printf '  SIDE-EFFECT SAFE: onboard never executes your process.\n'
         printf '\n'
         printf 'Examples:\n'
         _cmd_help_examples onboard
@@ -7640,10 +7637,6 @@ cmd_onboard() {
   done
 
   [[ "$OUTPUT_MODE" == "json" ]] && json_out=true
-
-  # Validate n_runs
-  [[ "$n_runs" =~ ^[1-9][0-9]*$ ]] \
-    || die "--n must be a positive integer, got: $n_runs" "usage_error" "opensop onboard --n 3"
 
   # -----------------------------------------------------------------------
   # Step 1: Orient + scaffold (if no process file given)
@@ -7661,12 +7654,11 @@ cmd_onboard() {
       printf 'What onboarding does:\n'
       printf '  1. Scaffold a starter .sop.json in cwd (you fill in the details)\n'
       printf '  2. Validate it (dry-run: schema + input check)\n'
-      printf '  3. Run the 3-arm bench to show the reliability gain\n'
-      printf '  4. Print next steps (run / show / fork / lineage)\n'
+      printf '  3. Print next steps (run / inspect / keep it in a cell)\n'
       printf '\n'
       printf 'The %stransformation%s of an arbitrary prose skill into a .sop.json is an\n' "$C_BOLD" "$C_RESET"
-      printf 'agent skill — not something bash automates.  See:\n'
-      printf '  docs/AGENTS.md §6  (openSOP-ize — the key agent skill)\n'
+      printf 'agent skill — not something bash automates.  See §6 (openSOP-ize) of:\n'
+      printf '  %s\n' "$_ONBOARD_AGENTS_URL"
       printf '\n'
     fi
 
@@ -7688,7 +7680,7 @@ cmd_onboard() {
         printf '  opensop onboard %s\n' "$scaffold_path"
         printf '\n'
         printf 'Or use the openSOP-ize agent skill to transform a prose prompt:\n'
-        printf '  docs/AGENTS.md §6\n'
+        printf '  %s (§6)\n' "$_ONBOARD_AGENTS_URL"
         printf '\n'
       fi
     fi
@@ -7770,11 +7762,8 @@ cmd_onboard() {
       jq -nc \
         --argjson scaffolded "$( $scaffolded && echo true || echo false)" \
         --arg process_file "$proc_file" \
-        --argjson validated false \
-        --argjson bench_result_or_skipped '"skipped"' \
         --arg error_detail "$_struct_errors" \
         '{scaffolded:$scaffolded,process_file:$process_file,validated:false,
-          bench_result_or_skipped:$bench_result_or_skipped,
           error:"validation_failed",message:$error_detail}'
     else
       printf '%sstructural validation failed:%s\n' "$C_RED" "$C_RESET"
@@ -7856,136 +7845,62 @@ cmd_onboard() {
         --argjson scaffolded "$( $scaffolded && echo true || echo false)" \
         --arg process_file "$proc_file" \
         --argjson validated false \
-        --argjson bench_result_or_skipped '"skipped"' \
         '{scaffolded:$scaffolded,process_file:$process_file,validated:$validated,
-          bench_result_or_skipped:$bench_result_or_skipped,
           error:"validation_failed"}'
     fi
     exit 1
   fi
 
   # -----------------------------------------------------------------------
-  # Step 3: Compare — invoke bench (built-in task only)
+  # Step 3: Next steps — every command works on a curl install.
   # -----------------------------------------------------------------------
-  if ! $json_out; then
-    printf '%s--- step 3: compare (3-arm bench) ---%s\n' "$C_BOLD" "$C_RESET"
-    printf '\n'
-    printf 'Running the bench comparison (skill vs json_only vs opensop).\n'
-    printf 'This uses the built-in extract-action-items task — not your process —\n'
-    printf 'so no side effects are triggered on your real data.\n'
-    printf '\n'
-  fi
-
-  # Build bench args. Always use the built-in task; never accept user-supplied dirs here.
-  # Users who want to benchmark a custom task use `opensop bench <task>` directly.
-  local -a bench_args=()
-  bench_args+=("--n" "$n_runs")
-  $stub_mode && bench_args+=("--stub")
-
-  # Run bench. Two paths:
-  #   --json  → capture JSON output; embed in our JSON summary.
-  #   pretty  → run bench in pretty mode (scoreboard to terminal); capture stderr
-  #             in a tmp file so we can extract error messages on failure.
-  local bench_rc=0
-  local bench_result_or_skipped="completed"
-  local bench_result_json="null"
-
-  # bench's die() calls exit 1 — it terminates the whole process when called
-  # in the main execution context. We run bench in a subshell (bash -c or $(...))
-  # so that an exit 1 inside bench exits only the subshell.  Stderr is captured
-  # to a tmpfile so the key-missing prose message can be surfaced cleanly.
-  local bench_out_tmp; bench_out_tmp="$(mktemp)"
-  local bench_err_tmp; bench_err_tmp="$(mktemp)"
-
-  if $json_out; then
-    # JSON mode: run bench in a subshell (stdout to tmpfile; stderr to tmpfile).
-    ( OUTPUT_MODE=json cmd_bench "${bench_args[@]}" ) >"$bench_out_tmp" 2>"$bench_err_tmp" \
-      || bench_rc=$?
-    local bench_json_out; bench_json_out="$(cat "$bench_out_tmp" 2>/dev/null || true)"
-    if [[ $bench_rc -eq 0 ]] && [[ -n "$bench_json_out" ]]; then
-      bench_result_json="$(printf '%s' "$bench_json_out" | jq -c . 2>/dev/null || echo 'null')"
-    else
-      # Bench failed — extract error message from stderr (bench's prose or JSON die output).
-      local bench_err_raw; bench_err_raw="$(cat "$bench_err_tmp" 2>/dev/null || true)"
-      local bench_err_msg; bench_err_msg="$(printf '%s' "$bench_err_raw" | jq -r '.message // empty' 2>/dev/null || true)"
-      [[ -z "$bench_err_msg" ]] && bench_err_msg="$bench_err_raw"
-      [[ -z "$bench_err_msg" ]] && bench_err_msg="bench failed (rc=$bench_rc)"
-      bench_result_json="$(jq -nc --arg m "$bench_err_msg" '{error:$m}')"
-    fi
-  else
-    # Pretty mode: bench scoreboard goes to stdout (terminal); stderr to tmpfile.
-    # Run bench in a subshell so bench's exit 1 (on die) does not kill onboard.
-    ( cmd_bench "${bench_args[@]}" ) 2>"$bench_err_tmp" || bench_rc=$?
-    if [[ $bench_rc -ne 0 ]]; then
-      # Extract error message from bench's stderr (prose or JSON).
-      local bench_err_raw; bench_err_raw="$(cat "$bench_err_tmp" 2>/dev/null || true)"
-      local bench_err
-      bench_err="$(printf '%s' "$bench_err_raw" | jq -r '.message // empty' 2>/dev/null || true)"
-      [[ -z "$bench_err" ]] && bench_err="$bench_err_raw"
-      printf '\n'
-      if [[ -n "$bench_err" ]]; then
-        warn "bench skipped: $bench_err"
-      else
-        warn "bench skipped (no API key or bench error)"
-      fi
-      printf '\n'
-      printf 'To run bench offline: opensop onboard %s --stub\n' "$proc_file"
-      printf 'To run with a key: export ANTHROPIC_API_KEY=sk-ant-... then re-run.\n'
-      printf '\n'
-    fi
-  fi
-
-  rm -f "$bench_out_tmp" "$bench_err_tmp"
-  [[ $bench_rc -ne 0 ]] && bench_result_or_skipped="skipped"
-
-  # -----------------------------------------------------------------------
-  # Step 4: Next steps
-  # -----------------------------------------------------------------------
+  local pname; pname="$(jq -r '(if has("process") then .process else . end).name // "my-process"' "$proc_file")"
+  local in_args
+  in_args="$(jq -r "$_INPUT_DECLS_JQ"'(if has("process") then .process else . end).inputs // {} | _input_decls
+    | map(select(.required == true and has("default") == false) | " --input \(.name)=...") | join("")' "$proc_file" 2>/dev/null || true)"
+  # A step on the Anthropic API (model claude-*) needs ANTHROPIC_API_KEY;
+  # say so, and how to run without one.
+  local needs_key=false
+  jq -e '[(if has("process") then .process else . end).steps[]? | select(.type == "llm" or .type == "judgment")
+          | .model // "" | select(startswith("claude") and (startswith("claude-code:") | not))] | length > 0' \
+     "$proc_file" >/dev/null 2>&1 && needs_key=true
+  local -a next_cmds=("opensop run $proc_file$in_args" "opensop status <run_id>" "opensop show <run_id>")
   if ! $json_out; then
     printf '%s--- next steps ---%s\n' "$C_BOLD" "$C_RESET"
     printf '\n'
     printf 'Run your process:\n'
-    printf '  opensop run %s --input <key>=<value>\n' "$proc_file"
+    printf '  opensop run %s%s\n' "$proc_file" "$in_args"
+    if $needs_key; then
+      printf '  %s(its model calls the Anthropic API: export ANTHROPIC_API_KEY=... first,\n' "$C_DIM"
+      printf '   or set "model" to "claude-code:" / "codex:" to use a logged-in Claude Code or Codex CLI)%s\n' "$C_RESET"
+    fi
     printf '\n'
     printf 'Inspect receipts:\n'
     printf '  opensop runs                 # list all local runs\n'
+    printf '  opensop status <run_id>      # state, and what to do next\n'
     printf '  opensop show <run_id>        # manifest + per-step receipts\n'
-    printf '  opensop show <run_id> --json # machine-readable full receipt\n'
     printf '\n'
-    printf 'Evolve your process:\n'
-    printf '  opensop fork <name>          # copy and version-track\n'
-    printf '  opensop lineage <name>       # status, metadata, history\n'
-    printf '  opensop annotate <name> promote '"'"'{"to":"m1"}'"'"'\n'
+    printf 'Keep it in a cell (named, versioned, forkable):\n'
+    printf '  opensop init && mkdir -p processes && mv %s processes/\n' "$proc_file"
+    printf '  opensop run %s%s\n' "$pname" "$in_args"
+    printf '  opensop lineage %s\n' "$pname"
     printf '\n'
-    printf 'openSOP-ize a prose prompt → .sop.json:\n'
-    printf '  docs/AGENTS.md §6           # the transformation skill\n'
+    printf 'Guides:\n'
+    printf '  %s   # openSOP-ize: §6\n' "$_ONBOARD_AGENTS_URL"
+    printf '  https://github.com/opensop/opensop/blob/main/docs/EVOLUTION.md   # evolution tiers (m0–m6)\n'
     printf '\n'
-    printf 'Learn about evolution tiers (m0–m6):\n'
-    printf '  EVOLUTION.md\n'
-    printf '\n'
-  fi
-
-  # -----------------------------------------------------------------------
-  # JSON summary output
-  # -----------------------------------------------------------------------
-  if $json_out; then
-    local bench_combined="null"
-    if [[ "$bench_result_or_skipped" == "completed" ]] && [[ "$bench_result_json" != "null" ]]; then
-      bench_combined="$bench_result_json"
-    fi
+  else
     jq -nc \
       --argjson scaffolded "$( $scaffolded && echo true || echo false)" \
       --arg process_file "$proc_file" \
-      --argjson validated true \
-      --arg bench_result_or_skipped "$bench_result_or_skipped" \
-      --argjson bench_result "$bench_combined" \
-      '{scaffolded:$scaffolded,
-        process_file:$process_file,
-        validated:$validated,
-        bench_result_or_skipped:$bench_result_or_skipped,
-        bench_result:$bench_result}'
+      --argjson next "$(printf '%s\n' "${next_cmds[@]}" | jq -R . | jq -sc .)" \
+      --argjson needs_key "$needs_key" \
+      '{scaffolded:$scaffolded, process_file:$process_file, validated:true, next:$next,
+        requires: (if $needs_key then ["ANTHROPIC_API_KEY (or a claude-code:/codex: model)"] else [] end)}'
   fi
 }
+
+_ONBOARD_AGENTS_URL="https://github.com/opensop/opensop/blob/main/docs/AGENTS.md"
 
 # --------------------------------------------------------------------------- #
 # Subcommand: skill
@@ -8064,7 +7979,7 @@ opensop skill install --runtime <flavour>             install this skill into ag
 opensop skill paths [--json]                          show per-runtime install paths
 opensop skill show                                    print this SKILL.md to stdout
 opensop doctor [--json]                               self-check: jq, bash, skill status
-opensop onboard [<process.sop.json>]                  first-run experience: scaffold + bench
+opensop onboard [<process.sop.json>]                  first-run experience: scaffold + validate
 ```
 
 All commands emit compact JSON when piped or when `--json` is passed.

@@ -7570,11 +7570,10 @@ onboard_validated="$(echo "$onboard_scaffold_out" | jq -r '.validated' 2>/dev/nu
   || { echo "FAIL: E1 onboard (no-arg) — expected validated=true, got '$onboard_validated'"; exit 1; }
 echo "PASS: E1 onboard (no-arg) — validated=true (dry-run passed on scaffolded file)"
 
-# bench_result_or_skipped is a string (either "completed" or "skipped")
-onboard_bench_status="$(echo "$onboard_scaffold_out" | jq -r '.bench_result_or_skipped' 2>/dev/null || echo "")"
-[ -n "$onboard_bench_status" ] \
-  || { echo "FAIL: E1 onboard (no-arg) — bench_result_or_skipped missing from JSON summary"; exit 1; }
-echo "PASS: E1 onboard (no-arg) — bench_result_or_skipped present: '$onboard_bench_status'"
+# onboard no longer runs bench; the summary lists next commands instead.
+echo "$onboard_scaffold_out" | jq -e '(.next | length) > 0 and (has("bench_result_or_skipped") | not)' >/dev/null \
+  || { echo "FAIL: E1 onboard (no-arg) — expected next[] and no bench fields: $onboard_scaffold_out"; exit 1; }
+echo "PASS: E1 onboard (no-arg) — next[] present, no bench"
 
 popd >/dev/null
 
@@ -7600,11 +7599,11 @@ echo "$onboard_bad_out" | jq -e '.error // .message // .validation_errors' >/dev
   }
 echo "PASS: E1 onboard (invalid JSON) — error output present"
 
-# --- (c) valid .sop.json + --stub --n 1 + --json: parseable summary with bench ---
+# --- (c) valid .sop.json + --json: parseable summary ---
 onboard_valid_json="$onboard_tmp/my-process.sop.json"  # scaffolded by (a)
 
 set +e
-onboard_valid_out="$("$cli" onboard "$onboard_valid_json" --stub --n 1 --json 2>&1)"
+onboard_valid_out="$("$cli" onboard "$onboard_valid_json" --json 2>&1)"
 onboard_valid_rc=$?
 set -e
 
@@ -7621,20 +7620,7 @@ onboard_valid_validated="$(echo "$onboard_valid_out" | jq -r '.validated' 2>/dev
   || { echo "FAIL: E1 onboard (valid+stub) — expected validated=true, got '$onboard_valid_validated'"; exit 1; }
 echo "PASS: E1 onboard (valid+stub) — validated=true"
 
-# bench ran (--stub means it should always succeed)
-onboard_valid_bench_status="$(echo "$onboard_valid_out" | jq -r '.bench_result_or_skipped' 2>/dev/null || echo "")"
-[ "$onboard_valid_bench_status" = "completed" ] \
-  || { echo "FAIL: E1 onboard (valid+stub) — bench_result_or_skipped should be 'completed' with --stub, got '$onboard_valid_bench_status'"; exit 1; }
-echo "PASS: E1 onboard (valid+stub) — bench_result_or_skipped=completed"
-
-# bench_result contains the arms scoreboard
-onboard_valid_arms="$(echo "$onboard_valid_out" | jq '.bench_result.arms | length' 2>/dev/null || echo "")"
-[ "${onboard_valid_arms:-0}" -gt 0 ] \
-  || { echo "FAIL: E1 onboard (valid+stub) — bench_result.arms should be non-empty, got '$onboard_valid_arms'"; exit 1; }
-echo "PASS: E1 onboard (valid+stub) — bench_result.arms present and non-empty"
-
-# --- (d) no-key path: bench skipped gracefully (no hang, no crash) ---
-# Unset ANTHROPIC_API_KEY and run without --stub; bench should skip gracefully.
+# --- (d) no-key path: onboard succeeds and says what the run needs ---
 onboard_nokey_out=""
 onboard_nokey_rc=0
 set +e
@@ -7642,19 +7628,17 @@ onboard_nokey_out="$(ANTHROPIC_API_KEY="" "$cli" onboard "$onboard_valid_json" -
 onboard_nokey_rc=$?
 set -e
 
-# onboard itself should exit 0 (bench failure is graceful, not fatal)
 [ "$onboard_nokey_rc" -eq 0 ] \
-  || { echo "FAIL: E1 onboard (no-key) — should exit 0 even when bench skips; got $onboard_nokey_rc (output: ${onboard_nokey_out:0:400})"; exit 1; }
-echo "PASS: E1 onboard (no-key) — exits 0 (bench skipped gracefully)"
+  || { echo "FAIL: E1 onboard (no-key) — should exit 0; got $onboard_nokey_rc (output: ${onboard_nokey_out:0:400})"; exit 1; }
+echo "PASS: E1 onboard (no-key) — exits 0"
 
 echo "$onboard_nokey_out" | jq -e . >/dev/null 2>&1 \
   || { echo "FAIL: E1 onboard (no-key) — --json output not parseable: ${onboard_nokey_out:0:400}"; exit 1; }
-echo "PASS: E1 onboard (no-key) — --json output parseable even when bench skips"
+echo "PASS: E1 onboard (no-key) — --json output parseable"
 
-onboard_nokey_bench="$(echo "$onboard_nokey_out" | jq -r '.bench_result_or_skipped' 2>/dev/null || echo "")"
-[ "$onboard_nokey_bench" = "skipped" ] \
-  || { echo "FAIL: E1 onboard (no-key) — expected bench_result_or_skipped=skipped, got '$onboard_nokey_bench'"; exit 1; }
-echo "PASS: E1 onboard (no-key) — bench_result_or_skipped=skipped (graceful no-key path)"
+echo "$onboard_nokey_out" | jq -e '.requires | any(test("ANTHROPIC_API_KEY"))' >/dev/null \
+  || { echo "FAIL: E1 onboard (no-key) — expected requires[] to name ANTHROPIC_API_KEY: $onboard_nokey_out"; exit 1; }
+echo "PASS: E1 onboard (no-key) — requires[] names what the scaffold run needs"
 
 # --------------------------------------------------------------------------- #
 # E1: onboard — structural validation gate (negative tests)
@@ -9989,7 +9973,7 @@ jq -e '.error == "usage_error" and (.message | test("required field missing: tex
 c_id="$("$cli" run "$p0100c/p.sop.json" --input text=a --json | jq -r .run_id)"
 jq -e '.s == {text: "a", greeting: "hi"} and (has("n") | not)' "$OPENSOP_LOCAL_HOME/runs/$c_id/context.json" >/dev/null \
   || { echo "FAIL: P0100-c typed defs leaked into context: $(cat "$OPENSOP_LOCAL_HOME/runs/$c_id/context.json")"; exit 1; }
-(cd "$p0100c" && "$cli" onboard --stub --n 1 --json >/dev/null) || { echo "FAIL: P0100-c onboard scaffold"; exit 1; }
+(cd "$p0100c" && "$cli" onboard --json >/dev/null) || { echo "FAIL: P0100-c onboard scaffold"; exit 1; }
 c_ob="$(cd "$p0100c" && OSL_LLM_STUB='{"result":"ok"}' "$cli" run my-process.sop.json --input input_text=hello --json | jq -r .run_id)"
 jq -e '.input_text == "hello" and .extract.result == "ok"' "$OPENSOP_LOCAL_HOME/runs/$c_ob/context.json" >/dev/null \
   || { echo "FAIL: P0100-c onboard scaffold run: $(cat "$OPENSOP_LOCAL_HOME/runs/$c_ob/context.json")"; exit 1; }
@@ -10219,6 +10203,26 @@ echo "PASS: P0100-r — skill/help text match the local CLI; hermes honours HERM
 [ -f "$here/../docs/AGENTS.md" ] || { echo "FAIL: P0100-s docs/AGENTS.md missing"; exit 1; }
 grep -q 'CLAUDE-INTEGRATION' <<<"$("$cli" help agents)$("$cli" help --json)" && { echo "FAIL: P0100-s help names a missing guide"; exit 1; }
 echo "PASS: P0100-s — help agents points at docs/AGENTS.md"
+
+# (t) onboard no longer runs bench (--stub/--n are accepted and ignored); its
+# next steps work on a curl install: no repo-relative doc paths, the cell
+# commands run as printed. bench outside a clone says how to get one.
+p0100t="$(mktemp -d)"; mkdir -p "$p0100t/inst"; cp "$cli" "$p0100t/inst/opensop"
+t_out="$(cd "$p0100t" && "$p0100t/inst/opensop" onboard --stub --n 3 2>"$p0100t/err")" || { echo "FAIL: P0100-t onboard"; exit 1; }
+grep -q 'ignored' "$p0100t/err" || { echo "FAIL: P0100-t no deprecation note for --stub/--n"; exit 1; }
+grep -qi 'bench\|reliability' <<<"$t_out" && { echo "FAIL: P0100-t onboard still mentions bench: $t_out"; exit 1; }
+grep -E '^  (docs/|EVOLUTION)' <<<"$t_out" && { echo "FAIL: P0100-t repo-relative doc path"; exit 1; }
+grep -q 'https://github.com/opensop/opensop/blob/main/docs/EVOLUTION.md' <<<"$t_out" || { echo "FAIL: P0100-t EVOLUTION URL"; exit 1; }
+grep -q 'ANTHROPIC_API_KEY' <<<"$t_out" || { echo "FAIL: P0100-t run needs no hint"; exit 1; }
+(cd "$p0100t" && OPENSOP_LOCAL_HOME="$p0100t/h" && export OPENSOP_LOCAL_HOME \
+  && eval "$(grep -m1 'opensop init &&' <<<"$t_out" | sed "s|opensop|'$p0100t/inst/opensop'|")" >/dev/null \
+  && OSL_LLM_STUB='{"result":"ok"}' "$p0100t/inst/opensop" run my-process --input input_text=x --json | jq -e '.status == "completed"' >/dev/null) \
+  || { echo "FAIL: P0100-t the printed cell commands do not work"; exit 1; }
+t_err="$("$p0100t/inst/opensop" bench --json 2>&1)" && { echo "FAIL: P0100-t bench outside a clone exited 0"; exit 1; }
+jq -e '.hint == "git clone https://github.com/opensop/opensop && cd opensop && cli/bin/opensop bench"' <<<"$t_err" >/dev/null \
+  || { echo "FAIL: P0100-t bench error: $t_err"; exit 1; }
+echo "PASS: P0100-t — onboard has no bench step; its next steps work on a curl install"
+rm -rf "$p0100t"
 
 # Cleanup.
 unset OPENSOP_SOPS_BASE
