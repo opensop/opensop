@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`--remote ps` and `--remote watch` fail on an unreachable server** (exit 1, one `network_error` line that includes curl's reason). Before, `ps` printed an empty result and exited 0, and `watch` retried forever.
 - `info` labels the file it read `file:` instead of `written to:` (it writes nothing).
 - **`doctor` flags two installs**: when the `opensop` on PATH is a different version from the one running, it says so; `--json` gains `path_version` and `path_version_mismatch`.
 - **`upgrade` installs the latest GitHub release**, as it says, instead of whatever is on `main`. It asks the GitHub API for the latest release tag, and when the running CLI is already newer it says so instead of "upgrading" backwards. `--pin X.Y.Z` is unchanged and can still downgrade. The downloaded binary's embedded version must match the tag either way. `help` labels local commands "no OpenSOP server needed" (it said "no curl", which is wrong for `upgrade` and `pull`).

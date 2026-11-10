@@ -242,11 +242,13 @@ api_call() {
   [[ -n "${OPENSOP_TOKEN:-}" ]] && curl_args+=(-H "X-SOP-Token: $OPENSOP_TOKEN")
   [[ -n "$body" ]] && curl_args+=(-d "$body")
 
-  local status
-  if ! status=$(curl "${curl_args[@]}" "$url"); then
-    rm -f "$tmp_body"
-    die "request failed: $method $url" "network_error"
+  local status curl_err
+  if ! status=$(curl "${curl_args[@]}" "$url" 2>"$tmp_body.err"); then
+    curl_err="$(sed 's/^curl: ([0-9]*) //' "$tmp_body.err" | head -1)"
+    rm -f "$tmp_body" "$tmp_body.err"
+    die "request failed: $method $url${curl_err:+ — $curl_err}" "network_error"
   fi
+  rm -f "$tmp_body.err"
 
   if [[ "$status" -ge 400 ]]; then
     local emode; emode=$(_error_mode)
@@ -2258,7 +2260,9 @@ _ps_collect_local_entries() {
 # _ps_collect_remote_entries — fetch §9.4 entries from GET /sop/processes/status.
 # Shared by cmd_ps (--follow) and cmd_watch (--remote). Prints compact JSON array.
 _ps_collect_remote_entries() {
-  local resp; resp=$(api_get "/sop/processes/status")
+  # `|| exit 1`: errexit is off inside $(...), so a dead server would
+  # otherwise yield an empty table and exit 0 (and `watch` would spin forever).
+  local resp; resp=$(api_get "/sop/processes/status") || exit 1
   printf '%s\n' "$resp" | jq -c '[.processes[] | {
     name:             .name,
     version:          .version,

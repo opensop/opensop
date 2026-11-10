@@ -10144,6 +10144,16 @@ if script -qec true /dev/null >/dev/null 2>&1; then
   echo "PASS: P0100-m — info labels the file it read, not \"written to\""
 fi
 
+# (n) --remote ps / watch against a dead server exit non-zero with one error
+# (localhost port 9 refuses; nothing leaves the machine).
+p0100n="$(mktemp -d)"
+n_err="$(OPENSOP_HOME="$p0100n" "$cli" --server http://127.0.0.1:9 ps 2>&1 >/dev/null)" && { echo "FAIL: P0100-n ps exited 0"; exit 1; }
+[ "$(wc -l <<<"$n_err")" = 1 ] && grep -q 'request failed: GET' <<<"$n_err" || { echo "FAIL: P0100-n ps error: $n_err"; exit 1; }
+n_rc=0; OPENSOP_HOME="$p0100n" timeout 10 "$cli" --server http://127.0.0.1:9 watch >/dev/null 2>&1 || n_rc=$?
+[ "$n_rc" = 1 ] || { echo "FAIL: P0100-n watch on a dead server: rc=$n_rc"; exit 1; }
+echo "PASS: P0100-n — remote ps/watch fail fast on a dead server"
+rm -rf "$p0100n"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
