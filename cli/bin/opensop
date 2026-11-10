@@ -3210,6 +3210,31 @@ _local_mark_exited() {
     "$1/manifest.json" > "$1/manifest.json.tmp" && mv "$1/manifest.json.tmp" "$1/manifest.json"
 }
 
+# _local_next_hint <run_dir> — the "next:" lines for a paused run: the exact
+# submit command with the fields waiting.expects names (enum values spelled
+# out), and for an escalated judgment why it escalated plus the agent's
+# proposal from its waiting receipt.
+_local_next_hint() {
+  local d="$1"
+  jq -r --slurpfile audit <(cat "$d/audit.jsonl" 2>/dev/null) \
+        --slurpfile proc <(cat "$d/process.snapshot.json" 2>/dev/null || echo '{}') '
+    .run_id as $id | .waiting as $w
+    | ([$audit[] | select(.step == $w.step and .status == "waiting")] | last) as $r
+    | ([($proc[0].steps // [])[] | select(.id == $w.step)][0].judgment.confidence_threshold) as $th
+    | (if $w.reason == "escalated" then
+         "escalated: " + ({low_confidence: "the agent'"'"'s confidence (\($r.proposal.confidence // "?")) is below the threshold (\($th // "?"))",
+                           require_human_review: "the step requires human review",
+                           no_agent: "no agent is configured for this judgment (judgment.allow_agent, model, prompt)"}[$r.escalation // ""]
+                          // "the step needs a human decision")
+         + (if $r.proposal then "\nproposal: " + ($r.proposal | tojson | .[0:400]) else "" end) + "\n"
+       else "" end)
+    + "next:  opensop submit \($id) \($w.step)"
+    + ([$w.expects.schema[]? | " --output " + .name + "="
+        + ((.values // (if (.type // "" | tostring | startswith("enum[")) then (.type | ltrimstr("enum[") | rtrimstr("]") | split(",") | map(gsub("^\\s+|\\s+$"; ""))) else null end))
+           | if . then "<" + join("|") + ">" else "..." end)] | join(""))
+  ' "$d/manifest.json"
+}
+
 # _local_wait_meta <proc_file> <index>
 # The manifest's waiting.reason + waiting.expects for the step that paused.
 # Shared by every path that finalizes a paused run (run, submit, heal, parent
@@ -3424,7 +3449,7 @@ local_run() {
       ok "ran $C_BOLD$name$C_RESET locally — waiting at $wait_step"
       info "  run: $run_id"
       info "  dir: $run_dir"
-      info "next:  opensop submit $run_id $wait_step --output k=v"
+      info "$(_local_next_hint "$run_dir")"
     else
       jq -c . "$run_dir/manifest.json"
     fi
@@ -3835,10 +3860,12 @@ _local_step_loop() {
         # Schema (optional). A judgment's schema is its declared outputs (each
         # required unless it has required_if or required:false) plus confidence.
         if [[ "$llm_ok" == true && "$stype" == judgment ]]; then
-          llm_schema_json="$(jq -c '[(.outputs // [])[] | select(.name != null)
+          # (a {name: type} outputs map is already that schema's shorthand)
+          llm_schema_json="$(jq -c '(.outputs // []) | if type == "object" then . else
+              [.[] | select(.name != null)
               | {(.name): ({type: (.type // "string"), required: (.required_if == null and .required != false)}
                            + (if .values then {values: .values} else {} end))}]
-            | add // {} | . + {confidence: {type: "number", required: true}}' <<<"$step")"
+            | add // {} end | . + {confidence: {type: "number", required: true}}' <<<"$step")"
         elif [[ "$llm_ok" == true ]]; then
           llm_schema_json="$(jq -c '.expected_output_schema // {}' <<<"$step")"
         fi
@@ -5615,7 +5642,7 @@ local_submit() {
     trap - EXIT
     if is_tty && [[ "$OUTPUT_MODE" != "json" ]]; then
       ok "submitted $step_id — run $run_id now waiting at $wait_step2"
-      info "next:  opensop submit $run_id $wait_step2 --output k=v"
+      info "$(_local_next_hint "$run_dir")"
     else
       jq -c . "$mf"
     fi
@@ -6885,7 +6912,7 @@ local_heal() {
       ok "healed run $C_BOLD$run_id$C_RESET — completed"
     elif [[ "$heal_run_status" == "waiting" ]]; then
       ok "healed run $C_BOLD$run_id$C_RESET — waiting at $wait_step"
-      info "  next: opensop submit $run_id $wait_step --output k=v"
+      info "$(_local_next_hint "$run_dir")"
     else
       err "heal --apply: re-run of step '$failed_step_id' failed again — new fault record written"
     fi

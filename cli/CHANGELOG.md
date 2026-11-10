@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`run`/`submit`/`heal` "next" hints name the fields to submit** (`--output email=...`, `--output decision=<approve|reject>`) instead of `--output k=v`. For an escalated judgment they say why (low confidence vs. threshold, required human review, no agent) and show the agent's proposal.
+- A `judgment` with a `{name: type}` outputs map no longer prints a jq error; the map is used as the agent's output schema.
 - **`status` in a terminal** labels the id `run:`, shows one row per step with its latest state (it replayed the audit log, so a resumed step showed a waiting and a completed row, and cancel/heal events showed `null` rows), and after `heal --apply` shows the new completion time.
 - `help config` examples use a placeholder server URL and token instead of a demo server.
 - **`runs` and `show` follow the output contract**: JSON with `--json` or when piped, human text in a terminal. `runs --json` is an array of `{run_id, status, process, started_at}` (it printed TSV); piped `show` prints `{manifest, steps}` (it printed prose).

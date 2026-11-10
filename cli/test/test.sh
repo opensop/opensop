@@ -10071,6 +10071,29 @@ JSON
   rm -rf "$p0100i"
 fi
 
+# (j) run/submit "next" hints name the expected fields (enum values spelled
+# out); an escalated judgment says why and shows the agent's proposal.
+p0100j="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100j/home"
+cat > "$p0100j/p.sop.json" <<'JSON'
+{"name":"p0100j","steps":[{"id":"f","type":"form","outputs":{"email":"string"}},{"id":"ap","type":"approval"},
+ {"id":"jd","type":"judgment","model":"claude-haiku-4-5","prompt":"decide",
+  "judgment":{"allow_agent":true,"confidence_threshold":0.7},"outputs":{"decision":"enum[approve,reject]"}}]}
+JSON
+if script -qec true /dev/null >/dev/null 2>&1; then
+  j_out="$(script -qec "'$cli' run '$p0100j/p.sop.json'" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  j_id="$(ls "$OPENSOP_LOCAL_HOME/runs")"
+  grep -q "next:  opensop submit $j_id f --output email=\.\.\.\$" <<<"$j_out" || { echo "FAIL: P0100-j run hint: $j_out"; exit 1; }
+  j_out="$(script -qec "'$cli' submit $j_id f --output email=a@example.com" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  grep -q -- "ap --output decision=<approve|reject>\$" <<<"$j_out" || { echo "FAIL: P0100-j approval hint: $j_out"; exit 1; }
+  j_out="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.4}' script -qec "'$cli' submit $j_id ap --output decision=approve" /dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  grep -q 'escalated: the agent.s confidence (0.4) is below the threshold (0.7)' <<<"$j_out" \
+    && grep -q 'proposal: {"decision":"approve","confidence":0.4}' <<<"$j_out" \
+    && grep -q -- "jd --output decision=<approve|reject>\$" <<<"$j_out" && ! grep -q 'jq: error' <<<"$j_out" \
+    || { echo "FAIL: P0100-j escalation hint: $j_out"; exit 1; }
+  echo "PASS: P0100-j — next hints name the expected fields and explain an escalation"
+fi
+rm -rf "$p0100j"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
