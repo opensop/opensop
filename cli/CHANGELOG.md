@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`dry-run` reports step types the local engine cannot run** (e.g. `notification`, or a typo), including inside loop bodies, as `valid: false` with a `steps.<id>.type` error. Before, it said `valid: true` and `run` then failed.
 - **`dry-run` no longer crashes on a `loop` whose `body` is an array** (both agent-loop examples hit it) or on a `{name: type}` outputs map. The loop preview names its `for_each`/`repeat_until`/`while` and every body step.
 - **`run` refuses missing or invalid inputs** with the same required/type/enum/format checks as `dry-run` (exit 1, `usage_error`), before a run directory is created. Declared defaults count as supplied.
 - **Object-form typed inputs** (`"inputs": {"x": {"type": "string", "required": true}}`, what `onboard` scaffolds) are definitions, not default values. Before, the definition object itself was fed to the steps as the value of `x`. An object value without a `type` key is still a default.

@@ -3281,6 +3281,9 @@ _INPUT_DECLS_JQ='def _input_decls:
     else {name: .key, default: .value} end]
   else [] end;'
 
+# Step types _local_step_loop can execute.
+_LOCAL_STEP_TYPES="automated shell noop form approval wait llm judgment loop webhook subprocess"
+
 # _local_input_defaults <schema-json> <supplied-json>
 #   Declared defaults deep-merged under the supplied inputs.
 _local_input_defaults() {
@@ -5929,6 +5932,15 @@ local_dry_run() {
   # Validate inputs against process.inputs definition — same jq as cmd_dry_run.
   local errors_json
   errors_json=$(_input_errors "$schema_json" "$(_local_input_defaults "$schema_json" "$inputs")")
+  # Step types the local engine cannot run fail at run time ("unsupported step
+  # type for local execution"); flag them here, including inside loop bodies.
+  errors_json="$(jq -c --argjson e "$errors_json" --arg ok "$_LOCAL_STEP_TYPES" '
+    ($ok | split(" ")) as $ok |
+    $e + [.process.steps[]? | recurse(.body? | if type == "array" then .[] elif type == "object" then . else empty end)
+      | select(type == "object") | select([$ok[] == .type] | any | not)
+      | {path: ("steps." + (.id // "?") + ".type"),
+         message: ("step \(.id // "?"): type \(.type // "(missing)") is not supported by the local engine (supported: \($ok | join(", ")))")}]
+  ' <<<"$schema_json")"
 
   local valid=true
   local err_count; err_count=$(echo "$errors_json" | jq 'length')

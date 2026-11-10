@@ -10008,6 +10008,18 @@ if script -qec true /dev/null >/dev/null 2>&1; then
 fi
 echo "PASS: P0100-d — dry-run previews array-bodied loops (agent-loop examples)"
 
+# (e) dry-run flags step types the local engine cannot run, as run would.
+p0100e="$(mktemp -d)"
+cat > "$p0100e/p.sop.json" <<'JSON'
+{"name":"p0100e","steps":[{"id":"a","type":"frobnicate"},
+ {"id":"l","type":"loop","loop":{"for_each":"x"},"body":[{"id":"n","type":"notification"}]}]}
+JSON
+e_out="$("$cli" dry-run "$p0100e/p.sop.json" --json)" && { echo "FAIL: P0100-e dry-run exited 0"; exit 1; }
+jq -e '.valid == false and ([.validation_errors[].path] == ["steps.a.type", "steps.n.type"])' <<<"$e_out" >/dev/null \
+  || { echo "FAIL: P0100-e unsupported types: $e_out"; exit 1; }
+echo "PASS: P0100-e — dry-run reports step types the local engine cannot run"
+rm -rf "$p0100e"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
