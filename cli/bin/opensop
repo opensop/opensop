@@ -422,7 +422,7 @@ cmd_init() {
     fi
   fi
 
-  mkdir -p "$cwd/.opensop/runs" "$cwd/.opensop/archive"
+  mkdir -p "$cwd/.opensop/runs" "$cwd/.opensop/archive" "$cwd/processes"
   {
     echo "name: $name"
     if [[ -n "$parent_resolved" ]]; then
@@ -442,9 +442,11 @@ cmd_init() {
     else
       info "  parent: (root cell — no ancestor)"
     fi
+    info "  put processes in $cwd/processes/<name>.sop.json, then: opensop run <name>"
   else
     jq -nc --arg root "$cwd" --arg name "$name" --arg parent "$parent_resolved" \
-      '{ok:true, cell_root:$root, name:$name, parent:(if $parent == "" then null else $parent end)}'
+      '{ok:true, cell_root:$root, name:$name, parent:(if $parent == "" then null else $parent end),
+        processes_dir:($root + "/processes")}'
   fi
 }
 
@@ -942,6 +944,8 @@ ${C_BOLD}ENVIRONMENT${C_RESET}
   OPENSOP_RECIPES_BASE          deprecated alias for OPENSOP_SOPS_BASE; honoured if OPENSOP_SOPS_BASE
                                   is unset, with a stderr deprecation warning
   NO_COLOR                      disable ANSI color output
+  OSL_LLM_STUB                  try llm/judgment steps with no API key or model CLI: this JSON is the
+                                  answer every llm step gets (set it on run, submit and heal alike)
 
 ${C_BOLD}LOCAL STEP TYPES${C_RESET}
   automated/shell   run a shell script; JSON stdout merged into context
@@ -3063,9 +3067,12 @@ cmd_schema_validate() {
       --arg scope "$scope_msg" \
       --argjson valid "$valid_bool" \
       --argjson errors "$errors_json" \
-      '{file: $file, form: $form, scope: $scope, valid: $valid, errors: $errors}'
+      '{file: $file, form: $form, scope: $scope, valid: $valid, errors: $errors}
+       + (if ($file | test("\\.ya?ml$")) then {note: "YAML is the server registration format; opensop run takes the same process as .sop.json"} else {} end)'
   fi
 
+  [[ ( "$file" == *.yaml || "$file" == *.yml ) && -t 2 ]] && \
+    warn "$file is YAML: fine for a server (opensop register); opensop run takes the same process as .sop.json"
   [[ "$valid" == "false" ]] && exit 1
   return 0
 }
@@ -3414,13 +3421,16 @@ local_run() {
   #   path-shaped (contains '/' or ends in .sop.json) → use as a file path
   #   bare name → resolve across the active cell chain (nearest wins)
   local proc_file=""
-  if [[ "$proc_arg" == *.sop.json ]] || [[ "$proc_arg" == */* ]]; then
+  # A path, or a file that exists here, is a file; anything else is a process name.
+  if [[ "$proc_arg" == *.json || "$proc_arg" == *.yaml || "$proc_arg" == *.yml || "$proc_arg" == */* || -f "$proc_arg" ]]; then
     proc_file="$proc_arg"
   else
     proc_file="$(_find_skill_in_cells "$proc_arg")"
-    [[ -z "$proc_file" ]] && die "skill not found: '$proc_arg' (looked in active cell + ancestors)" "file_not_found" \
-        "create processes/${proc_arg}.sop.json in a cell, or pass an explicit path"
+    [[ -z "$proc_file" ]] && die "process not found: '$proc_arg' (looked for processes/${proc_arg}.sop.json in this cell and its parents)" "file_not_found" \
+        "pass the file's path (e.g. ./${proc_arg}.sop.json), or run opensop init and put it in processes/"
   fi
+  [[ "$proc_file" == *.yaml || "$proc_file" == *.yml ]] && die "local runs take a JSON process file; $proc_file is YAML" "invalid_json" \
+    "convert it to .sop.json (YAML is the server registration format: opensop register)"
 
   [[ -f "$proc_file" ]] || die "process file not found: $proc_file" "file_not_found"
   jq -e . "$proc_file" >/dev/null 2>&1 || die "process file is not valid JSON: $proc_file" "invalid_json"
@@ -6005,13 +6015,16 @@ local_dry_run() {
 
   # Resolve process file — same logic as local_run.
   local proc_file=""
-  if [[ "$proc_arg" == *.sop.json ]] || [[ "$proc_arg" == */* ]]; then
+  # A path, or a file that exists here, is a file; anything else is a process name.
+  if [[ "$proc_arg" == *.json || "$proc_arg" == *.yaml || "$proc_arg" == *.yml || "$proc_arg" == */* || -f "$proc_arg" ]]; then
     proc_file="$proc_arg"
   else
     proc_file="$(_find_skill_in_cells "$proc_arg")"
-    [[ -z "$proc_file" ]] && die "skill not found: '$proc_arg' (looked in active cell + ancestors)" "file_not_found" \
-        "create processes/${proc_arg}.sop.json in a cell, or pass an explicit path"
+    [[ -z "$proc_file" ]] && die "process not found: '$proc_arg' (looked for processes/${proc_arg}.sop.json in this cell and its parents)" "file_not_found" \
+        "pass the file's path (e.g. ./${proc_arg}.sop.json), or run opensop init and put it in processes/"
   fi
+  [[ "$proc_file" == *.yaml || "$proc_file" == *.yml ]] && die "local runs take a JSON process file; $proc_file is YAML" "invalid_json" \
+    "convert it to .sop.json (YAML is the server registration format: opensop register)"
   [[ -f "$proc_file" ]] || die "process file not found: $proc_file" "file_not_found"
   jq -e . "$proc_file" >/dev/null 2>&1 || die "process file is not valid JSON: $proc_file" "invalid_json"
 
@@ -6207,6 +6220,15 @@ local_status() {
     resp="$(jq -c --arg s "$_istep" '. + {interrupted: {step: (if $s == "" then null else $s end)},
       next: ["opensop heal \(.id) --apply", "opensop cancel \(.id)"]}' <<<"$resp")"
   fi
+
+  # The exact next command, for scripts and agents as well as the terminal view.
+  case "$(jq -r '.state' <<<"$resp")" in
+    waiting)
+      local _hint; _hint="$(_local_next_hint "$run_dir" 2>/dev/null | sed -n 's/^next:  //p' | head -1)"
+      [ -n "$_hint" ] && resp="$(jq -c --arg n "$_hint" '. + {next: [$n]}' <<<"$resp")" ;;
+    failed)
+      resp="$(jq -c '. + {next: ["opensop heal \(.id) --apply"]}' <<<"$resp")" ;;
+  esac
 
   # Render {{ ref }} in the waiting step's text against the run's context.
   local _wdesc _wrendered

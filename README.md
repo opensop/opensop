@@ -71,6 +71,12 @@ Swap the approval for a model review, and keep a person only where it matters:
 
 `model` picks the vendor. `claude-code:`, `codex:`, `cursor:` and `kimi:` drive those CLIs non-interactively (empty after the colon means the CLI's default model), and a bare `claude-*` model calls the Anthropic API. The answer must match `expected_output_schema`, or the step retries and then fails; it is never passed on unchecked. Each call's receipt records the provider, model, permission, token usage and, where the vendor reports it, cost.
 
+To try `llm` and `judgment` steps with no API key or model CLI, set `OSL_LLM_STUB` to the JSON every such step should answer, on each command that reaches one (`run`, `submit`, `heal`):
+
+```bash
+export OSL_LLM_STUB='{"verdict": "ship", "reason": "looks good"}'
+```
+
 ---
 
 ## The software factory
@@ -114,7 +120,8 @@ The full agent guide is [`docs/AGENTS.md`](./docs/AGENTS.md).
 
 | Step | What it does | Local CLI |
 |---|---|---|
-| `automated` / `shell` | Run a script in any language | Runs |
+| `automated` | Run a script file (any language). A relative `run:` path is found next to the process file | Runs |
+| `shell` | Run a command line in the directory you started the run from (`npm test`, `pytest -q`) | Runs |
 | `noop` | Pass context through | Runs |
 | `llm` | A model call validated against `expected_output_schema` | Anthropic API (`claude-*`, needs `ANTHROPIC_API_KEY`) or a CLI provider (`claude-code:`, `codex:`, `cursor:`, `kimi:`) |
 | `judgment` | A model decides with a confidence score; low confidence or `require_human_review` escalates to a person | Runs; an escalation pauses for `submit` |

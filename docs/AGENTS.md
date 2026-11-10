@@ -330,8 +330,8 @@ Pick one per boundary. Stop if you need a type not in this list — you're likel
 
 | Type | What it does | Local support |
 |---|---|---|
-| `shell` | Raw shell command; stdout captured as output | Full |
-| `automated` | Subprocess (any language) on stdin/stdout JSON | Full |
+| `shell` | Command line, run in the directory the run was started from; stdout captured as output | Full |
+| `automated` | Script file (any language) on stdin/stdout JSON; a relative path is found next to the process file | Full |
 | `noop` | Pass-through; useful as placeholder | Full |
 | `form` | Pause for structured human or agent input | Full (pause/resume) |
 | `approval` | Binary human gate (approve/reject) | Full (pause/resume) |
@@ -448,6 +448,7 @@ Renderer and schema rules to remember:
 - Prompt tokens use `{{key}}`. A bare key resolves from the accumulated run context (inputs are merged in at run start, so `{{notes}}` is the `notes` input); dotted references such as `{{ process.inputs.notes }}` and `{{ steps.extract.outputs.action_items }}` also resolve.
 - Optional inputs that may be absent should declare a `"default"` in the input definition; the default is merged into context before the first step, so `{{meeting_date}}` always has a value.
 - `expected_output_schema` maps field names to a type: `"string"`, `"number"`, `"boolean"`, `"array[<type>]"`, `"enum[a,b,c]"`, a nested object, or a field-definition object (`{"type": "...", "required": true}`). It is validated recursively; a response that does not match is retried, then fails the step.
+- To try `llm`/`judgment` steps without an API key or model CLI, set `OSL_LLM_STUB` to the JSON answer on every command that reaches such a step (`run`, `submit`, `heal`).
 
 Run it:
 

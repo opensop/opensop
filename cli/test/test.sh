@@ -10349,6 +10349,24 @@ echo '{"opensop":"0.9.1","name":"ao","version":"1","inputs":{"test_command":{"ty
 echo "PASS: P0100-aa — --input keeps declared string inputs verbatim"
 rm -rf "$p0100aa"
 
+# (ab) newcomer papercuts: status JSON carries the next command; a bare file
+# name runs; a missing name says "process not found"; YAML gets a clear error;
+# init makes processes/.
+p0100ab="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100ab/home"
+echo '{"name":"ab","version":"1","steps":[{"id":"check","type":"shell","run":"echo {}"},{"id":"approve","type":"approval"}]}' > "$p0100ab/ab.json"
+ab_id="$(cd "$p0100ab" && "$cli" run ab.json --json | jq -r .run_id)"
+"$cli" status "$ab_id" --json | jq -e --arg id "$ab_id" '.next == ["opensop submit \($id) approve --output decision=<approve|reject>"]' >/dev/null \
+  || { echo "FAIL: P0100-ab status next: $("$cli" status "$ab_id" --json | jq -c .next)"; exit 1; }
+ab_err="$( (cd "$p0100ab" && "$cli" run nosuch --json) 2>&1 || true)"
+grep -q 'process not found' <<<"$ab_err" || { echo "FAIL: P0100-ab not-found wording: $ab_err"; exit 1; }
+printf 'name: y\nsteps: []\n' > "$p0100ab/y.yaml"
+ab_err="$("$cli" run "$p0100ab/y.yaml" --json 2>&1 || true)"
+grep -q 'is YAML' <<<"$ab_err" || { echo "FAIL: P0100-ab yaml run: $ab_err"; exit 1; }
+mkdir -p "$p0100ab/cell"; (cd "$p0100ab/cell" && env -u OPENSOP_LOCAL_HOME "$cli" init --json | jq -e '.processes_dir | endswith("/processes")' >/dev/null) \
+  && [ -d "$p0100ab/cell/processes" ] || { echo "FAIL: P0100-ab init processes/"; exit 1; }
+echo "PASS: P0100-ab — newcomer paths: next in status JSON, bare file names, clear not-found/YAML errors, init makes processes/"
+rm -rf "$p0100ab"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
