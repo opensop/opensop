@@ -10125,6 +10125,17 @@ grep -q 'no OpenSOP server needed' <<<"$("$cli" help upgrade)" || { echo "FAIL: 
 echo "PASS: P0100-k — upgrade installs the latest release tag and never downgrades by default"
 rm -rf "$p0100k"
 
+# (l) doctor flags an opensop on PATH whose version differs from the running one.
+p0100l="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nreadonly OPENSOP_CLI_VERSION="0.0.1"\n' > "$p0100l/opensop"; chmod +x "$p0100l/opensop"
+PATH="$p0100l:$PATH" "$cli" doctor --json | jq -e '.path_version == "0.0.1" and .path_version_mismatch == true' >/dev/null \
+  || { echo "FAIL: P0100-l doctor --json mismatch"; exit 1; }
+grep -q 'is v0.0.1, but this opensop' <<<"$(PATH="$p0100l:$PATH" "$cli" doctor)" || { echo "FAIL: P0100-l doctor text"; exit 1; }
+cp "$cli" "$p0100l/opensop"
+PATH="$p0100l:$PATH" "$cli" doctor --json | jq -e '.path_version_mismatch == false' >/dev/null || { echo "FAIL: P0100-l same version flagged"; exit 1; }
+echo "PASS: P0100-l — doctor flags a different opensop version on PATH"
+rm -rf "$p0100l"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

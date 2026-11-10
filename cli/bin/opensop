@@ -8877,6 +8877,11 @@ cmd_doctor() {
   # opensop on PATH (check if we resolve; BASH_SOURCE[0] is always us)
   local opensop_path
   opensop_path=$(command -v opensop 2>/dev/null || true)
+  # Version of the opensop on PATH, read from the file (not executed). A
+  # different version than the one running means two installs are in play.
+  local path_version=""
+  [[ -n "$opensop_path" && -f "$opensop_path" ]] && path_version="$(grep -m1 'OPENSOP_CLI_VERSION=' "$opensop_path" 2>/dev/null \
+    | sed 's/.*OPENSOP_CLI_VERSION="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/' || true)"
 
   # jq: critical dependency.
   local jq_ok=false jq_version="absent"
@@ -8958,6 +8963,7 @@ cmd_doctor() {
     jq -nc \
       --arg version "$version" \
       --arg opensop_path "$opensop_path" \
+      --arg path_version "$path_version" \
       --arg jq_version "$jq_version" \
       --argjson jq_ok "$jq_ok" \
       --arg bash_version "$bash_version" \
@@ -8965,6 +8971,8 @@ cmd_doctor() {
       --argjson skills "$skills_json" \
       --argjson ok "$(! $critical && echo true || echo false)" \
       '{version:$version, opensop_path:$opensop_path,
+        path_version:(if $path_version == "" then null else $path_version end),
+        path_version_mismatch:($path_version != "" and $path_version != $version),
         jq:{ok:$jq_ok, version:$jq_version},
         bash:{ok:$bash_ok, version:$bash_version},
         skills:$skills, ok:$ok}'
@@ -8977,7 +8985,12 @@ cmd_doctor() {
 
   # Version + PATH.
   if [[ -n "$opensop_path" ]]; then
-    printf '  %s%-12s%s %s\n' "$C_GREEN" "opensop" "$C_RESET" "$opensop_path"
+    if [[ -n "$path_version" && "$path_version" != "$version" ]]; then
+      printf '  %s%-12s%s %s is v%s, but this opensop (%s) is v%s — two installs; remove or upgrade one\n' \
+             "$C_YELLOW" "opensop" "$C_RESET" "$opensop_path" "$path_version" "${BASH_SOURCE[0]}" "$version"
+    else
+      printf '  %s%-12s%s %s\n' "$C_GREEN" "opensop" "$C_RESET" "$opensop_path"
+    fi
   else
     printf '  %s%-12s%s not found on PATH (running from: %s)\n' \
            "$C_YELLOW" "opensop" "$C_RESET" "${BASH_SOURCE[0]}"
