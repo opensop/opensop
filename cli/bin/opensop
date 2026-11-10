@@ -4924,7 +4924,14 @@ $llm_attempt_prompt"
         echo "completed"; return 0
       fi
     else
-      [[ "$OUTPUT_MODE" != json ]] && err "[$sid] failed (exit $rc): $(jq -rc '.stdout // .' <<<"$out_json" | head -c 160)"
+      # The step's stderr tail (bounded) goes into the failure line, fault.json
+      # and the debug_prompt: it is usually the only place the reason is.
+      local serr_tail="" _fmsg _fline
+      [[ -n "$serr" ]] && serr_tail="$(printf '%s' "$serr" | tail -c 4096)"
+      _fmsg="$(jq -rc '.stdout // .' <<<"$out_json" | head -c 160)"
+      _fline="[$sid] failed (exit $rc)${_fmsg:+: $_fmsg}"
+      [[ -n "$serr" ]] && _fline+="$(printf '\n  stderr: %s' "$(printf '%s\n' "$serr" | tail -n 5 | tail -c 1024 | sed '2,$s/^/          /')")"
+      [[ "$OUTPUT_MODE" != json ]] && err "$_fline"
       if [ "$scont" != "true" ]; then
         # D2: write fault record before returning "failed".
         # Per SPEC §11.4 rule 3: warn the user BEFORE writing, unconditionally
@@ -4944,10 +4951,12 @@ $llm_attempt_prompt"
           --argjson inputs "$ctx" \
           --argjson step_def "$step_def" \
           --argjson out "$out_json" \
+          --arg serr "$serr_tail" \
           '"Step \"" + $sid + "\" (type: " + $stype + ") failed in run " + $rid + " with exit code " + ($rc_val | tostring) + ".\n" +
            "Step definition: " + ($step_def | tojson) + ".\n" +
            "The step received these inputs (accumulated context at time of failure): " + ($inputs | tojson) + ".\n" +
            "The step produced this output/error: " + ($out | tojson) + ".\n" +
+           (if $serr != "" then "The step wrote this to stderr (last 4 KiB): " + ($serr | tojson) + ".\n" else "" end) +
            "To diagnose: inspect the step definition and the inputs above. " +
            "Common fixes: correct the step script or shell command, supply missing/corrected inputs via \"--input k=v\", or fix an upstream step output that this step depends on. " +
            (if (($step_def.effects // "") | length) > 0 then
@@ -4967,6 +4976,7 @@ $llm_attempt_prompt"
           --arg debug_prompt "$debug_prompt" \
           --arg ts "$fault_ts" \
           --arg proc_file "$proc_file" \
+          --arg serr "$serr_tail" \
           '{run_id:$rid,
             faulted_at:$ts,
             process_file:$proc_file,
@@ -4974,7 +4984,8 @@ $llm_attempt_prompt"
             exit_code:$exit_code,
             inputs:$inputs,
             output:$output,
-            debug_prompt:$debug_prompt}' > "$fault_file"
+            debug_prompt:$debug_prompt}
+           + (if $serr != "" then {stderr:$serr} else {} end)' > "$fault_file"
         # Update manifest with fault reference.
         jq -c --arg f "$fault_file" '. + {fault_file:$f}' \
           "$run_dir/manifest.json" > "$run_dir/manifest.json.tmp" \
@@ -6683,6 +6694,11 @@ local_heal() {
       printf '  exit code: %s\n'      "$exit_code"
       printf '  faulted at:%s\n'      "$faulted_at"
       printf '  fault file:%s\n'      "$fault_file"
+      local fault_serr;  fault_serr="$(jq -r '.stderr // ""' <<<"$fault_json")"
+      if [[ -n "$fault_serr" ]]; then
+        info "── stderr (tail) ──"
+        printf '%s\n' "$fault_serr" | tail -n 20
+      fi
       info "── debug_prompt ──"
       printf '%s\n' "$debug_p"
       info "── inputs snapshot (may contain sensitive data — see SPEC §11.4) ──"

@@ -10020,6 +10020,22 @@ jq -e '.valid == false and ([.validation_errors[].path] == ["steps.a.type", "ste
 echo "PASS: P0100-e — dry-run reports step types the local engine cannot run"
 rm -rf "$p0100e"
 
+# (f) a failing step's stderr reaches the user: the failure line, fault.json
+# (stderr + debug_prompt) and heal all carry it.
+p0100f="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100f/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+cat > "$p0100f/p.sop.json" <<'JSON'
+{"name":"p0100f","steps":[{"id":"s","type":"shell","run":"echo noise >&2; echo the-real-reason >&2; exit 2"}]}
+JSON
+f_err="$("$cli" run "$p0100f/p.sop.json" 2>&1 >/dev/null)" && { echo "FAIL: P0100-f run succeeded"; exit 1; }
+grep -q 'stderr:.*noise' <<<"$f_err" && grep -q 'the-real-reason' <<<"$f_err" \
+  || { echo "FAIL: P0100-f failure line lacks stderr: $f_err"; exit 1; }
+f_id="$(ls "$OPENSOP_LOCAL_HOME/runs")"
+jq -e '.stderr == "noise\nthe-real-reason" and (.debug_prompt | test("the-real-reason"))' \
+  "$OPENSOP_LOCAL_HOME/runs/$f_id/fault.json" >/dev/null || { echo "FAIL: P0100-f fault.json lacks stderr"; exit 1; }
+grep -q 'the-real-reason' <<<"$("$cli" heal "$f_id")" || { echo "FAIL: P0100-f heal lacks stderr"; exit 1; }
+echo "PASS: P0100-f — a failing step's stderr is in the failure line, fault.json and heal"
+rm -rf "$p0100f"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
