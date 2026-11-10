@@ -10186,6 +10186,21 @@ mkdir -p "$p0100p/bin"; printf '#!/bin/sh\nfor a; do case "$a" in http*) echo "$
 echo "PASS: P0100-p — pull resolves the in-tree sops/ library layout"
 rm -rf "$p0100p"
 
+# (q) bad --inputs / --inputs-file print only the CLI's error (no raw jq
+# noise); local run records --metadata in the manifest.
+p0100q="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100q/home"; echo '{x' > "$p0100q/bad.json"
+for q_args in "--inputs {bad" "--inputs-file $p0100q/bad.json" "--inputs-file $p0100q/missing.json"; do
+  for q_cmd in run dry-run; do
+    # shellcheck disable=SC2086
+    q_err="$("$cli" $q_cmd "$here/examples/greet.sop.json" $q_args 2>&1 >/dev/null)" && { echo "FAIL: P0100-q $q_cmd $q_args exited 0"; exit 1; }
+    [ "$(wc -l <<<"$q_err")" = 1 ] && ! grep -q '^jq:' <<<"$q_err" || { echo "FAIL: P0100-q $q_cmd $q_args: $q_err"; exit 1; }
+  done
+done
+"$cli" run "$here/examples/greet.sop.json" --input name=q --metadata ticket=T-1 --metadata n=2 --json \
+  | jq -e '.metadata == {ticket: "T-1", n: 2}' >/dev/null || { echo "FAIL: P0100-q --metadata not recorded"; exit 1; }
+echo "PASS: P0100-q — bad inputs JSON gives one clean error; run records --metadata"
+rm -rf "$p0100q"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

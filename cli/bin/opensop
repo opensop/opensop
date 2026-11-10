@@ -1674,9 +1674,9 @@ build_payload_object() {
 
   # Start from --inputs/--outputs JSON or --inputs-file/--outputs-file.
   if [[ -n "$json_blob" ]]; then
-    payload=$(echo "$json_blob" | jq .) || die "invalid JSON in --$plural" "invalid_json"
+    payload=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --$plural" "invalid_json"
   elif [[ -n "$file_path" ]]; then
-    payload=$(jq . "$file_path") || die "could not read $file_path as JSON" "invalid_json"
+    payload=$(jq . "$file_path" 2>/dev/null) || die "could not read $file_path as JSON" "invalid_json"
   fi
 
   # Merge --input KEY=VALUE pairs into payload.
@@ -2715,9 +2715,9 @@ cmd_dry_run() {
   # Build input object.
   local inputs="{}"
   if [[ -n "$json_blob" ]]; then
-    inputs=$(echo "$json_blob" | jq .) || die "invalid JSON in --inputs" "invalid_json"
+    inputs=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --inputs" "invalid_json"
   elif [[ -n "$file_path" ]]; then
-    inputs=$(jq . "$file_path") || die "could not read $file_path as JSON" "invalid_json"
+    inputs=$(jq . "$file_path" 2>/dev/null) || die "could not read $file_path as JSON" "invalid_json"
   fi
   if (( ${#kv_pairs[@]} > 0 )); then
     for kv in "${kv_pairs[@]}"; do
@@ -3428,8 +3428,9 @@ local_run() {
   # if the original process file is later moved or deleted (#101 gap 3).
   jq -nc --arg n "$name" --arg p "$proc_file" --arg d "$proc_dir" --arg id "$run_id" --arg t "$started" \
         --argjson sms "$started_ms" --argjson inp "$ctx" \
-        --arg cwd "$PWD" \
-    '{run_id:$id, process:$n, process_file:$p, process_dir:$d, cwd:$cwd, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp}' \
+        --arg cwd "$PWD" --argjson md "$(jq -c '.metadata' <<<"$built")" \
+    '{run_id:$id, process:$n, process_file:$p, process_dir:$d, cwd:$cwd, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp}
+     + (if $md == {} then {} else {metadata:$md} end)' \
     > "$run_dir/manifest.json"
 
   # Snapshot the normalized process definition at run creation (#101).
@@ -5976,9 +5977,9 @@ local_dry_run() {
   # Build input object.
   local inputs="{}"
   if [[ -n "$json_blob" ]]; then
-    inputs=$(echo "$json_blob" | jq .) || die "invalid JSON in --inputs" "invalid_json"
+    inputs=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --inputs" "invalid_json"
   elif [[ -n "$file_path" ]]; then
-    inputs=$(jq . "$file_path") || die "could not read $file_path as JSON" "invalid_json"
+    inputs=$(jq . "$file_path" 2>/dev/null) || die "could not read $file_path as JSON" "invalid_json"
   fi
   if (( ${#kv_pairs[@]} > 0 )); then
     for kv in "${kv_pairs[@]}"; do

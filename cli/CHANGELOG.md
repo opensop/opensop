@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- A bad `--inputs`/`--inputs-file` (or `--outputs`/`--outputs-file`) prints only the CLI's own error, without jq's raw parse error before it.
+- **Local `run --metadata k=v` is recorded** under `manifest.metadata`. Before, it was silently dropped.
 - **`opensop pull opensop/<slug>` works out of the box.** The default library is now the `sops/` directory of this repo (`https://raw.githubusercontent.com/opensop/opensop/{ref}/sops`); the old default, `github.com/opensop/sops`, only had a template. `{ref}` in `OPENSOP_SOPS_BASE` is replaced by the pull ref. A base without `{ref}` gets `/<ref>` appended as before, so existing overrides and `file://` mirrors keep working.
 - **`fork` copies the scripts a process runs.** Relative `run:` paths of its `automated` steps (loop bodies included) are copied alongside the `.sop.json` at the same relative path, without overwriting existing files; `--json` lists them as `copied_scripts`. Before, a forked `greet` failed with "step script not found".
 - **`--remote ps` and `--remote watch` fail on an unreachable server** (exit 1, one `network_error` line that includes curl's reason). Before, `ps` printed an empty result and exited 0, and `watch` retried forever.
