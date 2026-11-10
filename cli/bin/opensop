@@ -16,7 +16,7 @@ set -euo pipefail
 # Constants & paths
 # --------------------------------------------------------------------------- #
 
-readonly OPENSOP_CLI_VERSION="0.9.1"
+readonly OPENSOP_CLI_VERSION="0.9.2"
 # Single source of truth for supported opensop envelope (SPEC) versions.
 # `schema validate`, `--version`, and `onboard`'s stamped envelope all derive from this.
 readonly SPEC_VERSIONS="0.1 0.2 0.6 0.7 0.9.1"
@@ -889,7 +889,11 @@ ${C_BOLD}LOCAL STEP TYPES (v0.7 — full SPEC parity)${C_RESET}
   form              pause (waiting_for_input); resume via: opensop submit <run_id> <step-id> --output k=v
   approval          pause (waiting_for_approval); expects decision=approve|reject
   wait              wait.seconds completes immediately; wait.until pauses (waiting_for_callback)
-  llm               call Anthropic Claude; requires ANTHROPIC_API_KEY
+  llm               claude* → Anthropic API (ANTHROPIC_API_KEY); or a CLI provider:
+                      claude-code:|codex:|cursor:|kimi:<model> (permission, workdir)
+  judgment          agent decision via the llm path (allow_agent); pauses (escalated)
+                      on require_human_review / low confidence / no agent
+  loop              for_each | repeat_until | while over a body of steps; aggregate
   webhook           outbound HTTP; sync or callback (waiting_for_callback); poll unsupported
   subprocess        run a child process locally; depth-guarded (max 16)
 
@@ -3049,6 +3053,63 @@ _local_now_ms() {
 # we don't rely on sub-second precision.
 _local_run_id() { echo "$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"; }
 
+# jq defs shared by _local_render and _local_eval_cond. ref($ctx; $pinp)
+# resolves a SPEC §2.5 dotted reference; an absent path yields null.
+#   process.inputs.<k>        → the run's initial inputs (manifest.inputs)
+#   steps.<id>.outputs.<k...> → ctx[<id>][<k>...]
+#   anything else             → a path into ctx (<id>.<k>, loop.<as>, a bare key)
+_OSL_JQ_REF='
+def ref($ctx; $pinp):
+  split(".") as $p
+  | try (if $p[0] == "process" and $p[1] == "inputs" then $pinp | getpath($p[2:])
+         elif $p[0] == "steps" and ($p | length) >= 4 and $p[2] == "outputs" then $ctx | getpath([$p[1]] + $p[3:])
+         else $ctx | getpath($p) end) catch null;
+'
+
+# _local_render <template> <ctx_json> [<proc_inputs_json>]
+# {{ ref }} substitution (SPEC §3.8): each token is replaced by its value
+# (stringified) when present, and left as-is when absent.
+_local_render() {
+  jq -rn --arg tmpl "$1" --argjson ctx "$2" --argjson pinp "${3:-{\}}" "$_OSL_JQ_REF"'
+    $tmpl | gsub("\\{\\{\\s*(?<v>[a-zA-Z_][a-zA-Z0-9_-]*(\\.[a-zA-Z0-9_-]+)*)\\s*\\}\\}";
+      (.v | ref($ctx; $pinp)) as $x | if $x != null then ($x | tostring) else "{{" + .v + "}}" end)'
+}
+
+# _local_eval_cond <expr> <ctx_json> <proc_inputs_json>
+# SPEC §2.6 condition: "<ref> <op> <literal>", op one of == != >= <= > <, the
+# literal a quoted string, number, true, false or null. No eval. Prints
+# true|false; prints nothing when the expression does not parse.
+_local_eval_cond() {
+  jq -rn --arg e "$1" --argjson ctx "$2" --argjson pinp "$3" "$_OSL_JQ_REF"'
+    ($e | capture("^\\s*(?<l>[a-zA-Z_][a-zA-Z0-9_.-]*)\\s*(?<op>==|!=|>=|<=|>|<)\\s*(?<r>.*?)\\s*$")) as $m
+    | ($m.r | if test("^'"'"'.*'"'"'$") or test("^\".*\"$") then .[1:-1]
+              elif . == "true" then true elif . == "false" then false elif . == "null" then null
+              else tonumber end) as $r
+    | ($m.l | ref($ctx; $pinp)) as $l
+    | {"==": ($l == $r), "!=": ($l != $r), ">=": ($l >= $r), "<=": ($l <= $r), ">": ($l > $r), "<": ($l < $r)}[$m.op]
+  ' 2>/dev/null || true
+}
+
+# _local_wait_meta <proc_file> <index>
+# The manifest's waiting.reason + waiting.expects for the step that paused.
+# Shared by every path that finalizes a paused run (run, submit, heal, parent
+# continuation). A judgment escalation expects its declared outputs (its
+# inputs[] are what it reads, not what a human submits).
+_local_wait_meta() {
+  jq -c --argjson idx "$2" '
+    .steps[$idx] as $s
+    | (if $s.type == "judgment" then $s.outputs else ($s.inputs // $s.outputs) end) as $decl
+    | { reason: ({form: "waiting_for_input", approval: "waiting_for_approval", judgment: "escalated"}[$s.type // "automated"]
+                 // "waiting_for_callback"),
+        expects: (if $decl != null and ($decl | length) > 0 then
+                    { outputs: [$decl[].name // empty], schema: $decl }
+                  elif $s.type == "approval" then
+                    { outputs: ["decision"],
+                      schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
+                  else { outputs: [], schema: [] } end) }
+  ' "$1"
+}
+
 # Mark a still-"running" manifest as interrupted. Registered as an EXIT trap
 # during a local run so a kill/crash never leaves a run stuck at "running".
 _local_finalize_trap() {
@@ -3167,31 +3228,10 @@ local_run() {
     local wait_step wait_since
     wait_step="$(jq -r ".steps[$wait_index].id // \"step-$wait_index\"" "$snap_file")"
     wait_since="$(_local_now)"
-    # Build expects: field names + schema from the step's inputs/outputs array.
-    # For approval steps, default to decision:enum(approve,reject) when neither
-    # inputs[] nor outputs[] is declared (matches the runtime's implicit contract).
-    local wait_expects
-    wait_expects="$(jq -c --argjson idx "$wait_index" '
-      .steps[$idx] as $s |
-      ($s.inputs // $s.outputs // null) as $decl |
-      if $decl != null and ($decl | length) > 0 then
-        { outputs: [$decl[].name // empty],
-          schema:  $decl }
-      elif $s.type == "approval" then
-        { outputs: ["decision"],
-          schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-      else
-        { outputs: [], schema: [] }
-      end
-    ' "$snap_file")"
-    # Determine reason from step type (byte-parity with runtime sub_state strings).
-    local wait_stype wait_reason
-    wait_stype="$(jq -r ".steps[$wait_index].type // \"automated\"" "$snap_file")"
-    case "$wait_stype" in
-      form)     wait_reason="waiting_for_input" ;;
-      approval) wait_reason="waiting_for_approval" ;;
-      *)        wait_reason="waiting_for_callback" ;;
-    esac
+    # expects (field names + schema) and reason (byte-parity with runtime sub_state strings).
+    local wait_meta wait_expects wait_reason
+    wait_meta="$(_local_wait_meta "$snap_file" "$wait_index")"
+    wait_expects="$(jq -c '.expects' <<<"$wait_meta")"; wait_reason="$(jq -r '.reason' <<<"$wait_meta")"
     local wait_duration_ms; wait_duration_ms=$(( $(_local_now_ms) - started_ms ))
     jq -c --arg s "waiting" \
           --argjson idx "$((wait_index + 1))" \
@@ -3281,7 +3321,7 @@ _local_step_loop() {
     if [[ -z "$sexec" ]]; then
       case "$stype" in
         automated|shell|webhook)                          sexec="external" ;;
-        noop|form|approval|notification|wait|judgment|llm|subprocess) sexec="internal" ;;
+        noop|form|approval|notification|wait|judgment|llm|subprocess|loop) sexec="internal" ;;
         *)                                                sexec="external" ;;
       esac
     fi
@@ -3292,6 +3332,7 @@ _local_step_loop() {
     s_started="$(_local_now)"; s_started_ms="$(_local_now_ms)"
     # C1a: per-step metrics; llm-specific fields are set inside the llm case below.
     local s_llm_model="" s_llm_tokens_in=0 s_llm_tokens_out=0 s_llm_token_source="none"
+    local s_llm_provider="" s_llm_permission="" s_llm_cli_version=""
 
     # SPEC §3.3: a script step receives its DECLARED inputs (resolved from prior
     # step outputs / process inputs via each entry's `from:` reference). The local
@@ -3437,34 +3478,107 @@ _local_step_loop() {
           out_raw='{"waited":true}'
           rc=0
         fi ;;
-      llm)
+      llm|judgment)
         # LLM step — mirrors StepExecutors::Llm + LlmProviders::Anthropic.
         #
         # Fields:
-        #   model (required; must start with "claude")
+        #   model (required; {{ var }}-templated from context). Provider by prefix:
+        #     claude*               → Anthropic HTTP API (curl + ANTHROPIC_API_KEY)
+        #     claude-code:<model>   → `claude -p`        (local extension; CLI providers)
+        #     codex:<model>         → `codex exec`
+        #     cursor:<model>        → `cursor-agent -p`
+        #     kimi:<model>          → `kimi -p`
+        #     An empty <model> after the colon means the CLI's own default.
         #   prompt | prompt_file (resolved relative to proc_dir)
         #   expected_output_schema (object — optional)
         #   max_retries (default 2; total attempts = max_retries + 1)
         #   retry_on_incomplete (default true; false => 1 attempt)
+        #   workdir    (CLI providers; {{ var }}-templated; default: the run's cwd)
+        #   permission (CLI providers; read-only (default) | workspace-write | full-access)
         #
-        # Test seam: if OSL_LLM_STUB is set, skip the network call entirely and
+        # Test seams: if OSL_LLM_STUB is set, skip the network/CLI call entirely and
         # treat its value as the raw model response text (same fence-strip +
         # schema validation still runs). Mirrors the runtime's provider_resolver
         # test seam (TestStub). Never set this in production.
+        # OSL_LLM_ARGV_FILE=<path>: each CLI-provider attempt appends
+        # {cli, cwd, argv} as one JSON line there (combine with OSL_LLM_STUB to
+        # test argv building without running the CLI).
+        #
+        # judgment (SPEC §3.9) shares this arm. With judgment.allow_agent and a
+        # model + prompt/prompt_file, the answer is validated against the step's
+        # outputs plus confidence:number; it then pauses `escalated` when
+        # judgment.require_human_review is true or confidence <
+        # judgment.confidence_threshold. Without an agent it escalates at once,
+        # as the server does. Resume: opensop submit <run> <step> --output decision=...
         #
         # DESIGN NOTE: all early-exit paths use rc=1 + a sentinel variable llm_ok=false
         # rather than `break`, because `break` inside `case ... esac` that is itself
         # inside `while ... done` breaks the outer while loop (not the case block).
         local llm_ok=true llm_model llm_prompt_file llm_schema_json llm_max_retries llm_retry
-        llm_model="$(jq -r '.model // ""' <<<"$step")"
-        if [[ -z "$llm_model" ]]; then
+        local jd_escalate="" jd_proposal="null"
+        local llm_cli="" llm_cli_model="" llm_perm="" llm_workdir="" llm_bin="" llm_bin_path=""
+        local llm_pinp; llm_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
+        if [[ "$stype" == judgment ]] && ! jq -e '.judgment.allow_agent == true and (.model // "") != ""
+              and ((.prompt // .prompt_file // "") != "")' <<<"$step" >/dev/null; then
+          jd_escalate="no_agent"; llm_ok=false
+        fi
+        llm_model="$(_local_render "$(jq -r '.model // ""' <<<"$step")" "$ctx" "$llm_pinp")"
+        if [[ "$llm_ok" == true && -z "$llm_model" ]]; then
           out_raw='{"error":"llm step is missing model"}'; rc=1; llm_ok=false
         fi
         if [[ "$llm_ok" == true ]]; then
           case "$llm_model" in
-            claude*) ;;
+            claude-code:*|codex:*|cursor:*|kimi:*)
+              llm_cli="${llm_model%%:*}"; llm_cli_model="${llm_model#*:}"
+              s_llm_provider="$llm_cli"; s_llm_model="$llm_model" ;;
+            claude*) s_llm_provider="anthropic" ;;
             *) out_raw="{\"error\":\"no provider configured for model '$llm_model'\"}"; rc=1; llm_ok=false ;;
           esac
+        fi
+
+        # CLI providers: permission + workdir. SPEC §2.9.2 — enforcement is
+        # optional, half-enforcement is not: a permission the CLI cannot back is
+        # refused, never run with more access. Mapping (verified against each
+        # CLI's --help and a write probe):
+        #   claude-code  read-only: --tools Read,Grep,Glob   workspace-write: --permission-mode acceptEdits
+        #                full-access: --permission-mode bypassPermissions
+        #   codex        -s read-only | workspace-write | danger-full-access
+        #   cursor       read-only: --mode ask   workspace-write: --sandbox enabled
+        #                full-access: --force --sandbox disabled
+        #   kimi         full-access only: `kimi -p` has no sandbox, writes without
+        #                asking, and refuses --plan/--auto alongside --prompt.
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          llm_perm="$(jq -r '.permission // "read-only"' <<<"$step")"; s_llm_permission="$llm_perm"
+          case "$llm_perm" in
+            read-only|workspace-write|full-access) ;;
+            *) out_raw="{\"error\":\"permission must be read-only, workspace-write or full-access, got '$llm_perm'\"}"; rc=1; llm_ok=false ;;
+          esac
+        fi
+        if [[ "$llm_ok" == true && "$llm_cli" == kimi && "$llm_perm" != full-access ]]; then
+          out_raw="{\"error\":\"kimi cannot enforce permission '$llm_perm' (kimi -p has no sandbox) — refusing to run with more access; declare permission: full-access to run it unconfined\"}"; rc=1; llm_ok=false
+        fi
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          llm_workdir="$(_local_render "$(jq -r '.workdir // ""' <<<"$step")" "$ctx" "$llm_pinp")"
+          [[ -z "$llm_workdir" ]] && llm_workdir="$PWD"
+          if [[ ! -d "$llm_workdir" ]]; then
+            out_raw="$(jq -nc --arg d "$llm_workdir" '{error:("workdir not found: " + $d)}')"; rc=1; llm_ok=false
+          fi
+        fi
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          case "$llm_cli" in
+            claude-code) llm_bin=claude ;; codex) llm_bin=codex ;; cursor) llm_bin=cursor-agent ;; kimi) llm_bin=kimi ;;
+          esac
+          if [[ -n "${OSL_LLM_STUB:-}" ]]; then
+            s_llm_cli_version="stub"
+          else
+            llm_bin_path="$(command -v "$llm_bin" || true)"
+            [[ -z "$llm_bin_path" && "$llm_bin" == kimi && -x "$HOME/.kimi-code/bin/kimi" ]] && llm_bin_path="$HOME/.kimi-code/bin/kimi"
+            if [[ -z "$llm_bin_path" ]]; then
+              out_raw="{\"error\":\"$llm_bin not found on PATH (needed for model '$llm_model')\"}"; rc=1; llm_ok=false
+            else
+              s_llm_cli_version="$("$llm_bin_path" --version </dev/null 2>/dev/null | head -1)" || true
+            fi
+          fi
         fi
 
         # Prompt body: inline prompt or prompt_file (relative to proc_dir).
@@ -3486,19 +3600,20 @@ _local_step_loop() {
           fi
         fi
 
-        # Substitute {{ var }} tokens from the current context (jq).
-        # Each {{var}} is replaced by ctx[var] (stringified) if present; left as-is if not.
+        # Substitute {{ var }} tokens from the current context.
         local llm_rendered_prompt=""
         if [[ "$llm_ok" == true ]]; then
-          llm_rendered_prompt="$(jq -rn \
-            --arg tmpl "$llm_prompt_body" \
-            --argjson ctx "$ctx" \
-            '$tmpl | gsub("\\{\\{\\s*(?<v>[a-zA-Z_][a-zA-Z0-9_]*)\\s*\\}\\}";
-              if $ctx[.v] != null then ($ctx[.v] | tostring) else "{{" + .v + "}}" end)')"
+          llm_rendered_prompt="$(_local_render "$llm_prompt_body" "$ctx" "$llm_pinp")"
         fi
 
-        # Schema (optional).
-        if [[ "$llm_ok" == true ]]; then
+        # Schema (optional). A judgment's schema is its declared outputs (each
+        # required unless it has required_if or required:false) plus confidence.
+        if [[ "$llm_ok" == true && "$stype" == judgment ]]; then
+          llm_schema_json="$(jq -c '[(.outputs // [])[] | select(.name != null)
+              | {(.name): ({type: (.type // "string"), required: (.required_if == null and .required != false)}
+                           + (if .values then {values: .values} else {} end))}]
+            | add // {} | . + {confidence: {type: "number", required: true}}' <<<"$step")"
+        elif [[ "$llm_ok" == true ]]; then
           llm_schema_json="$(jq -c '.expected_output_schema // {}' <<<"$step")"
         fi
 
@@ -3516,7 +3631,7 @@ _local_step_loop() {
         fi
 
         # Require curl for the real API call (test seam bypasses this).
-        if [[ "$llm_ok" == true && -z "${OSL_LLM_STUB:-}" ]]; then
+        if [[ "$llm_ok" == true && -z "$llm_cli" && -z "${OSL_LLM_STUB:-}" ]]; then
           require_curl
           if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
             out_raw='{"error":"ANTHROPIC_API_KEY is not set"}'; rc=1; llm_ok=false
@@ -3550,10 +3665,85 @@ $llm_rendered_prompt"
             llm_attempt_prompt="$llm_rendered_prompt"
           fi
 
-          # Get the raw text response: stub or real API call.
+          # CLI providers: one prompt (schema instruction + rendered prompt),
+          # non-interactive, only the final text captured. argv[0] is the bare
+          # command name; it is exec'd via llm_bin_path. stdin is /dev/null so a
+          # CLI never blocks reading it.
+          # ponytail: the prompt rides in argv, so one prompt is capped at Linux's
+          # 128 KiB MAX_ARG_STRLEN; pipe it on stdin if prompts outgrow that.
+          # ponytail: no wall-clock timeout on the CLI call (the API path has
+          # curl --max-time); wire the step's `timeout` field if agents hang.
+          local llm_argv=() llm_lastmsg=""
+          if [[ -n "$llm_cli" ]]; then
+            local llm_full_prompt="$llm_system_prompt
+
+$llm_attempt_prompt"
+            case "$llm_cli" in
+              claude-code)
+                llm_argv=(claude -p --output-format json --no-session-persistence)
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
+                case "$llm_perm" in
+                  read-only)       llm_argv+=(--tools Read,Grep,Glob) ;;
+                  workspace-write) llm_argv+=(--permission-mode acceptEdits) ;;
+                  full-access)     llm_argv+=(--permission-mode bypassPermissions) ;;
+                esac
+                llm_argv+=(-- "$llm_full_prompt") ;;
+              codex)
+                llm_lastmsg="$(mktemp)"
+                llm_argv=(codex exec --skip-git-repo-check --ephemeral --color never -C "$llm_workdir" -o "$llm_lastmsg")
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(-m "$llm_cli_model")
+                case "$llm_perm" in
+                  read-only)       llm_argv+=(-s read-only) ;;
+                  workspace-write) llm_argv+=(-s workspace-write) ;;
+                  full-access)     llm_argv+=(-s danger-full-access) ;;
+                esac
+                llm_argv+=(-- "$llm_full_prompt") ;;
+              cursor)
+                llm_argv=(cursor-agent -p --output-format text --trust --workspace "$llm_workdir")
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
+                case "$llm_perm" in
+                  read-only)       llm_argv+=(--mode ask) ;;
+                  workspace-write) llm_argv+=(--sandbox enabled) ;;
+                  full-access)     llm_argv+=(--force --sandbox disabled) ;;
+                esac
+                llm_argv+=(-- "$llm_full_prompt") ;;
+              kimi)
+                # No --auto/--yolo/--plan: kimi rejects each alongside --prompt; plain -p
+                # already runs every tool without asking (hence full-access only).
+                llm_argv=(kimi --output-format text)
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(-m "$llm_cli_model")
+                llm_argv+=(-p "$llm_full_prompt") ;;
+            esac
+            if [[ -n "${OSL_LLM_ARGV_FILE:-}" ]]; then
+              printf '%s\0' "${llm_argv[@]}" | jq -cRs --arg cli "$llm_cli" --arg cwd "$llm_workdir" \
+                '{cli:$cli, cwd:$cwd, argv:(split("\u0000")[:-1])}' >> "$OSL_LLM_ARGV_FILE"
+            fi
+          fi
+
+          # Get the raw text response: stub, CLI provider, or real API call.
           local llm_raw_text=""
           if [[ -n "${OSL_LLM_STUB:-}" ]]; then
             llm_raw_text="$OSL_LLM_STUB"
+            [[ -n "$llm_lastmsg" ]] && rm -f "$llm_lastmsg"
+          elif [[ -n "$llm_cli" ]]; then
+            local llm_cli_out="" llm_cli_rc=0
+            llm_cli_out="$(cd "$llm_workdir" && "$llm_bin_path" "${llm_argv[@]:1}" </dev/null 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
+            if [[ "$llm_cli" == codex && -n "$llm_lastmsg" ]]; then
+              llm_cli_out="$(cat "$llm_lastmsg" 2>/dev/null || true)"; rm -f "$llm_lastmsg"
+            fi
+            if [[ "$llm_cli_rc" -ne 0 ]]; then
+              out_raw="{\"error\":\"$llm_bin exited $llm_cli_rc (stderr in this receipt)\"}"; rc=1; llm_failed=true; llm_ok=false; continue
+            fi
+            case "$llm_cli" in
+              claude-code)
+                # --output-format json: a single result object; .result is the final text.
+                if ! llm_raw_text="$(jq -er 'if .is_error == true then error("is_error") else .result end | strings' <<<"$llm_cli_out" 2>/dev/null)"; then
+                  out_raw="$(jq -nc --arg o "${llm_cli_out:0:300}" '{error:"claude -p returned no result text", detail:$o}')"; rc=1; llm_failed=true; llm_ok=false; continue
+                fi ;;
+              # kimi prints the final answer on stdout behind a "• " bullet (thinking goes to stderr).
+              kimi) llm_raw_text="$(sed '1s/^• //' <<<"$llm_cli_out")" ;;
+              *)    llm_raw_text="$llm_cli_out" ;;
+            esac
           else
             # Build request body.
             local llm_req_body
@@ -3673,13 +3863,42 @@ $llm_rendered_prompt"
           llm_ok=false  # sentinel to exit the while (validated successfully)
         done
 
-        if [[ "$llm_failed" == true ]]; then
+        if [[ -n "$jd_escalate" ]]; then
+          : # judgment with no agent — escalated below
+        elif [[ "$llm_failed" == true ]]; then
           : # out_raw and rc already set inside the loop
         elif [[ -n "$llm_validated" ]]; then
           out_raw="$llm_validated"; rc=0
         elif [[ "$rc" -ne 1 ]]; then
           # Exhausted attempts without a fatal error — validation always failed.
           out_raw="{\"error\":\"llm output failed schema validation after $llm_max_attempts attempt(s): $llm_last_errors\"}"; rc=1
+        fi
+
+        # judgment: escalate (pause, reason "escalated") on a forced human review
+        # or a confidence below threshold; the agent's answer rides along as
+        # `proposal`. A judgment that completes falls through like any step.
+        if [[ "$stype" == judgment && -z "$jd_escalate" && "$rc" -eq 0 ]]; then
+          if jq -e '.judgment.require_human_review == true' <<<"$step" >/dev/null; then
+            jd_escalate="require_human_review"
+          elif jq -e --argjson o "$out_raw" '.judgment.confidence_threshold != null
+                 and $o.confidence < .judgment.confidence_threshold' <<<"$step" >/dev/null; then
+            jd_escalate="low_confidence"
+          fi
+          [[ -n "$jd_escalate" ]] && jd_proposal="$out_raw"
+        fi
+        if [[ -n "$jd_escalate" ]]; then
+          local _jd_pause_ms; _jd_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+          jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
+                 --arg a "$s_started" --argjson dur "$_jd_pause_ms" --arg why "$jd_escalate" \
+                 --argjson prop "$jd_proposal" --arg pv "$s_llm_provider" --arg m "$s_llm_model" \
+                 --arg perm "$s_llm_permission" --arg cv "$s_llm_cli_version" \
+            '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
+              reason:"escalated", escalation:$why, started_at:$a,
+              duration_ms:$dur, result_hash:"pending"}
+             + (if $prop != null then {proposal:$prop} else {} end)
+             + ({provider:$pv, model:$m, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))' >> "$audit"
+          echo "waiting:$i"
+          return 0
         fi ;;
       webhook)
         # Webhook step — mirrors StepExecutors::Webhook (webhook.rb) +
@@ -4248,6 +4467,116 @@ $llm_rendered_prompt"
               out_raw="{\"error\":\"subprocess: unexpected loop status: $sp_loop_status\"}"; rc=1; sp_ok=false ;;
           esac
         fi ;;
+      loop)
+        # Loop step — SPEC §3.14. Nested "loop" block:
+        #   for_each: <ref>[*] | <array>  (+ as: <name>, default "item")
+        #   repeat_until: "<expr>"        predicate checked at the END of each iteration
+        #   while: "<expr>"               runs while true; checked at the START of each iteration
+        #   max_iterations: <int> | "{{ process.inputs.x }}"  (default 100)
+        #   aggregate: {<output>: sum|concat|last}
+        # body: [steps] (top-level, as in the SPEC example; loop.body also accepted)
+        #   run in order through _local_step_loop — one sub-run per iteration under
+        #   <run_dir>/loop/<step-id>/iter-<n>/ with its own receipts. Body steps and
+        #   predicates see the context plus loop.<as> and loop.index (0-based).
+        #   Each iteration starts from the previous iteration's context, so a body
+        #   can read last round's outputs; nothing from the body reaches the parent
+        #   context except through aggregate. aggregate <k> takes field <k> from the
+        #   last body step output that has it.
+        # Output: {iterations: <n>, <k>: <aggregated value>...}.
+        # Nested loops work (a body loop recurses through the same arm).
+        # ponytail: a body step that pauses (form, approval, escalated judgment,
+        #   wait.until, webhook callback, paused subprocess) fails the loop — no
+        #   mid-loop resume. Ceiling: no human-in-the-loop inside a body; add a loop
+        #   cursor to the manifest and teach local_submit to re-enter it if needed.
+        local lp_ok=true lp_err="" lp_body lp_kind lp_expr="" lp_as="" lp_max lp_items="null" lp_agg lp_pinp
+        lp_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
+        lp_body="$(jq -c '.body // .loop.body // []' <<<"$step")"
+        lp_agg="$(jq -c '.loop.aggregate // {}' <<<"$step")"
+        lp_kind="$(jq -r '.loop // {} | [("for_each", "repeat_until", "while") as $k | select(has($k)) | $k]
+                          | if length == 1 then .[0] else "" end' <<<"$step")"
+        if [[ -z "$lp_kind" ]]; then
+          lp_ok=false; lp_err="loop step needs exactly one of loop.for_each, loop.repeat_until, loop.while"
+        elif ! jq -e 'type == "array" and length > 0' <<<"$lp_body" >/dev/null; then
+          lp_ok=false; lp_err="loop step needs a non-empty body array"
+        elif ! jq -e 'type == "object" and all(.[]; . == "sum" or . == "concat" or . == "last")' <<<"$lp_agg" >/dev/null; then
+          lp_ok=false; lp_err="loop.aggregate values must be sum, concat or last"
+        fi
+        if [[ "$lp_ok" == true ]]; then
+          lp_max="$(_local_render "$(jq -r '.loop.max_iterations // 100 | tostring' <<<"$step")" "$ctx" "$lp_pinp")"
+          [[ "$lp_max" =~ ^[1-9][0-9]*$ ]] || { lp_ok=false; lp_err="loop.max_iterations must be a positive integer, got '$lp_max'"; }
+        fi
+        if [[ "$lp_ok" == true && "$lp_kind" == for_each ]]; then
+          lp_as="$(jq -r '.loop.as // "item"' <<<"$step")"
+          lp_items="$(jq -c --argjson ctx "$ctx" --argjson pinp "$lp_pinp" "$_OSL_JQ_REF"'
+            .loop.for_each | if type == "array" then . elif type == "string" then (sub("\\[\\*\\]$"; "") | ref($ctx; $pinp)) else null end' <<<"$step")"
+          if ! jq -e 'type == "array"' <<<"$lp_items" >/dev/null; then
+            lp_ok=false; lp_err="loop.for_each did not resolve to an array"
+          elif [[ "$(jq length <<<"$lp_items")" -gt "$lp_max" ]]; then
+            lp_ok=false; lp_err="loop.for_each has $(jq length <<<"$lp_items") items, more than max_iterations ($lp_max)"
+          fi
+        elif [[ "$lp_ok" == true ]]; then
+          lp_expr="$(jq -r --arg k "$lp_kind" '.loop[$k] | tostring' <<<"$step")"
+        fi
+
+        local lp_n=0 lp_done=false lp_ctx="$ctx" lp_vals='{}' lp_cond lp_status lp_dir
+        local lp_file="$run_dir/loop/$sid/body.sop.json"
+        if [[ "$lp_ok" == true ]]; then
+          mkdir -p "$run_dir/loop/$sid"
+          jq -nc --arg n "$sid" --argjson b "$lp_body" '{name:$n, steps:$b}' > "$lp_file"
+        fi
+        while [[ "$lp_ok" == true && "$lp_done" == false ]]; do
+          lp_ctx="$(jq -c --arg as "$lp_as" --argjson n "$lp_n" --argjson items "$lp_items" '
+            .loop = ({index: $n} + (if $as == "" then {} else {($as): $items[$n]} end))' <<<"$lp_ctx")"
+          if [[ "$lp_kind" == for_each && "$lp_n" -ge "$(jq length <<<"$lp_items")" ]]; then
+            lp_done=true
+          elif [[ "$lp_kind" == while ]] && lp_cond="$(_local_eval_cond "$lp_expr" "$lp_ctx" "$lp_pinp")" && [[ "$lp_cond" != true ]]; then
+            if [[ "$lp_cond" == false ]]; then lp_done=true
+            else lp_ok=false; lp_err="cannot evaluate loop.while expression: $lp_expr"; fi
+          elif [[ "$lp_n" -ge "$lp_max" ]]; then
+            lp_ok=false; lp_err="loop reached max_iterations ($lp_max) without its $lp_kind predicate being satisfied: $lp_expr"
+          else
+            lp_dir="$run_dir/loop/$sid/iter-$lp_n"; mkdir -p "$lp_dir"
+            jq -nc --arg id "iter-$lp_n" --arg p "$sid" --argjson inp "$lp_pinp" \
+              '{run_id:$id, process:$p, status:"running", inputs:$inp}' > "$lp_dir/manifest.json"
+            lp_status="$(_local_step_loop "$lp_dir" "$lp_file" 0 "$lp_ctx" "$proc_dir")" || lp_status="failed"
+            case "$lp_status" in
+              completed)
+                [[ -f "$lp_dir/context.json" ]] && lp_ctx="$(cat "$lp_dir/context.json")"
+                lp_vals="$(jq -c --argjson c "$lp_ctx" --argjson b "$lp_body" --argjson agg "$lp_agg" '
+                  reduce ($agg | keys_unsorted[]) as $k (.;
+                    ([$b[] | $c[.id // ""] | objects | select(has($k)) | .[$k]] | last) as $v
+                    | if $v == null then . else .[$k] += [$v] end)' <<<"$lp_vals")"
+                lp_n=$(( lp_n + 1 ))
+                if [[ "$lp_kind" == repeat_until ]]; then
+                  lp_cond="$(_local_eval_cond "$lp_expr" "$lp_ctx" "$lp_pinp")"
+                  case "$lp_cond" in
+                    true)  lp_done=true ;;
+                    false) ;;
+                    *)     lp_ok=false; lp_err="cannot evaluate loop.repeat_until expression: $lp_expr" ;;
+                  esac
+                fi ;;
+              waiting:*)
+                local lp_widx="${lp_status#waiting:}"
+                lp_ok=false
+                lp_err="body step '$(jq -r ".steps[$lp_widx].id" "$lp_file")' ($(jq -r ".steps[$lp_widx].type" "$lp_file")) paused in iteration $lp_n — a pausing step inside a loop body is not supported locally" ;;
+              *)
+                lp_ok=false; lp_err="iteration $lp_n failed (receipts: $lp_dir)" ;;
+            esac
+          fi
+        done
+
+        if [[ "$lp_ok" == true ]]; then
+          out_raw="$(jq -nc --argjson vals "$lp_vals" --argjson agg "$lp_agg" --argjson n "$lp_n" '
+            {iterations: $n} + ($agg | with_entries(.key as $k | .value as $mode | ($vals[$k] // []) as $xs | .value = (
+              if $mode == "sum" then
+                (if all($xs[]; type == "number") then ($xs | add // 0) else error("aggregate sum on non-number values for " + $k) end)
+              elif $mode == "concat" then
+                (if ($xs | length) > 0 and all($xs[]; type == "string") then ($xs | join(""))
+                 else [$xs[] | if type == "array" then .[] else . end] end)
+              else ($xs | last) end)))' 2>&1)" || { lp_ok=false; lp_err="$out_raw"; }
+        fi
+        if [[ "$lp_ok" == true ]]; then rc=0
+        else out_raw="$(jq -nc --arg e "loop '$sid': $lp_err" '{error:$e}')"; rc=1; fi ;;
       *)    out_raw="unsupported step type for local execution: $stype"; rc=2 ;;
     esac
 
@@ -4276,15 +4605,19 @@ $llm_rendered_prompt"
     result_hash="$(printf '%s' "$_canon" | _sha256 2>/dev/null || true)"
     result_hash="${result_hash:0:64}"
     [[ -z "$result_hash" ]] && result_hash="unavailable"
-    # C1a: assemble the metric supplement; include llm fields only for llm steps.
+    # C1a: assemble the metric supplement; include llm fields only for llm/judgment
+    # steps. provider/permission/cli_version: which backend answered (CLI providers
+    # record the permission they ran under and the CLI's --version).
     local llm_metrics="{}"
-    if [[ "$stype" == "llm" && -n "$s_llm_model" ]]; then
+    if [[ -n "$s_llm_model" ]]; then
       llm_metrics="$(jq -nc \
         --arg model "$s_llm_model" \
         --argjson tin "$s_llm_tokens_in" \
         --argjson tout "$s_llm_tokens_out" \
         --arg src "$s_llm_token_source" \
-        '{model:$model, tokens_in:$tin, tokens_out:$tout, token_source:$src}')"
+        --arg pv "$s_llm_provider" --arg perm "$s_llm_permission" --arg cv "$s_llm_cli_version" \
+        '{model:$model, tokens_in:$tin, tokens_out:$tout, token_source:$src}
+         + ({provider:$pv, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))')"
     fi
     jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg st "$sstatus" --argjson rc "$rc" \
       --arg a "$s_started" --arg b "$s_ended" --argjson out "$out_json" --arg se "$serr" \
@@ -4657,27 +4990,9 @@ _local_continue_parent_body() {
       local p_wait_step2 p_wait_since2
       p_wait_step2="$(jq -r ".steps[$p_wait_idx2].id // \"step-$p_wait_idx2\"" "$parent_proc_file")"
       p_wait_since2="$(_local_now)"
-      local p_wait_expects2
-      p_wait_expects2="$(jq -c --argjson idx "$p_wait_idx2" '
-        .steps[$idx] as $s |
-        ($s.inputs // $s.outputs // null) as $decl |
-        if $decl != null and ($decl | length) > 0 then
-          { outputs: [$decl[].name // empty],
-            schema:  $decl }
-        elif $s.type == "approval" then
-          { outputs: ["decision"],
-            schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-        else
-          { outputs: [], schema: [] }
-        end
-      ' "$parent_proc_file")"
-      local p_wait_stype2 p_wait_reason2
-      p_wait_stype2="$(jq -r ".steps[$p_wait_idx2].type // \"automated\"" "$parent_proc_file")"
-      case "$p_wait_stype2" in
-        form)     p_wait_reason2="waiting_for_input" ;;
-        approval) p_wait_reason2="waiting_for_approval" ;;
-        *)        p_wait_reason2="waiting_for_callback" ;;
-      esac
+      local p_wait_meta2 p_wait_expects2 p_wait_reason2
+      p_wait_meta2="$(_local_wait_meta "$parent_proc_file" "$p_wait_idx2")"
+      p_wait_expects2="$(jq -c '.expects' <<<"$p_wait_meta2")"; p_wait_reason2="$(jq -r '.reason' <<<"$p_wait_meta2")"
       jq -c --arg s "waiting" \
             --argjson idx "$((p_wait_idx2 + 1))" \
             --argjson widx "$p_wait_idx2" \
@@ -4886,7 +5201,7 @@ local_submit() {
   if [[ -z "$resumed_sexec" ]]; then
     case "$resumed_stype" in
       automated|shell|webhook)                                               resumed_sexec="external" ;;
-      noop|form|approval|notification|wait|judgment|llm|subprocess) resumed_sexec="internal" ;;
+      noop|form|approval|notification|wait|judgment|llm|subprocess|loop) resumed_sexec="internal" ;;
       *)                                                                      resumed_sexec="external" ;;
     esac
   fi
@@ -4957,27 +5272,9 @@ local_submit() {
     local wait_step2 wait_since2
     wait_step2="$(jq -r ".steps[$wait_index2].id // \"step-$wait_index2\"" "$proc_file")"
     wait_since2="$(_local_now)"
-    local wait_expects2
-    wait_expects2="$(jq -c --argjson idx "$wait_index2" '
-      .steps[$idx] as $s |
-      ($s.inputs // $s.outputs // null) as $decl |
-      if $decl != null and ($decl | length) > 0 then
-        { outputs: [$decl[].name // empty],
-          schema:  $decl }
-      elif $s.type == "approval" then
-        { outputs: ["decision"],
-          schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-      else
-        { outputs: [], schema: [] }
-      end
-    ' "$proc_file")"
-    local wait_stype2 wait_reason2
-    wait_stype2="$(jq -r ".steps[$wait_index2].type // \"automated\"" "$proc_file")"
-    case "$wait_stype2" in
-      form)     wait_reason2="waiting_for_input" ;;
-      approval) wait_reason2="waiting_for_approval" ;;
-      *)        wait_reason2="waiting_for_callback" ;;
-    esac
+    local wait_meta2 wait_expects2 wait_reason2
+    wait_meta2="$(_local_wait_meta "$proc_file" "$wait_index2")"
+    wait_expects2="$(jq -c '.expects' <<<"$wait_meta2")"; wait_reason2="$(jq -r '.reason' <<<"$wait_meta2")"
     jq -c --arg s "waiting" \
           --argjson idx "$((wait_index2 + 1))" \
           --argjson widx "$wait_index2" \
@@ -6208,24 +6505,9 @@ local_heal() {
     local wait_index; wait_index="${loop_status#waiting:}"
     local wait_step; wait_step="$(jq -r ".steps[$wait_index].id // \"step-$wait_index\"" "$proc_file")"
     local wait_since; wait_since="$(_local_now)"
-    local wait_expects; wait_expects="$(jq -c --argjson idx "$wait_index" '
-      .steps[$idx] as $s |
-      ($s.inputs // $s.outputs // null) as $decl |
-      if $decl != null and ($decl | length) > 0 then
-        { outputs: [$decl[].name // empty], schema: $decl }
-      elif $s.type == "approval" then
-        { outputs: ["decision"],
-          schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-      else { outputs: [], schema: [] }
-      end
-    ' "$proc_file")"
-    local wait_stype; wait_stype="$(jq -r ".steps[$wait_index].type // \"automated\"" "$proc_file")"
-    local wait_reason
-    case "$wait_stype" in
-      form)     wait_reason="waiting_for_input" ;;
-      approval) wait_reason="waiting_for_approval" ;;
-      *)        wait_reason="waiting_for_callback" ;;
-    esac
+    local wait_meta wait_expects wait_reason
+    wait_meta="$(_local_wait_meta "$proc_file" "$wait_index")"
+    wait_expects="$(jq -c '.expects' <<<"$wait_meta")"; wait_reason="$(jq -r '.reason' <<<"$wait_meta")"
     jq -c --arg s "waiting" \
           --argjson idx "$(( wait_index + 1 ))" \
           --argjson widx "$wait_index" \
@@ -7020,7 +7302,7 @@ cmd_onboard() {
   _struct_errors="$(jq -r '
     (if has("process") then .process else . end) as $p |
     # Locally-supported step types (SPEC §3 local set).
-    ["automated","shell","noop","form","approval","wait","llm","webhook","subprocess"] as $ok_types |
+    ["automated","shell","noop","form","approval","wait","llm","judgment","loop","webhook","subprocess"] as $ok_types |
     [
       # 1. name must be a non-empty string.
       (if (($p.name | type) != "string") or ($p.name | length) == 0 then
@@ -7540,11 +7822,11 @@ four conventions. If you are inventing a resume protocol, you have not read it.
 
 ## Why not `opensop run`
 
-§5.3's local dispatch table has rows for `automated`, `shell`, `noop`, `form`,
-`approval`, and "anything else → `rc=2`, unsupported step type". `llm` is not a
-row, so a planner SOP with an `llm` step is categorically outside the local
-engine. And §3.4 `shell` runs `bash -c` directly — no tool loop, so no
-`tool_call`/`tool_result` ever. Write a separate program, and do not split
+§5.3's local engine dispatches `llm` (including CLI-backed agents), `judgment`
+and `loop`, but it writes step receipts, not `execution-event` traces: an agent
+spawned by an `llm` step leaves no `session_started`, no `agent_created`, no
+`tool_call`/`tool_result`. And §3.4 `shell` runs `bash -c` directly — no tool
+loop either. Write a separate program, and do not split
 execution between the CLI and your harness: `evidence` and `agent_contract` are
 engine-agnostic post-hoc concerns, so a split engine buys nothing.
 
