@@ -48,7 +48,7 @@ jq() {
 # Constants & paths
 # --------------------------------------------------------------------------- #
 
-readonly OPENSOP_CLI_VERSION="0.9.2"
+readonly OPENSOP_CLI_VERSION="0.10.0"
 # Single source of truth for supported opensop envelope (SPEC) versions.
 # `schema validate`, `--version`, and `onboard`'s stamped envelope all derive from this.
 readonly SPEC_VERSIONS="0.1 0.2 0.6 0.7 0.9.1"
@@ -7943,7 +7943,7 @@ allowed-tools:
 metadata:
   homepage: https://github.com/opensop/opensop
   spec: SPEC.md
-  version: "0.9.1"
+  version: "0.10.0"
 compatibility:
   - claude
   - codex

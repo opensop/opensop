@@ -12,7 +12,7 @@ agent call, gate result and decision is receipted under
 
 ## Requirements
 
-- opensop CLI 0.9.2 or later (CLI providers, local `loop`, `condition`)
+- opensop CLI 0.10.0 or later (CLI providers, local `loop`, `condition`)
 - `bash`, `jq`, `git`
 - The CLI for every model you use, installed and signed in. The defaults use
   only `claude` (Claude Code).

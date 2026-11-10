@@ -8678,7 +8678,7 @@ for stub in \
 done
 echo "PASS: meeting-action-items — malformed LLM items render non-empty (never crash or silently empty)"
 # A non-array `items` violates the declared schema (items: {type: array}) and
-# fails at the llm step with a clear error (v0.9.2 validates array/object types).
+# fails at the llm step with a clear error (v0.10.0 validates array/object types).
 for stub in '{"items":7}' '{"items":"a scalar"}' '{"items":{"owner":"x","task":"y"}}'; do
   mh="$(mktemp -d)"
   set +e
@@ -9365,8 +9365,8 @@ echo "PASS: SPEC091-c — onboard-emitted process file stamped 0.9.1 and passes 
 
 # (d) --version prints both clocks: the CLI version and the supported SPEC list.
 version_out="$("$cli" --version 2>&1)"
-echo "$version_out" | grep -q "opensop 0.9.2" \
-  || { echo "FAIL: SPEC091-d --version should print the CLI version 0.9.2, got: $version_out"; exit 1; }
+echo "$version_out" | grep -q "opensop 0.10.0" \
+  || { echo "FAIL: SPEC091-d --version should print the CLI version 0.10.0, got: $version_out"; exit 1; }
 echo "$version_out" | grep -q "0.1, 0.2, 0.6, 0.7, 0.9.1" \
   || { echo "FAIL: SPEC091-d --version should print the supported SPEC version list, got: $version_out"; exit 1; }
 echo "PASS: SPEC091-d — --version prints both the CLI version and the supported SPEC versions"
@@ -9440,7 +9440,7 @@ echo "PASS: SPEC091-h — evidence.required vocabulary matches schema 0.9.1's ev
 rm -rf "$spec08_dir"
 
 # --------------------------------------------------------------------------- #
-# v0.9.2: CLI-backed llm providers, local judgment (§3.9), local loop (§3.14).
+# v0.10.0: CLI-backed llm providers, local judgment (§3.9), local loop (§3.14).
 #
 # Hermetic: fake claude/codex/cursor-agent/kimi binaries on PATH record each
 # call to $FAKE_CLI_LOG and answer {"ok":true} the way the real CLI emits its
