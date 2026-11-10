@@ -10047,6 +10047,10 @@ g_id="$("$cli" run "$here/examples/greet.sop.json" --input name=g --json | jq -r
 echo "PASS: P0100-g — runs and show print JSON when piped or with --json"
 rm -rf "$p0100g"
 
+# (h) help names no live demo server or token.
+grep -q 'demo' <<<"$("$cli" help config 2>&1)" && { echo "FAIL: P0100-h help config mentions a demo server"; exit 1; }
+echo "PASS: P0100-h — help config uses placeholder url/token"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

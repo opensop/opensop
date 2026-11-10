@@ -1158,8 +1158,8 @@ EX
     config)
       cat <<'EX'
   opensop config                               # show current config
-  opensop config set url https://demo.opensop.ai
-  opensop config set token demo-public-token-resets-daily
+  opensop config set url https://opensop.example.com
+  opensop config set token <your-token>
 EX
       ;;
     upgrade)
