@@ -141,6 +141,8 @@ else
   _OPENSOP_LOCAL_HOME_EXPLICIT=false
 fi
 OPENSOP_LOCAL_HOME="${OPENSOP_LOCAL_HOME:-$HOME/.opensop-local}"
+# Absolute, because script steps run in the run's own cwd (see _local_exec_step).
+[[ "$OPENSOP_LOCAL_HOME" = /* ]] || OPENSOP_LOCAL_HOME="$PWD/$OPENSOP_LOCAL_HOME"
 
 emit_json() {
   # Print compact JSON (stdin) — used for --json and piped output.
@@ -3327,11 +3329,15 @@ _local_finalize_trap() {
 #   available) and records "<loop_pid> -<pgid>" in <run_dir>/.step.<cli pid>
 #   while it runs, so _local_finalize_trap can stop the loop and the step's
 #   whole tree when the CLI is killed mid-step. Prints the command's stdout and
-#   returns its exit status. Without setsid (macOS) only the step's own pid is
+#   returns its exit status. Runs in $run_cwd (the run loop's local). Without setsid (macOS) only the step's own pid is
 #   recorded, so its children may outlive an interrupted run.
 _local_exec_step() {
   local run_dir="$1" loop_pid="$2" in="$3" errlog="$4"; shift 4
   local pf="$run_dir/.step.$$" pid rc=0
+  # Run where the run was started (the caller's run_cwd), not wherever a later
+  # submit/heal is typed, so relative paths in a step mean the same on resume.
+  # We are inside $(...), so the cd doesn't leak.
+  [[ -n "${run_cwd:-}" && -d "$run_cwd" ]] && cd "$run_cwd"
   if command -v setsid >/dev/null 2>&1; then
     setsid "$@" <<<"$in" 2>>"$errlog" & pid=$!
     printf '%s -%s\n' "$loop_pid" "$pid" > "$pf"

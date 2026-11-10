@@ -43,6 +43,7 @@ This release makes the local engine run agent loops end to end. `judgment` and `
 
 ### Fixed
 
+- A run resumed with `submit` or `heal` from another directory runs its `automated` and `shell` steps in the directory the run was started in, as the docs say, so "finish from anywhere" holds. A relative `OPENSOP_LOCAL_HOME` is made absolute.
 - `help agents` and `help agents --json` point to `docs/AGENTS.md` (as a GitHub URL, so it works on a curl install). They named `docs/CLAUDE-INTEGRATION.md`, which does not exist.
 - **The embedded `opensop` skill and `help` match the local CLI.** Local `run` is synchronous, so the skill no longer says to poll `status` in a loop. Its example `opensop show <id> --json | jq '.status'` (always `null`) is now `opensop status <id> --json | jq .state`. `help` drops the "full SPEC parity" claim from the local step-types header.
 - **`skill install --runtime hermes --scope user` honours `$HERMES_HOME`** (default `~/.hermes`), the way codex honours `$CODEX_HOME`; `skill paths` and `doctor` show the resolved path.

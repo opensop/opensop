@@ -10367,6 +10367,22 @@ mkdir -p "$p0100ab/cell"; (cd "$p0100ab/cell" && env -u OPENSOP_LOCAL_HOME "$cli
 echo "PASS: P0100-ab — newcomer paths: next in status JSON, bare file names, clear not-found/YAML errors, init makes processes/"
 rm -rf "$p0100ab"
 
+# (ac) a run resumed from another directory runs its script steps where it was
+# started, so "finish from anywhere" holds; a relative OPENSOP_LOCAL_HOME still works.
+p0100ac="$(mktemp -d)"; mkdir -p "$p0100ac/proj" "$p0100ac/elsewhere"; touch "$p0100ac/proj/marker"
+echo '{"name":"ac","version":"1","steps":[{"id":"change","type":"form"},{"id":"tests","type":"shell","run":"test -f marker && echo {}"}]}' > "$p0100ac/proj/ac.json"
+ac_id="$(cd "$p0100ac/proj" && OPENSOP_LOCAL_HOME=h "$cli" run ac.json --json | jq -r .run_id)"
+(cd "$p0100ac/proj" && OPENSOP_LOCAL_HOME=h "$cli" submit "$ac_id" change --json >/dev/null 2>&1 || true)
+[ "$(cd "$p0100ac/proj" && OPENSOP_LOCAL_HOME=h "$cli" status "$ac_id" --json | jq -r .state)" = completed ] \
+  || { echo "FAIL: P0100-ac relative home"; exit 1; }
+export OPENSOP_LOCAL_HOME="$p0100ac/home"
+ac_id="$(cd "$p0100ac/proj" && "$cli" run ac.json --json | jq -r .run_id)"
+(cd "$p0100ac/elsewhere" && "$cli" submit "$ac_id" change --json >/dev/null 2>&1 || true)
+[ "$("$cli" status "$ac_id" --json | jq -r .state)" = completed ] \
+  || { echo "FAIL: P0100-ac submit from another dir: $("$cli" status "$ac_id" --json | jq -c '{state,error}')"; exit 1; }
+echo "PASS: P0100-ac — resumed runs execute script steps in the run's own directory"
+rm -rf "$p0100ac"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
