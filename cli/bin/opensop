@@ -941,7 +941,7 @@ ${C_BOLD}ENVIRONMENT${C_RESET}
                                   is unset, with a stderr deprecation warning
   NO_COLOR                      disable ANSI color output
 
-${C_BOLD}LOCAL STEP TYPES (v0.7 — full SPEC parity)${C_RESET}
+${C_BOLD}LOCAL STEP TYPES${C_RESET}
   automated/shell   run a shell script; JSON stdout merged into context
   noop              pass-through; no execution
   form              pause (waiting_for_input); resume via: opensop submit <run_id> <step-id> --output k=v
@@ -1229,6 +1229,7 @@ EX
   opensop skill install --runtime claude --scope user  # install to ~/.claude/skills/opensop/
   opensop skill install --runtime codex       # install to .agents/skills/opensop/ (project scope)
   opensop skill install --runtime codex --scope user  # install to $CODEX_HOME/skills/opensop/ (~/.codex/skills if unset)
+  opensop skill install --runtime hermes --scope user # install to $HERMES_HOME/skills/opensop/ (~/.hermes/skills if unset)
   opensop skill install --runtime claude --skill opensop-build-harness  # install the build-harness skill instead
   opensop skill paths                         # table: flavour -> canonical root skills path
   opensop skill paths --json                  # machine-readable {flavour: path} object
@@ -1276,7 +1277,8 @@ ${C_BOLD}RUN ON A SERVER (--remote)${C_RESET}
 
 ${C_BOLD}KEY PATTERNS FOR AGENTS${C_RESET}
   - Prefer 'suggest' and 'search' over parsing 'list' output.
-  - Check 'status' in a poll loop after 'run'; exit when state != running/waiting.
+  - Local 'run' is synchronous: it returns when the run completes, fails or pauses.
+    Read 'status <run_id> --json' (.state, .waiting, .error); poll only --remote runs.
   - Parse JSON output: pipe any command with --json to jq.
   - On pause (status == waiting), inspect manifest.waiting for expected outputs,
     then call 'submit' with those outputs to resume.
@@ -8074,12 +8076,14 @@ Errors emit `{error, message, hint?}` to stderr in JSON mode.
    `opensop suggest "<task description>"` over guessing file paths.  Use
    `opensop list` to enumerate what is available.
 
-2. **Poll after run.** After `opensop run`, check `opensop status <run_id>`
-   in a loop until `status` is not `running` or `waiting`.
+2. **Run is synchronous.** A local `opensop run` returns when the run
+   completes, fails, or pauses at a waiting step; there is nothing to poll.
+   Read the outcome with `opensop status <run_id> --json | jq .state`
+   (`completed`, `failed`, `waiting`). Poll only `--remote` runs.
 
-3. **Resume paused steps.** When `status == waiting`, read
-   `manifest.waiting` from `opensop show <run_id> --json` to learn which
-   step is paused and what outputs it expects.  Call `opensop submit`.
+3. **Resume paused steps.** When `.state == "waiting"`, read `.waiting`
+   from `opensop status <run_id> --json` to learn which step is paused and
+   what outputs it expects (`.waiting.expects`).  Call `opensop submit`.
 
 4. **Heal failures.** When `status == failed`, use `opensop heal <run_id>`
    to get a structured fault record, then `--apply` to retry.
@@ -8145,7 +8149,7 @@ opensop run ./processes/greet.sop.json --input name=Alice
 opensop run greet --input name=Bob          # bare name resolves from cell chain
 
 # Inspect
-opensop show 20250101T120000Z-12345-6789 --json | jq '.status'
+opensop status 20250101T120000Z-12345-6789 --json | jq .state
 opensop steps 20250101T120000Z-12345-6789
 
 # Resume a paused form step
@@ -8557,13 +8561,18 @@ _skill_valid_flavours() {
 
 # _skill_expand_root FLAVOUR SCOPE TPL — expand one registry path template to
 # an absolute ROOT skills directory (no skill name leaf). Expands a leading
-# ~/ to $HOME. Special-cases codex|user to honor a live CODEX_HOME env var
+# ~/ to $HOME. Special-cases codex|user and hermes|user to honor a live
+# CODEX_HOME / HERMES_HOME env var
 # (see the comment above _skill_flavour_registry) instead of the registry's
 # static fallback template.
 _skill_expand_root() {
   local flavour="$1" scope="$2" tpl="$3"
   if [[ "$flavour" == "codex" && "$scope" == "user" ]]; then
     printf '%s' "${CODEX_HOME:-$HOME/.codex}/skills"
+    return 0
+  fi
+  if [[ "$flavour" == "hermes" && "$scope" == "user" ]]; then
+    printf '%s' "${HERMES_HOME:-$HOME/.hermes}/skills"
     return 0
   fi
   if [[ "$tpl" == '~/'* ]]; then

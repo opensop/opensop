@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **The embedded `opensop` skill and `help` match the local CLI.** Local `run` is synchronous, so the skill no longer says to poll `status` in a loop. Its example `opensop show <id> --json | jq '.status'` (always `null`) is now `opensop status <id> --json | jq .state`. `help` drops the "full SPEC parity" claim from the local step-types header.
+- **`skill install --runtime hermes --scope user` honours `$HERMES_HOME`** (default `~/.hermes`), the way codex honours `$CODEX_HOME`; `skill paths` and `doctor` show the resolved path.
 - A bad `--inputs`/`--inputs-file` (or `--outputs`/`--outputs-file`) prints only the CLI's own error, without jq's raw parse error before it.
 - **Local `run --metadata k=v` is recorded** under `manifest.metadata`. Before, it was silently dropped.
 - **`opensop pull opensop/<slug>` works out of the box.** The default library is now the `sops/` directory of this repo (`https://raw.githubusercontent.com/opensop/opensop/{ref}/sops`); the old default, `github.com/opensop/sops`, only had a template. `{ref}` in `OPENSOP_SOPS_BASE` is replaced by the pull ref. A base without `{ref}` gets `/<ref>` appended as before, so existing overrides and `file://` mirrors keep working.

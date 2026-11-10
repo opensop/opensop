@@ -10201,6 +10201,18 @@ done
 echo "PASS: P0100-q — bad inputs JSON gives one clean error; run records --metadata"
 rm -rf "$p0100q"
 
+# (r) the embedded skill and help describe the local CLI as it is: run is
+# synchronous (no poll loop), the state is status --json .state, no "full
+# SPEC parity" claim; hermes user scope honours $HERMES_HOME like CODEX_HOME.
+r_skill="$("$cli" skill show)"
+grep -q "jq '.status'" <<<"$r_skill" && { echo "FAIL: P0100-r skill recommends show | jq .status"; exit 1; }
+grep -q 'status <run_id> --json | jq .state' <<<"$r_skill" || { echo "FAIL: P0100-r skill lacks status --json | jq .state"; exit 1; }
+grep -qi 'in a loop until' <<<"$r_skill" && { echo "FAIL: P0100-r skill still says to poll"; exit 1; }
+grep -q 'parity' <<<"$("$cli" help)" && { echo "FAIL: P0100-r help claims SPEC parity"; exit 1; }
+HERMES_HOME=/h/x "$cli" skill paths --json | jq -e '.hermes.user == "/h/x/skills"' >/dev/null || { echo "FAIL: P0100-r HERMES_HOME"; exit 1; }
+env -u HERMES_HOME HOME=/h/y "$cli" skill paths --json | jq -e '.hermes.user == "/h/y/.hermes/skills"' >/dev/null || { echo "FAIL: P0100-r hermes default"; exit 1; }
+echo "PASS: P0100-r — skill/help text match the local CLI; hermes honours HERMES_HOME"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
