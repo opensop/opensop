@@ -6076,7 +6076,7 @@ local_status() {
     [[ "$state" == "completed" ]] && color="$C_GREEN"
     [[ "$state" == "failed"    ]] && color="$C_RED"
     [[ "$state" == "cancelled" ]] && color="$C_YELLOW"
-    printf '%sinstance:%s %s\n' "$C_BOLD" "$C_RESET" "$rid"
+    printf '%srun:%s      %s\n' "$C_BOLD" "$C_RESET" "$rid"
     printf '%sprocess:%s  %s\n' "$C_BOLD" "$C_RESET" "$(echo "$resp" | jq -r '.process.name')"
     printf '%sstate:%s    %s%s%s%s\n' "$C_BOLD" "$C_RESET" "$color" "$state" "$C_RESET" "${ended:+ ($ended)}"
     printf '%sreceipts:%s %s\n' "$C_BOLD" "$C_RESET" "$run_dir"
@@ -6085,7 +6085,11 @@ local_status() {
       elif .waiting then "\nwaiting on \(.waiting.step) (\(.waiting.reason))\(if .waiting.description then ": " + .waiting.description else "" end)\nnext: opensop submit \(.id) \(.waiting.step)\([.waiting.expects.outputs[]? | " --output " + . + "=..."] | join(""))"
       else empty end'
     echo
-    echo "$resp" | jq -r '.steps[]? | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
+    # One row per step, latest receipt wins (a healed or resumed step has
+    # several); run-level events (cancel, heal) carry no step type.
+    echo "$resp" | jq -r '[.steps[]? | select(.type != null)]
+      | reduce .[] as $s ({o: [], m: {}}; (if .m[$s.step_id] then . else .o += [$s.step_id] end) | .m[$s.step_id] = $s)
+      | .o[] as $k | .m[$k] | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
       while IFS=$'\t' read -r step_id stype sstate sub; do
         local glyph
         case "$sstate" in

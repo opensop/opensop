@@ -10051,6 +10051,26 @@ rm -rf "$p0100g"
 grep -q 'demo' <<<"$("$cli" help config 2>&1)" && { echo "FAIL: P0100-h help config mentions a demo server"; exit 1; }
 echo "PASS: P0100-h — help config uses placeholder url/token"
 
+# (i) status in a terminal: "run:" label, one row per step (latest receipt
+# wins, no null rows for heal events), and the completion time after heal.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  p0100i="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100i/home"
+  cat > "$p0100i/p.sop.json" <<JSON
+{"name":"p0100i","steps":[{"id":"a","type":"shell","run":"echo '{}'"},
+ {"id":"s","type":"shell","run":"test -f $p0100i/flag || exit 3; echo '{}'"}]}
+JSON
+  "$cli" run "$p0100i/p.sop.json" >/dev/null 2>&1 || true
+  i_id="$(ls "$OPENSOP_LOCAL_HOME/runs")"; touch "$p0100i/flag"
+  "$cli" heal "$i_id" --apply >/dev/null 2>&1 || { echo "FAIL: P0100-i heal --apply"; exit 1; }
+  i_out="$(script -qec "'$cli' status $i_id" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  i_end="$(jq -r .ended_at "$OPENSOP_LOCAL_HOME/runs/$i_id/manifest.json")"
+  grep -q "^run: *$i_id" <<<"$i_out" && grep -q "completed ($i_end)" <<<"$i_out" \
+    && [ "$(grep -c '^  ✓ s ' <<<"$i_out")" = 1 ] && ! grep -q '✗\|null' <<<"$i_out" \
+    || { echo "FAIL: P0100-i status view: $i_out"; exit 1; }
+  echo "PASS: P0100-i — status shows one row per step and the healed completion time"
+  rm -rf "$p0100i"
+fi
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

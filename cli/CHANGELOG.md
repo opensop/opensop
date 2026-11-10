@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ### Fixed
 
+- **`status` in a terminal** labels the id `run:`, shows one row per step with its latest state (it replayed the audit log, so a resumed step showed a waiting and a completed row, and cancel/heal events showed `null` rows), and after `heal --apply` shows the new completion time.
 - `help config` examples use a placeholder server URL and token instead of a demo server.
 - **`runs` and `show` follow the output contract**: JSON with `--json` or when piped, human text in a terminal. `runs --json` is an array of `{run_id, status, process, started_at}` (it printed TSV); piped `show` prints `{manifest, steps}` (it printed prose).
 - **A failing step's stderr reaches you.** The terminal failure line shows its last lines (it used to print `failed (exit 2): ` and nothing else), and `fault.json` gains `stderr` (last 4 KiB), which the `debug_prompt` and `heal` also show.
