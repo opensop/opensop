@@ -10172,6 +10172,20 @@ jq -e --arg d "$o_team/processes/steps/build.sh" '.copied_scripts == [$d]' <<<"$
 echo "PASS: P0100-o — fork copies referenced relative scripts; the forked process runs"
 rm -rf "$p0100o"
 
+# (p) pull's default library is this repo's sops/ dir: {ref} in the base is
+# replaced by the pull ref. A file:// base with the default's shape resolves
+# the in-tree SOPs; the default itself names opensop/opensop/{ref}/sops.
+p0100p="$(mktemp -d)"; ln -s "$(cd "$here/.." && pwd)" "$p0100p/main"
+(cd "$p0100p" && OPENSOP_SOPS_BASE="file://$p0100p/{ref}/sops" "$cli" pull opensop/release-checklist --json 2>/dev/null) \
+  | jq -e '.ok == true and .name == "release-checklist"' >/dev/null || { echo "FAIL: P0100-p pull from in-tree sops/"; exit 1; }
+grep -q 'raw.githubusercontent.com/opensop/opensop/{ref}/sops' <<<"$("$cli" help)" || { echo "FAIL: P0100-p help names the default base"; exit 1; }
+mkdir -p "$p0100p/bin"; printf '#!/bin/sh\nfor a; do case "$a" in http*) echo "$a" > "%s/url" ;; esac; done; exit 22\n' "$p0100p" > "$p0100p/bin/curl"; chmod +x "$p0100p/bin/curl"
+(cd "$p0100p" && env -u OPENSOP_SOPS_BASE PATH="$p0100p/bin:$PATH" "$cli" pull opensop/x@v1 >/dev/null 2>&1) || true
+[ "$(cat "$p0100p/url")" = "https://raw.githubusercontent.com/opensop/opensop/v1/sops/opensop/x/x.sop.json" ] \
+  || { echo "FAIL: P0100-p default pull URL: $(cat "$p0100p/url")"; exit 1; }
+echo "PASS: P0100-p — pull resolves the in-tree sops/ library layout"
+rm -rf "$p0100p"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"

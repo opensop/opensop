@@ -933,8 +933,10 @@ ${C_BOLD}ENVIRONMENT${C_RESET}
   OPENSOP_TOKEN                 override config token for one call
   OPENSOP_HOME                  config + cache dir (default: ~/.opensop)
   OPENSOP_LOCAL_HOME            local-mode receipts dir (default: active cell's .opensop/ or ~/.opensop-local)
-  OPENSOP_SOPS_BASE             base URL for opensop pull (default: https://raw.githubusercontent.com/opensop/sops)
-                                  override with a file:// path or local dir for offline testing
+  OPENSOP_SOPS_BASE             base URL for opensop pull (default: the sops/ directory of the
+                                  opensop repo: https://raw.githubusercontent.com/opensop/opensop/{ref}/sops).
+                                  {ref} is replaced by the pull ref; a base without {ref} gets /<ref>
+                                  appended. Override with a file:// URL for offline testing
   OPENSOP_RECIPES_BASE          deprecated alias for OPENSOP_SOPS_BASE; honoured if OPENSOP_SOPS_BASE
                                   is unset, with a stderr deprecation warning
   NO_COLOR                      disable ANSI color output
@@ -8086,7 +8088,7 @@ Errors emit `{error, message, hint?}` to stderr in JSON mode.
 
 ## SOPs / the library
 
-The canonical public SOP library lives at github.com/opensop/sops —
+The public SOP library is the `sops/` directory of github.com/opensop/opensop —
 shareable `.sop.json` processes, one folder per SOP. Use `opensop pull`
 to fetch one and `opensop import` to bring in a local or piped file:
 
@@ -9066,16 +9068,17 @@ cmd_doctor() {
 # --------------------------------------------------------------------------- #
 # Subcommand: pull
 #
-# Download an SOP from the OpenSOP SOP library (<author>/<slug>/<slug>.sop.json
-# in the opensop/sops repo on GitHub).
+# Download an SOP from the OpenSOP SOP library (sops/<author>/<slug>/<slug>.sop.json
+# in the opensop/opensop repo on GitHub).
 #
 # Usage:
 #   opensop pull <author>/<slug>[@<ref>] [--output <path>] [--force] [--verify <sha256>]
 #
 # Resolution:
-#   Fetches: $OPENSOP_SOPS_BASE/<ref>/<author>/<slug>/<slug>.sop.json
+#   Fetches: $OPENSOP_SOPS_BASE/<author>/<slug>/<slug>.sop.json with {ref} in the
+#   base replaced by <ref> (a base without {ref} gets /<ref> appended).
 #   Default ref: main. May be a branch name or an immutable commit SHA for pinning.
-#   Default OPENSOP_SOPS_BASE: https://raw.githubusercontent.com/opensop/sops
+#   Default OPENSOP_SOPS_BASE: https://raw.githubusercontent.com/opensop/opensop/{ref}/sops
 #   Override OPENSOP_SOPS_BASE in tests to point at a local fixture dir (file://).
 #   OPENSOP_RECIPES_BASE is a deprecated alias, honoured (with a stderr warning)
 #   only when OPENSOP_SOPS_BASE is unset.
@@ -9275,9 +9278,10 @@ cmd_pull() {
     sops_base="$OPENSOP_RECIPES_BASE"
     info "OPENSOP_RECIPES_BASE is deprecated — use OPENSOP_SOPS_BASE instead" >&2
   else
-    sops_base="https://raw.githubusercontent.com/opensop/sops"
+    sops_base="https://raw.githubusercontent.com/opensop/opensop/{ref}/sops"
   fi
-  local fetch_url="${sops_base}/${ref}/${author}/${slug}/${slug}.sop.json"
+  [[ "$sops_base" == *"{ref}"* ]] && sops_base="${sops_base//\{ref\}/$ref}" || sops_base="${sops_base}/${ref}"
+  local fetch_url="${sops_base}/${author}/${slug}/${slug}.sop.json"
 
   # Progress goes to stderr so stdout stays clean for JSON consumers.
   info "fetching ${fetch_url} …" >&2
@@ -9305,7 +9309,7 @@ cmd_pull() {
     if [[ ! -f "$local_path" ]]; then
       rm -f "$tmp_file"
       die "SOP not found at ${fetch_url}" "file_not_found" \
-          "check the author/slug — valid slugs live in the opensop/sops library"
+          "check the author/slug — valid slugs live in sops/ of github.com/opensop/opensop"
     fi
     cp "$local_path" "$tmp_file" || { rm -f "$tmp_file"; die "could not copy from $local_path" "cli_error"; }
   else
@@ -9314,7 +9318,7 @@ cmd_pull() {
       rm -f "$tmp_file"
       die "could not download SOP (curl exit $curl_rc): ${fetch_url}" \
           "network_error" \
-          "check the author/slug and your network — valid slugs live in the opensop/sops library"
+          "check the author/slug and your network — valid slugs live in sops/ of github.com/opensop/opensop"
     fi
   fi
 
