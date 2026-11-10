@@ -9471,6 +9471,13 @@ for b in claude codex cursor-agent kimi; do
 [ "${1:-}" = "--version" ] && { echo "fake-$(basename "$0") 1.0"; exit 0; }
 echo "$(basename "$0") cwd=$PWD stdin=$(grep -c 'Say ok' || true)" >> "$FAKE_CLI_LOG"
 [ -n "${FAKE_SLEEP:-}" ] && exec sleep "$FAKE_SLEEP"
+# FAKE_FAIL: each CLI's real failure shape (claude: is_error envelope on stdout).
+case "${FAKE_FAIL:-}" in
+  claude-limit) echo "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your session limit · resets 5pm\"}"; exit 1 ;;
+  kimi-limit)   echo "kimi version 2.2.0" >&2
+                echo "error: failed to run prompt: provider.auth_error: 403 You've reached your 5-hour usage limit." >&2; exit 1 ;;
+  crash)        echo "boom: worker crashed" >&2; exit 2 ;;
+esac
 # FAKE_BAD_FIRST=<file>: the first call answers schema-invalid JSON (forces one retry).
 ans='{"ok":true}'
 if [ -n "${FAKE_BAD_FIRST:-}" ] && [ ! -e "$FAKE_BAD_FIRST" ]; then : > "$FAKE_BAD_FIRST"; ans='{"nope":1}'; fi
@@ -9882,6 +9889,23 @@ p_err="$(jq -r 'select(.step=="ask") | .output.error' "$OPENSOP_LOCAL_HOME/runs/
 [[ "$p_err" == "cannot render prompt: template render failed"*"too large for argv"* && "$p_err" != *"missing model"* ]] \
   || { echo "FAIL: P092-p render failure should carry the jq error, got: $p_err"; exit 1; }
 echo "PASS: P092-p — a failed template render reports the real error, not \"missing model\""
+
+# (q) a failed CLI call records its stderr + provider message; a usage limit is
+# classified provider_limit (no retry), a plain crash is not.
+for spec in "claude-code:x read-only claude-limit" "kimi: full-access kimi-limit" "codex:x read-only crash"; do
+  set -- $spec
+  q_out="$(FAKE_FAIL="$3" PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json 2>/dev/null)" \
+    && { echo "FAIL: P092-q $3 should fail the run"; exit 1; }
+  q_rec="$(jq -c 'select(.step=="ask")' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$q_out")/audit.jsonl")"
+  case "$3" in
+    claude-limit) want='.output.error == "provider_limit: You'"'"'ve hit your session limit · resets 5pm" and (.output.provider_message | test("session limit"))' ;;
+    kimi-limit)   want='(.output.error | startswith("provider_limit: failed to run prompt: provider.auth_error: 403")) and (.output.stderr | test("usage limit"))' ;;
+    crash)        want='.output.error == "codex exited 2" and (.output.stderr | test("boom: worker crashed")) and .output.provider_message == ""' ;;
+  esac
+  jq -e "$want and .attempts == 1" <<<"$q_rec" >/dev/null \
+    || { echo "FAIL: P092-q $3 receipt: $q_rec"; exit 1; }
+done
+echo "PASS: P092-q — a failed CLI call records stderr + provider message; usage limits are provider_limit, crashes are not"
 
 unset FAKE_CLI_LOG
 rm -rf "$p092"

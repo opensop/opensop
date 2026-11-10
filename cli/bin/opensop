@@ -3145,6 +3145,35 @@ _local_exit_check() {
   esac
 }
 
+# _local_llm_fail <cli> <bin> <what> <stdout> <stderr_file>
+# Prints the step's failure output for a CLI-provider call: {error, stderr
+# (first 1 KiB + last 3 KiB), provider_message}. provider_message is the CLI's
+# own error text: claude/cursor .result of an is_error envelope (cursor: else its
+# first stderr line); codex's last turn.failed/error event (unwrapping a JSON
+# API error); kimi's "error: ..." stderr line. A usage,
+# quota or rate limit becomes error "provider_limit: <message>" so the caller
+# can tell it from a crash; the engine never retries it.
+_local_llm_fail() {
+  jq -nc --arg cli "$1" --arg bin "$2" --arg what "$3" --arg out "$4" --rawfile err "$5" '
+    ($err | if length > 4096 then .[:1024] + "\n…\n" + .[-3072:] else . end) as $e
+    | (if $cli == "claude-code" or $cli == "cursor" then
+         ($out | try fromjson catch null) | if type == "object" and .is_error == true then (.result // .error // "")
+         elif $cli == "cursor" then [$err | split("\n")[] | select(test("\\S"))] | first // "" | .[:500] else "" end
+       elif $cli == "codex" then
+         [$out | split("\n")[] | try fromjson catch empty | objects
+          | if .type == "turn.failed" then .error.message elif .type == "error" then .message else empty end] | last // ""
+         | (try (fromjson | .error.message // .message) catch null) // .
+       elif $cli == "kimi" then
+         [$err | split("\n")[] | select(startswith("error: ")) | .[7:]] | last // ""
+       else "" end | tostring) as $pm
+    | "(hit|reached) (your|the) [^.\n]{0,40}limit|usage limit|rate[ _-]?limit|quota|too many requests|\\b429\\b|resource_exhausted" as $re
+    | ([$e | split("\n")[] | select(test($re; "i"))] | first // "") as $limit_line
+    | {error: (if ($pm | test($re; "i")) then "provider_limit: " + $pm
+               elif $limit_line != "" then "provider_limit: " + $limit_line
+               else $bin + " " + $what + (if $pm != "" then ": " + $pm else "" end) end),
+       stderr: $e, provider_message: $pm}'
+}
+
 # _local_llm_add_usage <source> <raw_output>
 # Parse one llm call's token usage + cost and add it to s_llm_usage (the
 # caller's, summed across retries). Normalized so providers compare:
@@ -3883,9 +3912,12 @@ $llm_attempt_prompt"
             llm_raw_text="$OSL_LLM_STUB"
             [[ -n "$llm_lastmsg" ]] && rm -f "$llm_lastmsg"
           elif [[ -n "$llm_cli" ]]; then
-            local llm_cli_out="" llm_cli_rc=0 llm_to=()
+            local llm_cli_out="" llm_cli_stdout="" llm_cli_rc=0 llm_to=() llm_errf
             [[ -n "$llm_timeout" ]] && llm_to=(timeout --kill-after=10 "$llm_timeout")
-            llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" < <(printf '%s' "$llm_stdin") 2>>"$run_dir/$sid.stderr.log")" || llm_cli_rc=$?
+            llm_errf="$(mktemp)"
+            llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" < <(printf '%s' "$llm_stdin") 2>"$llm_errf")" || llm_cli_rc=$?
+            llm_cli_stdout="$llm_cli_out"
+            cat "$llm_errf" >>"$run_dir/$sid.stderr.log"
             # Usage first: a failed or timed-out call may still have spent tokens.
             _local_llm_add_usage "$llm_cli" "$llm_cli_out"
             # The codex -o file is read and removed here on every outcome (success,
@@ -3895,21 +3927,26 @@ $llm_attempt_prompt"
               llm_cli_out="$(cat "$llm_lastmsg" 2>/dev/null || true)"; rm -f "$llm_lastmsg"
             fi
             if [[ -n "$llm_timeout" ]] && [[ "$llm_cli_rc" -eq 124 || "$llm_cli_rc" -eq 137 ]]; then
-              out_raw="{\"error\":\"$llm_bin timed out after $llm_timeout (step timeout)\"}"; rc=1; llm_failed=true; llm_ok=false; continue
+              out_raw="$(_local_llm_fail "$llm_cli" "$llm_bin" "timed out after $llm_timeout (step timeout)" "$llm_cli_stdout" "$llm_errf")"
+              rm -f "$llm_errf"; rc=1; llm_failed=true; llm_ok=false; continue
             fi
             if [[ "$llm_cli_rc" -ne 0 ]]; then
-              out_raw="{\"error\":\"$llm_bin exited $llm_cli_rc (stderr in this receipt)\"}"; rc=1; llm_failed=true; llm_ok=false; continue
+              out_raw="$(_local_llm_fail "$llm_cli" "$llm_bin" "exited $llm_cli_rc" "$llm_cli_stdout" "$llm_errf")"
+              rm -f "$llm_errf"; rc=1; llm_failed=true; llm_ok=false; continue
             fi
             case "$llm_cli" in
               claude-code|cursor)
                 # --output-format json: a single result object; .result is the final text.
                 if ! llm_raw_text="$(jq -er 'if .is_error == true then error("is_error") else .result end | strings' <<<"$llm_cli_out" 2>/dev/null)"; then
-                  out_raw="$(jq -nc --arg b "$llm_bin" --arg o "${llm_cli_out:0:300}" '{error:($b + " returned no result text"), detail:$o}')"; rc=1; llm_failed=true; llm_ok=false; continue
+                  out_raw="$(_local_llm_fail "$llm_cli" "$llm_bin" "returned no result text" "$llm_cli_stdout" "$llm_errf" \
+                    | jq -c --arg o "${llm_cli_out:0:300}" '. + {detail:$o}')"
+                  rm -f "$llm_errf"; rc=1; llm_failed=true; llm_ok=false; continue
                 fi ;;
               # kimi prints the final answer on stdout behind a "• " bullet (thinking goes to stderr).
               kimi) llm_raw_text="$(sed '1s/^• //' <<<"$llm_cli_out")" ;;
               *)    llm_raw_text="$llm_cli_out" ;;
             esac
+            rm -f "$llm_errf"
           else
             # Build request body.
             local llm_req_body
