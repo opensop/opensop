@@ -110,7 +110,9 @@ opensop skill paths                             # where each runtime looks
 opensop doctor                                  # version, deps, installed skills
 ```
 
-**Hermes Agent plugin (coming):** [opensop/hermes-opensop](https://github.com/opensop/hermes-opensop) gives Hermes tools to start, inspect, submit and retry runs. It re-anchors the agent on its current step every turn, nudges it to finish that step before it wraps up a turn in which it edited code, and refuses to submit a step reserved for a person. It is a seat belt, not a sandbox.
+**Hermes Agent plugin:** [opensop/hermes-opensop](https://github.com/opensop/hermes-opensop) gives Hermes tools to start, inspect, submit and retry runs. It re-anchors the agent on its current step every turn, nudges it to finish that step before it wraps up a turn in which it edited code, and refuses to submit a step reserved for a person. It is a seat belt, not a sandbox.
+
+Install it with `hermes plugins install https://github.com/opensop/hermes-opensop`.
 
 The full agent guide is [`docs/AGENTS.md`](./docs/AGENTS.md).
 
