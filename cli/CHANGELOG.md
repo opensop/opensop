@@ -9,6 +9,10 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ## [Unreleased]
 
+### Fixed
+
+- A resumed run's total `duration_ms` no longer drops below the duration recorded before it paused when the wall clock steps back (NTP, VM host sync).
+
 ## [0.10.0] — 2026-11-11
 
 This release makes the local engine run agent loops end to end. `judgment` and `loop` now run locally. `llm` and `judgment` steps can call Claude Code, Codex, Cursor or Kimi as CLI-backed providers with mapped permissions, and each call writes its token usage and cost to the receipt. Two agent-loop examples (`planner-worker`, `dev-loop`) are included. The release also fixes a set of first-run problems. Pretty output works in a terminal again. `run` validates inputs like `dry-run`, and `dry-run` handles loops and step types the engine cannot run. A failing step's stderr reaches you. `status` and the `next` hints say exactly what to submit. `upgrade` installs the latest release, `pull` works out of the box, `fork` copies the scripts a process runs, and `onboard` drops its bench step so every next step works on a curl install.
