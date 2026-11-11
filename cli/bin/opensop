@@ -5697,7 +5697,7 @@ local_submit() {
   # loading, output normalisation, context merge, and receipt construction — the
   # full submission processing interval per SPEC §10.2.
   local submit_end_ms; submit_end_ms="$(_local_now_ms)"
-  local submit_duration_ms; submit_duration_ms=$(( submit_end_ms - submit_start_ms ))
+  local submit_duration_ms; submit_duration_ms=$(( submit_end_ms - submit_start_ms )); (( submit_duration_ms < 0 )) && submit_duration_ms=0
 
   jq -nc \
     --arg rid "$run_id" --arg sid "$step_id" --arg t "$resumed_stype" --arg ex "$resumed_sexec" \
