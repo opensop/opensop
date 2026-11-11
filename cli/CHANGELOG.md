@@ -44,6 +44,7 @@ This release makes the local engine run agent loops end to end. `judgment` and `
 
 ### Fixed
 
+- `duration_ms` is never negative when the wall clock steps backwards (NTP or VM host time sync); it is clamped at 0.
 - `status` lists steps only; a `heal` event no longer shows as an empty step row (`show` and `history` still have it).
 - A run resumed with `submit` or `heal` from another directory runs its `automated` and `shell` steps in the directory the run was started in, as the docs say, so "finish from anywhere" holds. A relative `OPENSOP_LOCAL_HOME` is made absolute.
 - `help agents` and `help agents --json` point to `docs/AGENTS.md` (as a GitHub URL, so it works on a curl install). They named `docs/CLAUDE-INTEGRATION.md`, which does not exist.

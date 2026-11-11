@@ -3120,6 +3120,16 @@ _local_now_ms() {
   fi
   echo "$ms"
 }
+
+# _local_ms_since <start_ms> — ms elapsed since start_ms, never negative: the
+# wall clock can step backwards (NTP, VM host time sync), and a receipt must not
+# record a negative duration. ponytail: wall-clock based; a monotonic source
+# (/proc/uptime) would be exact across steps, if that precision ever matters.
+_local_ms_since() {
+  local d=$(( $(_local_now_ms) - $1 ))
+  (( d < 0 )) && d=0
+  echo "$d"
+}
 # timestamp + PID + $RANDOM: distinct across processes (PID) and hardened against
 # the rare same-second/recycled-PID collision. `date %N` is unportable (BSD), so
 # we don't rely on sub-second precision.
@@ -3538,7 +3548,7 @@ local_run() {
     local wait_meta wait_expects wait_reason
     wait_meta="$(_local_wait_meta "$snap_file" "$wait_index")"
     wait_expects="$(jq -c '.expects' <<<"$wait_meta")"; wait_reason="$(jq -r '.reason' <<<"$wait_meta")"
-    local wait_duration_ms; wait_duration_ms=$(( $(_local_now_ms) - started_ms ))
+    local wait_duration_ms; wait_duration_ms=$(_local_ms_since "$started_ms")
     jq -c --arg s "waiting" \
           --argjson idx "$((wait_index + 1))" \
           --argjson widx "$wait_index" \
@@ -3566,7 +3576,7 @@ local_run() {
   fi
 
   local ended; ended="$(_local_now)"
-  local run_duration_ms; run_duration_ms=$(( $(_local_now_ms) - started_ms ))
+  local run_duration_ms; run_duration_ms=$(_local_ms_since "$started_ms")
   jq -c --arg s "$run_status" --arg e "$ended" --argjson dur "$run_duration_ms" \
      '.status=$s | .ended_at=$e | .duration_ms=$dur' \
      "$run_dir/manifest.json" > "$run_dir/manifest.json.tmp" && mv "$run_dir/manifest.json.tmp" "$run_dir/manifest.json"
@@ -3766,7 +3776,7 @@ _local_step_loop() {
         # the field consistently with all other step types.  result_hash="pending"
         # is the canonical sentinel for a step that has not yet produced output
         # (local_diff treats "pending" as non-comparable per Fix 2).
-        local _form_pause_ms; _form_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+        local _form_pause_ms; _form_pause_ms=$(_local_ms_since "$s_started_ms")
         jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                --arg a "$s_started" --argjson dur "$_form_pause_ms" \
           '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -3778,7 +3788,7 @@ _local_step_loop() {
         # Approval pause — byte-parity with StepExecutors::Approval (reason: waiting_for_approval).
         # context.json is already up-to-date (written after last completed step).
         # C1a Fix 3: same duration_ms + result_hash:"pending" treatment as form above.
-        local _appr_pause_ms; _appr_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+        local _appr_pause_ms; _appr_pause_ms=$(_local_ms_since "$s_started_ms")
         jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                --arg a "$s_started" --argjson dur "$_appr_pause_ms" \
           '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -3804,7 +3814,7 @@ _local_step_loop() {
           # C1a Fix 3: duration_ms + result_hash:"pending" for consistency.
           local wait_until_val _wait_pause_ms
           wait_until_val="$(jq -r '.until' <<<"$wait_block")"
-          _wait_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+          _wait_pause_ms=$(_local_ms_since "$s_started_ms")
           jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                  --arg a "$s_started" --arg u "$wait_until_val" --argjson dur "$_wait_pause_ms" \
             '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -4287,7 +4297,7 @@ $llm_attempt_prompt"
           [[ -n "$jd_escalate" ]] && jd_proposal="$out_raw"
         fi
         if [[ -n "$jd_escalate" ]]; then
-          local _jd_pause_ms; _jd_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+          local _jd_pause_ms; _jd_pause_ms=$(_local_ms_since "$s_started_ms")
           jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                  --arg a "$s_started" --argjson dur "$_jd_pause_ms" --arg why "$jd_escalate" \
                  --argjson prop "$jd_proposal" --arg pv "$s_llm_provider" --arg m "$s_llm_model" \
@@ -4648,7 +4658,7 @@ $llm_attempt_prompt"
                 # Outbound request succeeded — now pause.
                 # C1a follow-up: add duration_ms (start→pause) + result_hash:"pending"
                 # to match the contract already implemented for form/approval/wait.until.
-                local _wh_cb_pause_ms; _wh_cb_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+                local _wh_cb_pause_ms; _wh_cb_pause_ms=$(_local_ms_since "$s_started_ms")
                 jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                        --arg a "$s_started" --arg cb "$wh_cb_id" --argjson dur "$_wh_cb_pause_ms" \
                   '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -4856,7 +4866,7 @@ $llm_attempt_prompt"
               # Append a waiting audit receipt for this parent step.
               # C1a follow-up: add duration_ms (start→pause) + result_hash:"pending"
               # to match the contract already implemented for form/approval/wait.until.
-              local _sp_pause_ms; _sp_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+              local _sp_pause_ms; _sp_pause_ms=$(_local_ms_since "$s_started_ms")
               jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                      --arg a "$s_started" --arg crid "$sp_child_run_id" --arg crdir "$sp_child_run_dir" \
                      --argjson dur "$_sp_pause_ms" \
@@ -5011,7 +5021,7 @@ $llm_attempt_prompt"
     fi
     local s_ended_ms; s_ended_ms="$(_local_now_ms)"
     s_ended="$(_local_now)"
-    local step_duration_ms; step_duration_ms=$(( s_ended_ms - s_started_ms ))
+    local step_duration_ms; step_duration_ms=$(( s_ended_ms - s_started_ms )); (( step_duration_ms < 0 )) && step_duration_ms=0
     local sstatus; [ "$rc" -eq 0 ] && sstatus="completed" || sstatus="failed"
     # Fold the step's stderr into the receipt so `show` surfaces it; drop the
     # temp log afterwards (and never leave an empty one lying around).

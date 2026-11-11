@@ -10398,6 +10398,21 @@ jq -s -e --arg s "$ad_sha" '[.[] | select(.step=="t" and .status != null) | .scr
 echo "PASS: P0100-ad — script receipts carry script_sha256; status has no heal pseudo-rows"
 rm -rf "$p0100ad"
 
+# (ae) a wall clock that steps backwards (NTP, VM host sync) never yields a
+# negative duration_ms. The fake `date` returns 1s less on every ms query.
+p0100ae="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100ae/h"; mkdir -p "$p0100ae/bin"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "$1" = "+%s%3N" ]; then' \
+  '  n=$(cat "$AE_DIR/n" 2>/dev/null || echo 2000000000000); echo $((n - 1000)) > "$AE_DIR/n"; echo "$n"' \
+  'else exec "$AE_REAL_DATE" "$@"; fi' > "$p0100ae/bin/date"
+chmod +x "$p0100ae/bin/date"
+echo '{"name":"ae","version":"1","steps":[{"id":"a","type":"shell","run":"echo {}"},{"id":"b","type":"form"}]}' > "$p0100ae/ae.json"
+ae_id="$( (cd "$p0100ae" && AE_DIR="$p0100ae" AE_REAL_DATE="$(command -v date)" PATH="$p0100ae/bin:$PATH" "$cli" run ae.json --json 2>/dev/null) | jq -r .run_id || true)"
+jq -s -e 'length == 2 and all(.[]; .duration_ms >= 0)' "$p0100ae/h/runs/$ae_id/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P0100-ae negative duration: $(jq -c .duration_ms "$p0100ae/h/runs/$ae_id/audit.jsonl" | tr '\n' ' ')"; exit 1; }
+echo "PASS: P0100-ae — a backwards clock never records a negative duration_ms"
+rm -rf "$p0100ae"
+
 # Cleanup.
 unset OPENSOP_SOPS_BASE
 rm -rf "$pull_workdir" "$import_workdir"
