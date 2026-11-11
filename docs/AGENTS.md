@@ -687,7 +687,7 @@ opensop skill paths                          # authoritative flavour → path ta
 opensop skill install --runtime <flavour> --skill opensop-build-harness   # the process-authoring skill
 ```
 
-A Hermes Agent plugin is coming at [opensop/hermes-opensop](https://github.com/opensop/hermes-opensop): tools to start, inspect, submit and retry runs; it re-anchors the agent on its current step every turn, nudges it to finish that step before it wraps up a turn in which it edited code, and refuses to submit a step reserved for a person. It is a seat belt, not a sandbox.
+The Hermes Agent plugin lives at [opensop/hermes-opensop](https://github.com/opensop/hermes-opensop): tools to start, inspect, submit and retry runs; it re-anchors the agent on its current step every turn, nudges it to finish that step before it wraps up a turn in which it edited code, and refuses to submit a step reserved for a person. It is a seat belt, not a sandbox.
 
 | Flavour | Scope | Canonical install path |
 |---|---|---|
