@@ -10411,6 +10411,14 @@ ae_id="$( (cd "$p0100ae" && AE_DIR="$p0100ae" AE_REAL_DATE="$(command -v date)" 
 jq -s -e 'length == 2 and all(.[]; .duration_ms >= 0)' "$p0100ae/h/runs/$ae_id/audit.jsonl" >/dev/null \
   || { echo "FAIL: P0100-ae negative duration: $(jq -c .duration_ms "$p0100ae/h/runs/$ae_id/audit.jsonl" | tr '\n' ' ')"; exit 1; }
 echo "PASS: P0100-ae — a backwards clock never records a negative duration_ms"
+# (af) the resumed run's total never drops below its recorded pre-pause duration
+# when the clock steps back between pause and resume.
+ae_mf="$p0100ae/h/runs/$ae_id/manifest.json"
+jq '.duration_ms = 5000' "$ae_mf" > "$ae_mf.tmp" && mv "$ae_mf.tmp" "$ae_mf"
+(cd "$p0100ae" && AE_DIR="$p0100ae" AE_REAL_DATE="$(command -v date)" PATH="$p0100ae/bin:$PATH" "$cli" submit "$ae_id" b --json >/dev/null 2>&1) || true
+jq -e '.status == "completed" and .duration_ms >= 5000' "$ae_mf" >/dev/null \
+  || { echo "FAIL: P0100-af resumed total shrank: $(jq -c '{status,duration_ms}' "$ae_mf")"; exit 1; }
+echo "PASS: P0100-af — a backwards clock never shrinks a resumed run's total duration_ms"
 rm -rf "$p0100ae"
 
 # Cleanup.
