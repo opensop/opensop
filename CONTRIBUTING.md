@@ -43,16 +43,16 @@ bash cli/test/test.sh
 
 ### Workflow
 
-1. **Open an issue** for non-trivial changes.
+1. **Open an issue first** for non-trivial changes.
 2. **Branch from `main`**: `git checkout -b fix/short-description`.
 3. **Make the change** with tests. Cover the failure path, not just the happy path.
 4. **Run the gate**: `bash -n cli/bin/opensop && bash cli/test/test.sh` — both must pass.
 5. **Update the surfaces that document the change**: `cmd_help` text, `cli/README.md` subcommand table, `cli/CHANGELOG.md` under `[Unreleased]`.
-6. **Open a PR** against `opensop/opensop:main`. Answer: what's the problem, how does this solve it, what did I test.
+6. **Open a PR** against `opensop/opensop:main`. Answer: what's the problem, how does this solve it, what did I test. CI (`.github/workflows/cli-tests.yml`) runs the same gate.
 
 ### Standards
 
-- **No `eval` with user input.** The `ConditionEvaluator` pattern exists for safe expression evaluation.
+- **No `eval` with user input.** Conditions go through the CLI's small jq-based evaluator (`<ref> <op> <literal>`), never `eval`.
 - **`set -euo pipefail` throughout.** Guard any command substitution running user-supplied steps: `out=$(...) || rc=$?`.
 - **bash 4+.** macOS ships 3.2 — don't use 4-only features without documenting the requirement.
 - **Output contract.** Normal output goes through `emit_pretty_or_json`. Errors go through `die "msg" "code" "hint"`.
@@ -63,7 +63,7 @@ bash cli/test/test.sh
 
 Two layers, both running [gitleaks](https://github.com/gitleaks/gitleaks):
 
-- **Local pre-commit hook** (after `bin/install-git-hooks`) — blocks commits containing detected secrets.
+- **Local pre-commit hook** (optional) — run `gitleaks git --pre-commit --staged --config .gitleaks.toml` before committing, or wire it into your own pre-commit hook.
 - **CI on every PR** (`.github/workflows/secret-scan.yml`) — the source of truth.
 
 Allowlist entries for known-safe placeholders (test fixtures, doc examples) live in `.gitleaks.toml`.
@@ -89,7 +89,7 @@ git remote -v
 # public   https://github.com/opensop/opensop.git
 ```
 
-Add a `processes/<your-org>/` directory for your private processes and gitignore it in the public repo (it's already reserved upstream — check `.gitignore`). In your private fork, remove that ignore line.
+Keep your private processes in `processes/private/` — that path is already gitignored upstream (see `.gitignore`), so a public clone never tracks it. In your private fork, remove that ignore line.
 
 ### The upstream-first rule
 
@@ -111,7 +111,7 @@ git push private main
 
 ### Private processes
 
-- **Private processes live only in your fork.** Store them in a dedicated directory (e.g. `processes/<your-org>/`) that's gitignored in the public repo.
+- **Private processes live only in your fork.** Store them in `processes/private/`, which is gitignored in the public repo.
 - **Never commit private processes to a branch that pushes to `public`.**
 - **Treat the spec and CLI as stable API.** If a change would break your private processes, raise it in the upstream PR.
 
@@ -121,7 +121,8 @@ git push private main
 
 - **Bugs:** open an issue on `opensop/opensop` with repro steps and expected behavior.
 - **Security:** please don't open public issues for security reports. See [`SECURITY.md`](SECURITY.md) for the disclosure policy.
-- **Spec proposals:** open a discussion first — the process format is a contract.
+- **Spec proposals:** open an issue first — the process format is a contract.
+- **Conduct:** see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ---
 

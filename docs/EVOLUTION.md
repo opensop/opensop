@@ -1,6 +1,8 @@
 # EVOLUTION.md — Mineralization Policy for OpenSOP
 
-**Status: experimental.** The `m`-tier metadata fields and the `opensop evolve` command are not yet frozen in the SPEC. They land here in practice; the spec contract will follow in S0b.
+> **Design note, not shipped.** There is no `opensop evolve` command and the `m`-tier fields are not in the SPEC; what ships today is `opensop annotate` / `lineage` / `fork` (SPEC §7).
+
+**Status: experimental.** The `m`-tier metadata fields and the `opensop evolve` command are not yet frozen in the SPEC.
 
 ---
 
@@ -197,7 +199,7 @@ Auto-deletion is forbidden. All archives are recoverable.
 | Layer | Cadence | Trigger |
 |---|---|---|
 | Tier definitions and transition rules | Quarterly | Evidence that the thresholds are wrong |
-| Substrate field shapes | With SPEC | S0b spec freeze |
+| Substrate field shapes | With SPEC | A SPEC release that freezes them |
 | The strategic frame (why harden at all) | Annual or on major model-generation shift | Requires human sign-off |
 
 ---

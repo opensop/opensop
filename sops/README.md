@@ -1,8 +1,6 @@
 # OpenSOP SOP Examples
 
-A small set of reusable, shareable `.sop.json` process files kept in this repo as **examples and test fixtures** for the CLI's `pull`/`import`/`dry-run` paths.
-
-**The canonical public SOP library lives at [github.com/opensop/sops](https://github.com/opensop/sops).** `opensop pull` fetches from that repo by default. The SOPs here have not been through the library's publishing bar (10 verified runs) and are not mirrored there — treat them as local examples, not the library.
+A small set of reusable, shareable `.sop.json` process files. They are examples to start from and test fixtures for the CLI's `pull`/`import`/`dry-run` paths. **`opensop pull` fetches from this directory by default** (on the `main` branch of this repo, or the ref you pin).
 
 ## Layout
 
@@ -18,23 +16,23 @@ Example: `sops/opensop/daily-standup-notes/daily-standup-notes.sop.json`
 ## How to pull an SOP
 
 ```bash
-# Pull the latest version (from main) — fetches from github.com/opensop/sops
-opensop pull opensop/daily-standup-notes
+# Pull the latest version (from main) of sops/opensop/release-checklist/
+opensop pull opensop/release-checklist
 
 # Pull and pin to an immutable commit SHA for reproducibility
-opensop pull opensop/daily-standup-notes@a1b2c3d
+opensop pull opensop/release-checklist@a1b2c3d
 
 # Write to a specific path instead of the default ./<slug>.sop.json
-opensop pull opensop/daily-standup-notes --output ~/processes/standup.sop.json
+opensop pull opensop/release-checklist --output ~/processes/release.sop.json
 
 # Verify the file matches a known SHA-256 (supply the hash out-of-band)
-opensop pull opensop/daily-standup-notes --verify <sha256-hex>
+opensop pull opensop/release-checklist --verify <sha256-hex>
 ```
 
 The CLI writes the file and prints a summary (name, version, step count, step types, source, SHA-256). It never executes the file automatically. **Read its `run` commands before running** — dry-run previews the step flow only, not the command bodies:
 
 ```bash
-jq '(.process.steps // .steps)[] | {id, type, run}' ./daily-standup-notes.sop.json
+jq '(.process.steps // .steps)[] | {id, type, run}' ./release-checklist.sop.json
 ```
 
 ## How to import from a local file or stdin
@@ -80,16 +78,14 @@ The `sha256` printed after every pull is for pinning and identification (both th
 | `email-spam-filter` | ADVISORY LLM spam triage: classify (spam/ham + confidence) and recommend deliver vs quarantine — delivery only for high-confidence ham; injection-aware (advisory; LLM classifiers are susceptible to crafted-email prompt injection); not an authenticated gate |
 | `scoped-change-delegation` | Collect a scoped code-change task, gate delegating it to a worker agent on planner approval, then emit a delegation record — exercises SPEC 0.9.1 §2.9's agent-work fields (`evidence`, `agent_contract`, `prompt`, `isolation`) |
 
-These exist as CLI test fixtures and `opensop dry-run`/`opensop import` examples. They are not published to the `opensop/sops` library.
+They double as CLI test fixtures, so keep them passing `opensop dry-run`.
 
-## How to contribute to the public library
+## How to contribute an SOP
 
-The SOP library that `opensop pull` fetches from is a separate repo: **[github.com/opensop/sops](https://github.com/opensop/sops)**. Contribute there, not here:
-
-1. Fork that repo and create your SOP under `<your-github-username>/<slug>/<slug>.sop.json`.
-2. Each SOP must be a valid `.sop.json` that passes `opensop dry-run`.
+1. Fork this repo and add your SOP under `sops/<your-github-username>/<slug>/<slug>.sop.json`.
+2. It must be a valid `.sop.json` that passes `opensop dry-run`.
 3. Include the `sop` object (`recipe` is accepted as a deprecated alias) with `source`, `install`, and at least one tag.
 4. Use only safe, synthetic examples — no PII, no secrets, no destructive commands.
-5. Open a pull request. The title should be `feat(sops): add <author>/<slug>`.
+5. Open a pull request titled `feat(sops): add <author>/<slug>`.
 
-SOPs that contain destructive shell commands, network calls to untrusted endpoints, or secrets will be rejected. New SOPs go through a publishing bar (verified runs) before being listed as official — see the `opensop/sops` repo for the current process.
+SOPs that contain destructive shell commands, network calls to untrusted endpoints, or secrets will be rejected.

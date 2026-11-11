@@ -12,11 +12,43 @@
 
 set -euo pipefail
 
+# Linux caps ONE argv/env string at 128 KiB (MAX_ARG_STRLEN), and a long run's
+# context, prompts and step outputs outgrow that — jq then fails to exec. This
+# wrapper moves every large --arg/--argjson value into a temp file
+# (--rawfile / --slurpfile, rebound to the same $name), so call sites stay as
+# written. 16384 chars is ≤ 64 KiB even at 4 bytes/char.
+jq() {
+  local a=() pre="" d="" f n=0 filter_at=-1
+  while (( $# )); do
+    case "$1" in
+      --arg|--argjson)
+        if (( ${#3} > 16384 )); then
+          [[ -n "$d" ]] || d="$(mktemp -d 2>/dev/null)" \
+            || { echo "jq: argument --$2 is too large for argv and no temp file could be created (TMPDIR=${TMPDIR:-/tmp})" >&2; return 2; }
+          f="$d/$n"; n=$((n + 1)); printf '%s' "$3" > "$f"
+          if [[ "$1" == --arg ]]; then a+=(--rawfile "$2" "$f")
+          else a+=(--slurpfile "_osl_big_$2" "$f"); pre+="(\$_osl_big_$2[0]) as \$$2 | "; fi
+        else a+=("$1" "$2" "$3"); fi
+        shift 3 ;;
+      --slurpfile|--rawfile) a+=("$1" "$2" "$3"); shift 3 ;;
+      --indent|-L) a+=("$1" "$2"); shift 2 ;;
+      -*) a+=("$1"); shift ;;
+      *) (( filter_at >= 0 )) || filter_at=${#a[@]}; a+=("$1"); shift ;;
+    esac
+  done
+  if [[ -n "$pre" ]]; then
+    if (( filter_at >= 0 )); then a[filter_at]="$pre${a[filter_at]}"; else a+=("$pre."); fi
+  fi
+  local rc=0; command jq "${a[@]}" || rc=$?
+  [[ -z "$d" ]] || rm -rf "$d"
+  return "$rc"
+}
+
 # --------------------------------------------------------------------------- #
 # Constants & paths
 # --------------------------------------------------------------------------- #
 
-readonly OPENSOP_CLI_VERSION="0.9.1"
+readonly OPENSOP_CLI_VERSION="0.10.0"
 # Single source of truth for supported opensop envelope (SPEC) versions.
 # `schema validate`, `--version`, and `onboard`'s stamped envelope all derive from this.
 readonly SPEC_VERSIONS="0.1 0.2 0.6 0.7 0.9.1"
@@ -28,7 +60,10 @@ readonly CACHE_FILE="$OPENSOP_HOME/instances.tsv"
 # Output helpers
 # --------------------------------------------------------------------------- #
 
-is_tty() { [[ -t 1 ]]; }
+# Decided once, at startup: callers often run inside $(...), where fd 1 is a
+# pipe even when the user's terminal is a TTY.
+_STDOUT_TTY=false; [[ -t 1 ]] && _STDOUT_TTY=true
+is_tty() { [[ "$_STDOUT_TTY" == true ]]; }
 
 # Color support — only when stdout is a TTY and NO_COLOR is unset.
 if is_tty && [[ -z "${NO_COLOR:-}" ]]; then
@@ -106,6 +141,8 @@ else
   _OPENSOP_LOCAL_HOME_EXPLICIT=false
 fi
 OPENSOP_LOCAL_HOME="${OPENSOP_LOCAL_HOME:-$HOME/.opensop-local}"
+# Absolute, because script steps run in the run's own cwd (see _local_exec_step).
+[[ "$OPENSOP_LOCAL_HOME" = /* ]] || OPENSOP_LOCAL_HOME="$PWD/$OPENSOP_LOCAL_HOME"
 
 emit_json() {
   # Print compact JSON (stdin) — used for --json and piped output.
@@ -127,7 +164,7 @@ emit_pretty_or_json() {
 # --------------------------------------------------------------------------- #
 
 require_jq() {
-  command -v jq >/dev/null 2>&1 || die "jq is required — install it first" "missing_dependency" "brew install jq"
+  type -P jq >/dev/null 2>&1 || die "jq is required — install it first" "missing_dependency" "brew install jq"
 }
 
 require_curl() {
@@ -207,11 +244,13 @@ api_call() {
   [[ -n "${OPENSOP_TOKEN:-}" ]] && curl_args+=(-H "X-SOP-Token: $OPENSOP_TOKEN")
   [[ -n "$body" ]] && curl_args+=(-d "$body")
 
-  local status
-  if ! status=$(curl "${curl_args[@]}" "$url"); then
-    rm -f "$tmp_body"
-    die "request failed: $method $url" "network_error"
+  local status curl_err
+  if ! status=$(curl "${curl_args[@]}" "$url" 2>"$tmp_body.err"); then
+    curl_err="$(sed 's/^curl: ([0-9]*) //' "$tmp_body.err" | head -1)"
+    rm -f "$tmp_body" "$tmp_body.err"
+    die "request failed: $method $url${curl_err:+ — $curl_err}" "network_error"
   fi
+  rm -f "$tmp_body.err"
 
   if [[ "$status" -ge 400 ]]; then
     local emode; emode=$(_error_mode)
@@ -385,7 +424,7 @@ cmd_init() {
     fi
   fi
 
-  mkdir -p "$cwd/.opensop/runs" "$cwd/.opensop/archive"
+  mkdir -p "$cwd/.opensop/runs" "$cwd/.opensop/archive" "$cwd/processes"
   {
     echo "name: $name"
     if [[ -n "$parent_resolved" ]]; then
@@ -395,6 +434,8 @@ cmd_init() {
     fi
   } > "$cwd/.opensop/manifest.yaml"
   echo "{}" > "$cwd/.opensop/lineage.json"
+  # Run receipts and context.json hold process inputs: keep them out of git.
+  [ -e "$cwd/.opensop/.gitignore" ] || echo "runs/" > "$cwd/.opensop/.gitignore"
 
   if [[ "$OUTPUT_MODE" == "pretty" ]] || { [[ "$OUTPUT_MODE" == "auto" ]] && is_tty; }; then
     info "${C_GREEN}initialized cell '$name'${C_RESET} at $cwd/.opensop/"
@@ -403,9 +444,11 @@ cmd_init() {
     else
       info "  parent: (root cell — no ancestor)"
     fi
+    info "  put processes in $cwd/processes/<name>.sop.json, then: opensop run <name>"
   else
     jq -nc --arg root "$cwd" --arg name "$name" --arg parent "$parent_resolved" \
-      '{ok:true, cell_root:$root, name:$name, parent:(if $parent == "" then null else $parent end)}'
+      '{ok:true, cell_root:$root, name:$name, parent:(if $parent == "" then null else $parent end),
+        processes_dir:($root + "/processes")}'
   fi
 }
 
@@ -650,9 +693,26 @@ cmd_fork() {
     snapshot="$(jq -c '{status: (.status // ""), metadata: (.metadata // {})}' <<<"$parent_entry")"
   fi
 
-  # Copy the process file.
+  # Copy the process file, plus the relative `run:` scripts its automated and shell
+  # steps (loop bodies included) reference, resolved the way the engine does
+  # (next to the process file, else the cell root) and kept at the same
+  # relative path. No-clobber: an existing file in the child is left alone.
   mkdir -p "$active_cell/processes"
   cp "$src_file" "$active_cell/processes/${name}.sop.json"
+  local -a copied=()
+  local rel src_base dst
+  while IFS= read -r rel; do
+    [[ -z "$rel" || "$rel" == /* || "$rel" == *..* ]] && continue
+    for src_base in "$src_cell/processes" "$src_cell"; do
+      [[ -f "$src_base/$rel" ]] || continue
+      dst="$active_cell${src_base#"$src_cell"}/$rel"
+      if [[ ! -e "$dst" ]]; then
+        mkdir -p "$(dirname "$dst")" && cp -p "$src_base/$rel" "$dst" && copied+=("$dst")
+      fi
+      break
+    done
+  done < <(jq -r '[.steps[]? | recurse(.body? | if type == "array" then .[] elif type == "object" then . else empty end)]
+                 | .[] | select(type == "object" and (.type == "automated" or .type == "shell")) | .run // empty' "$src_file")
 
   # Create the child lineage entry with forked_from set.
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -670,10 +730,12 @@ cmd_fork() {
     info "${C_GREEN}forked${C_RESET} '$name' from ${C_BOLD}$src_cell${C_RESET}"
     info "  into:     $active_cell/processes/${name}.sop.json"
     info "  snapshot: $snapshot"
+    (( ${#copied[@]} )) && info "  scripts:  ${copied[*]}"
     info "  ${C_DIM}(child's live status + metadata are empty — policy decides what to do with the snapshot)${C_RESET}"
   else
     jq -nc --arg name "$name" --arg src "$src_cell" --arg dst "$active_cell/processes/${name}.sop.json" --argjson snap "$snapshot" \
-      '{ok:true, name:$name, source_cell:$src, dest_file:$dst, snapshot:$snap}'
+      --argjson copied "$( (( ${#copied[@]} )) && printf '%s\n' "${copied[@]}" | jq -R . | jq -sc . || echo '[]')" \
+      '{ok:true, name:$name, source_cell:$src, dest_file:$dst, snapshot:$snap, copied_scripts:$copied}'
   fi
 }
 
@@ -685,7 +747,7 @@ cmd_fork() {
 #
 # category: discovery | inspection | execution | cells | authoring | admin | config
 # backend:  local | remote | dual
-#   local  — no server, no curl
+#   local  — no OpenSOP server needed
 #   remote — requires --remote or --server
 #   dual   — default local; add --remote for server mode
 #
@@ -718,7 +780,7 @@ compass|top processes by run-count, recency, and failure rate|compass|inspection
 run|start a new run of a process|run <name/file.sop.json> [--input k=v ...]|execution|dual
 dry-run|validate inputs and preview steps — no run created|dry-run <name/file.sop.json> [--input k=v ...]|execution|dual
 submit|resume a paused (waiting) run by supplying step outputs|submit <run_id> <step-id> [--output k=v ...]|execution|dual
-cancel|cancel a running or waiting run|cancel <run_id> [--reason TEXT]|execution|dual
+cancel|cancel a running, waiting or interrupted run|cancel <run_id> [--reason TEXT]|execution|dual
 runs|list local runs|runs|execution|local
 show|show a local run's manifest and per-step receipts|show <run_id>|execution|local
 heal|diagnose or re-run a failed step (closed heal loop)|heal <run_id> [--apply] [--force-effects] [--input k=v ...]|execution|local
@@ -734,7 +796,7 @@ config|show or set remote server config (url and token)|config [set url <URL>; s
 upgrade|upgrade the installed opensop CLI to the latest (or a pinned) release|upgrade [--pin X.Y.Z]|config|local
 help|show help for a command or the full command reference|help [<command>] [--json]|config|local
 bench|3-arm reliability comparison: skill vs json_only vs opensop over N runs|bench [<task-dir>] [--n N] [--model MODEL] [--arm ARMNAME] [--stub]|bench|local
-onboard|first-run experience: scaffold, validate, bench, and show next steps|onboard [<process.sop.json>] [--stub] [--n N]|onboarding|local
+onboard|first-run experience: scaffold, validate, and show next steps|onboard [<process.sop.json>]|onboarding|local
 skill|install an embedded SKILL.md (opensop or opensop-build-harness) into an agent runtime or directory|skill <install/paths/show> [--runtime FLAVOUR] [--scope user/project] [--skill NAME] [--force] [--json]|agent-skills|local
 doctor|self-check: version, jq, bash, and skill installation status|doctor [--json]|agent-skills|local
 pull|download an SOP from the opensop SOP library and write it locally|pull <author>/<slug>[@<ref>] [--output <path>] [--force] [--verify <sha256>]|sops|local
@@ -785,7 +847,7 @@ _registry_command_json() {
 _registry_agents_json() {
   jq -nc '{topic:"agents",
            discovery:["search","suggest","list","help --json"],
-           guides:["docs/AGENTS.md","docs/CLAUDE-INTEGRATION.md"]}'
+           guides:["https://github.com/opensop/opensop/blob/main/docs/AGENTS.md"]}'
 }
 
 # --------------------------------------------------------------------------- #
@@ -877,19 +939,27 @@ ${C_BOLD}ENVIRONMENT${C_RESET}
   OPENSOP_TOKEN                 override config token for one call
   OPENSOP_HOME                  config + cache dir (default: ~/.opensop)
   OPENSOP_LOCAL_HOME            local-mode receipts dir (default: active cell's .opensop/ or ~/.opensop-local)
-  OPENSOP_SOPS_BASE             base URL for opensop pull (default: https://raw.githubusercontent.com/opensop/sops)
-                                  override with a file:// path or local dir for offline testing
+  OPENSOP_SOPS_BASE             base URL for opensop pull (default: the sops/ directory of the
+                                  opensop repo: https://raw.githubusercontent.com/opensop/opensop/{ref}/sops).
+                                  {ref} is replaced by the pull ref; a base without {ref} gets /<ref>
+                                  appended. Override with a file:// URL for offline testing
   OPENSOP_RECIPES_BASE          deprecated alias for OPENSOP_SOPS_BASE; honoured if OPENSOP_SOPS_BASE
                                   is unset, with a stderr deprecation warning
   NO_COLOR                      disable ANSI color output
+  OSL_LLM_STUB                  try llm/judgment steps with no API key or model CLI: this JSON is the
+                                  answer every llm step gets (set it on run, submit and heal alike)
 
-${C_BOLD}LOCAL STEP TYPES (v0.7 — full SPEC parity)${C_RESET}
+${C_BOLD}LOCAL STEP TYPES${C_RESET}
   automated/shell   run a shell script; JSON stdout merged into context
   noop              pass-through; no execution
   form              pause (waiting_for_input); resume via: opensop submit <run_id> <step-id> --output k=v
   approval          pause (waiting_for_approval); expects decision=approve|reject
   wait              wait.seconds completes immediately; wait.until pauses (waiting_for_callback)
-  llm               call Anthropic Claude; requires ANTHROPIC_API_KEY
+  llm               claude* → Anthropic API (ANTHROPIC_API_KEY); or a CLI provider:
+                      claude-code:|codex:|cursor:|kimi:<model> (permission, workdir)
+  judgment          agent decision via the llm path (allow_agent); pauses (escalated)
+                      on require_human_review / low confidence / no agent
+  loop              for_each | repeat_until | while over a body of steps; aggregate
   webhook           outbound HTTP; sync or callback (waiting_for_callback); poll unsupported
   subprocess        run a child process locally; depth-guarded (max 16)
 
@@ -924,7 +994,7 @@ _cmd_help_command() {
 
   local backend_label
   case "$backend" in
-    local)  backend_label="local only (no server, no curl)" ;;
+    local)  backend_label="local (no OpenSOP server needed)" ;;
     remote) backend_label="remote only (requires --remote or --server <url>)" ;;
     dual)   backend_label="local by default; add --remote or --server for server mode" ;;
     *)      backend_label="$backend" ;;
@@ -1061,7 +1131,7 @@ EX
       cat <<'EX'
   opensop heal <run_id>                        # print fault + debug_prompt for a failed run
   opensop heal <run_id> --json                 # machine-readable fault record
-  opensop heal <run_id> --apply                # re-run the failed step, continue the run
+  opensop heal <run_id> --apply                # re-run the failed (or interrupted) step, continue the run
   opensop heal <run_id> --apply --input k=v    # re-run with corrected inputs
   opensop heal <run_id> --apply --force-effects  # required when the failed step declares `effects` (it may have already
                                                   # acted on the world — LinkedIn post, email, spend); refused without this flag
@@ -1119,8 +1189,8 @@ EX
     config)
       cat <<'EX'
   opensop config                               # show current config
-  opensop config set url https://demo.opensop.ai
-  opensop config set token demo-public-token-resets-daily
+  opensop config set url https://opensop.example.com
+  opensop config set token <your-token>
 EX
       ;;
     upgrade)
@@ -1153,9 +1223,8 @@ EX
       ;;
     onboard)
       cat <<'EX'
-  opensop onboard                              # scaffold a starter .sop.json + bench
-  opensop onboard ./my-process.sop.json        # validate + bench an existing process
-  opensop onboard ./my-process.sop.json --stub # no API key — offline bench self-test
+  opensop onboard                              # scaffold a starter .sop.json, validate it
+  opensop onboard ./my-process.sop.json        # validate an existing process
   opensop onboard --json                       # machine-readable summary
 EX
       ;;
@@ -1167,6 +1236,7 @@ EX
   opensop skill install --runtime claude --scope user  # install to ~/.claude/skills/opensop/
   opensop skill install --runtime codex       # install to .agents/skills/opensop/ (project scope)
   opensop skill install --runtime codex --scope user  # install to $CODEX_HOME/skills/opensop/ (~/.codex/skills if unset)
+  opensop skill install --runtime hermes --scope user # install to $HERMES_HOME/skills/opensop/ (~/.hermes/skills if unset)
   opensop skill install --runtime claude --skill opensop-build-harness  # install the build-harness skill instead
   opensop skill paths                         # table: flavour -> canonical root skills path
   opensop skill paths --json                  # machine-readable {flavour: path} object
@@ -1214,15 +1284,16 @@ ${C_BOLD}RUN ON A SERVER (--remote)${C_RESET}
 
 ${C_BOLD}KEY PATTERNS FOR AGENTS${C_RESET}
   - Prefer 'suggest' and 'search' over parsing 'list' output.
-  - Check 'status' in a poll loop after 'run'; exit when state != running/waiting.
+  - Local 'run' is synchronous: it returns when the run completes, fails or pauses.
+    Read 'status <run_id> --json' (.state, .waiting, .error); poll only --remote runs.
   - Parse JSON output: pipe any command with --json to jq.
   - On pause (status == waiting), inspect manifest.waiting for expected outputs,
     then call 'submit' with those outputs to resume.
   - Errors emit {error, message, hint?} to stderr when --json is set — parse them.
 
 ${C_BOLD}FULL GUIDE${C_RESET}
-  docs/AGENTS.md           — discover → build → run → iterate → evolve
-  docs/CLAUDE-INTEGRATION.md  — Claude Code / Claude agent integration recipe
+  https://github.com/opensop/opensop/blob/main/docs/AGENTS.md
+    — discover → build → run → iterate → evolve (Claude Code, Codex and other agents)
 
 ${C_DIM}⚠  local steps execute arbitrary shell — only run process files you trust${C_RESET}
 EOF
@@ -1325,12 +1396,29 @@ cmd_upgrade() {
   local install_dir
   install_dir="$(dirname "$real_path")"
 
-  # Determine the target ref (git tag or main).
+  # Determine the target tag: --pin, else the latest GitHub release.
   local target_ref
   if [[ -n "$pin_version" ]]; then
     target_ref="v${pin_version#v}"  # normalise: "0.8.1" → "v0.8.1"
   else
-    target_ref="main"
+    # OPENSOP_UPGRADE_LATEST (test seam): use this tag instead of asking GitHub.
+    target_ref="${OPENSOP_UPGRADE_LATEST:-}"
+    [[ -z "$target_ref" ]] && target_ref="$(curl -fsSL "https://api.github.com/repos/opensop/opensop/releases/latest" 2>/dev/null \
+                  | jq -r '.tag_name // empty' 2>/dev/null || true)"
+    target_ref="v${target_ref#v}"
+    [[ "$target_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] \
+      || die "could not find the latest release (GitHub API unreachable or rate-limited)" \
+             "network_error" "retry later, or pick a version: opensop upgrade --pin X.Y.Z"
+    local latest="${target_ref#v}"
+    if [[ "$latest" == "$OPENSOP_CLI_VERSION" ]]; then
+      ok "already at the latest release (${latest}) — nothing to do"
+      return 0
+    fi
+    if [[ "$(printf '%s\n%s\n' "$latest" "$OPENSOP_CLI_VERSION" | sort -V | tail -1)" == "$OPENSOP_CLI_VERSION" ]]; then
+      ok "${OPENSOP_CLI_VERSION} is newer than the latest release (${latest}) — nothing to do"
+      info "to install ${latest} anyway: opensop upgrade --pin ${latest}"
+      return 0
+    fi
   fi
 
   local raw_base="https://raw.githubusercontent.com/opensop/opensop/${target_ref}/cli/bin"
@@ -1365,14 +1453,10 @@ cmd_upgrade() {
   local new_version
   new_version="$(grep -m1 'OPENSOP_CLI_VERSION=' "$tmp_bin" | sed 's/.*OPENSOP_CLI_VERSION="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/')"
 
-  # ---- Fix 1a: --pin version must match the embedded version in the binary ----
-  if [[ -n "$pin_version" ]]; then
-    local normalized_pin="v${pin_version#v}"
-    local embedded_tag="v${new_version#v}"
-    if [[ "$normalized_pin" != "$embedded_tag" ]]; then
-      die "--pin ${pin_version} requested but downloaded binary embeds version ${new_version} — aborting" \
-          "cli_error" "verify the tag exists in github.com/opensop/opensop and retry"
-    fi
+  # ---- Fix 1a: the tag must match the version embedded in the binary ----
+  if [[ "$target_ref" != "v${new_version#v}" ]]; then
+    die "${target_ref} requested but the downloaded binary embeds version ${new_version} — aborting" \
+        "cli_error" "verify the tag exists in github.com/opensop/opensop and retry"
   fi
 
   # ---- Fix 1b: checksum verification ----
@@ -1599,9 +1683,9 @@ build_payload_object() {
 
   # Start from --inputs/--outputs JSON or --inputs-file/--outputs-file.
   if [[ -n "$json_blob" ]]; then
-    payload=$(echo "$json_blob" | jq .) || die "invalid JSON in --$plural" "invalid_json"
+    payload=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --$plural" "invalid_json"
   elif [[ -n "$file_path" ]]; then
-    payload=$(jq . "$file_path") || die "could not read $file_path as JSON" "invalid_json"
+    payload=$(jq . "$file_path" 2>/dev/null) || die "could not read $file_path as JSON" "invalid_json"
   fi
 
   # Merge --input KEY=VALUE pairs into payload.
@@ -1610,7 +1694,9 @@ build_payload_object() {
       [[ "$kv" != *=* ]] && die "--$noun expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
       # If value parses as JSON (number, bool, null, object, array), use raw; else string.
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      # An input the process declares as type string stays the raw string
+      # (zip=02134, flag=false); callers set _string_inputs (see _string_input_names).
+      if [[ " ${_string_inputs:-} " != *" $k "* ]] && echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         payload=$(echo "$payload" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         payload=$(echo "$payload" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -1624,7 +1710,7 @@ build_payload_object() {
     for kv in "${metadata_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--metadata expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         metadata=$(echo "$metadata" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         metadata=$(echo "$metadata" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -1700,6 +1786,10 @@ cmd_status() {
     printf '%sinstance:%s %s\n' "$C_BOLD" "$C_RESET" "$id"
     printf '%sprocess:%s  %s\n' "$C_BOLD" "$C_RESET" "$name"
     printf '%sstate:%s    %s%s%s%s\n' "$C_BOLD" "$C_RESET" "$color" "$state" "$C_RESET" "${ended:+ ($ended)}"
+    echo "$resp" | jq -r '
+      if .error then "\nfailed at \(.error.step) (exit \(.error.exit_code // "?")): \(.error.message)\nnext: opensop heal \(.id) --apply   (after fixing the cause)"
+      elif .waiting then "\nwaiting on \(.waiting.step) (\(.waiting.reason))\(if .waiting.description then ": " + .waiting.description else "" end)\nnext: opensop submit \(.id) \(.waiting.step)\([.waiting.expects.outputs[]? | " --output " + . + "=..."] | join(""))"
+      else empty end'
     echo
     echo "$resp" | jq -r '.steps[]? | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
       while IFS=$'\t' read -r step_id stype sstate sub; do
@@ -2201,7 +2291,9 @@ _ps_collect_local_entries() {
 # _ps_collect_remote_entries — fetch §9.4 entries from GET /sop/processes/status.
 # Shared by cmd_ps (--follow) and cmd_watch (--remote). Prints compact JSON array.
 _ps_collect_remote_entries() {
-  local resp; resp=$(api_get "/sop/processes/status")
+  # `|| exit 1`: errexit is off inside $(...), so a dead server would
+  # otherwise yield an empty table and exit 0 (and `watch` would spin forever).
+  local resp; resp=$(api_get "/sop/processes/status") || exit 1
   printf '%s\n' "$resp" | jq -c '[.processes[] | {
     name:             .name,
     version:          .version,
@@ -2578,8 +2670,10 @@ walk_steps_preview() {
     ($s.id // "?") as $id |
     ($s.type // "unknown") as $t |
     # Collect output field names; fall back to input field names for form steps.
-    ([($s.outputs // [])[]?.name // empty] |
-      if length == 0 then [($s.inputs // [])[]?.name // empty] else . end |
+    # outputs/inputs may be an array of {name,...} or a {name: type} map.
+    def field_names: if type == "array" then map(.name? // empty) elif type == "object" then keys else [] end;
+    (($s.outputs // []) | field_names |
+      if length == 0 then (($s.inputs // []) | field_names) else . end |
       map(select(. != null and . != "")) | join(", ")) as $fields |
     if   $t == "form" then
       "  \($id)  form          → would request input for fields: \($fields)"
@@ -2598,7 +2692,8 @@ walk_steps_preview() {
     elif $t == "subprocess" then
       "  \($id)  subprocess    → would start subprocess: \($s.process // $s.name // "(unspecified)")"
     elif $t == "loop" then
-      "  \($id)  loop          → would iterate over \($s.for_each_source // $s.for_each // "(unspecified)"), body: \($s.body.id // "(unspecified)")"
+      ($s.loop // {}) as $l |
+      "  \($id)  loop          → would \(if $l.for_each then "iterate over \($l.for_each)" elif $l.repeat_until then "repeat until \($l.repeat_until)" elif $l.while then "repeat while \($l.while)" else "loop (unspecified)" end), body: \($s.body | if type == "array" then (map(.id? // "?") | join(", ")) elif type == "object" then (.id // "?") else "(unspecified)" end)"
     elif $t == "llm" then
       "  \($id)  llm           → would call \($s.model // "default") with prompt template"
     elif $t == "wait" then
@@ -2630,15 +2725,15 @@ cmd_dry_run() {
   # Build input object.
   local inputs="{}"
   if [[ -n "$json_blob" ]]; then
-    inputs=$(echo "$json_blob" | jq .) || die "invalid JSON in --inputs" "invalid_json"
+    inputs=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --inputs" "invalid_json"
   elif [[ -n "$file_path" ]]; then
-    inputs=$(jq . "$file_path") || die "could not read $file_path as JSON" "invalid_json"
+    inputs=$(jq . "$file_path" 2>/dev/null) || die "could not read $file_path as JSON" "invalid_json"
   fi
   if (( ${#kv_pairs[@]} > 0 )); then
     for kv in "${kv_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--input expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         inputs=$(echo "$inputs" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         inputs=$(echo "$inputs" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -2651,29 +2746,7 @@ cmd_dry_run() {
 
   # 2. Validate inputs against process.inputs definition.
   local errors_json
-  errors_json=$(echo "$schema" | jq -c \
-    --argjson supplied "$inputs" '
-    [ .process.inputs[]? |
-      . as $field |
-      ($supplied[$field.name]) as $val |
-      # Required check.
-      (if ($field.required == true) and ($val == null) then
-        {path: ("inputs." + $field.name), message: ("required field missing: " + $field.name)}
-      else null end),
-      # Type check (best-effort).
-      (if $val != null then
-        if   $field.type == "number"  and ($val | type) != "number"  then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a number")}
-        elif $field.type == "boolean" and ($val | type) != "boolean" then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a boolean")}
-        elif $field.type == "enum" and ($field.values != null) and ([$field.values[] | . == $val] | any | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be one of: " + ($field.values | join(", ")))}
-        elif $field.type == "string" and $field.format == "email" and ($val | type) == "string" and ($val | test("^[^@]+@[^@]+\\.[^@]+$") | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " does not look like an email address")}
-        else null end
-      else null end)
-    ] | map(select(. != null))
-  ')
+  errors_json=$(_input_errors "$schema" "$inputs")
 
   local valid=true
   local err_count; err_count=$(echo "$errors_json" | jq 'length')
@@ -2996,9 +3069,12 @@ cmd_schema_validate() {
       --arg scope "$scope_msg" \
       --argjson valid "$valid_bool" \
       --argjson errors "$errors_json" \
-      '{file: $file, form: $form, scope: $scope, valid: $valid, errors: $errors}'
+      '{file: $file, form: $form, scope: $scope, valid: $valid, errors: $errors}
+       + (if ($file | test("\\.ya?ml$")) then {note: "YAML is the server registration format; opensop run takes the same process as .sop.json"} else {} end)'
   fi
 
+  [[ ( "$file" == *.yaml || "$file" == *.yml ) && -t 2 ]] && \
+    warn "$file is YAML: fine for a server (opensop register); opensop run takes the same process as .sop.json"
   [[ "$valid" == "false" ]] && exit 1
   return 0
 }
@@ -3044,21 +3120,315 @@ _local_now_ms() {
   fi
   echo "$ms"
 }
+
+# _local_ms_since <start_ms> — ms elapsed since start_ms, never negative: the
+# wall clock can step backwards (NTP, VM host time sync), and a receipt must not
+# record a negative duration. ponytail: wall-clock based; a monotonic source
+# (/proc/uptime) would be exact across steps, if that precision ever matters.
+_local_ms_since() {
+  local d=$(( $(_local_now_ms) - $1 ))
+  (( d < 0 )) && d=0
+  echo "$d"
+}
 # timestamp + PID + $RANDOM: distinct across processes (PID) and hardened against
 # the rare same-second/recycled-PID collision. `date %N` is unportable (BSD), so
 # we don't rely on sub-second precision.
 _local_run_id() { echo "$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"; }
 
+# jq defs shared by _local_render and _local_eval_cond. ref($ctx; $pinp)
+# resolves a SPEC §2.5 dotted reference; an absent path yields null.
+#   process.inputs.<k>        → the run's initial inputs (manifest.inputs)
+#   steps.<id>.outputs.<k...> → ctx[<id>][<k>...]
+#   anything else             → a path into ctx (<id>.<k>, loop.<as>, a bare key)
+_OSL_JQ_REF='
+def ref($ctx; $pinp):
+  split(".") as $p
+  | try (if $p[0] == "process" and $p[1] == "inputs" then $pinp | getpath($p[2:])
+         elif $p[0] == "steps" and ($p | length) >= 4 and $p[2] == "outputs" then $ctx | getpath([$p[1]] + $p[3:])
+         else $ctx | getpath($p) end) catch null;
+'
+
+# _local_render <template> <ctx_json> [<proc_inputs_json>]
+# {{ ref }} substitution (SPEC §3.8): each token is replaced by its value
+# (stringified) when present, and left as-is when absent. On failure returns 1
+# and prints the jq error instead, so callers never mistake it for an empty value.
+_local_render() {
+  local out rc=0
+  out="$(jq -rn --arg tmpl "$1" --argjson ctx "$2" --argjson pinp "${3:-{\}}" "$_OSL_JQ_REF"'
+    $tmpl | gsub("\\{\\{\\s*(?<v>[a-zA-Z_][a-zA-Z0-9_-]*(\\.[a-zA-Z0-9_-]+)*)\\s*\\}\\}";
+      (.v | ref($ctx; $pinp)) as $x | if $x != null then ($x | tostring) else "{{" + .v + "}}" end)' 2>&1)" || rc=$?
+  if (( rc )); then printf 'template render failed (jq exit %s): %s' "$rc" "${out:-no message}"; return 1; fi
+  printf '%s' "$out"
+}
+
+# _local_render_err <field> <message> → the step's {error} JSON for a failed render.
+_local_render_err() { jq -nc --arg f "$1" --arg m "$2" '{error:("cannot render " + $f + ": " + $m)}'; }
+
+# _local_eval_cond <expr> <ctx_json> <proc_inputs_json>
+# SPEC §2.6 condition: "<ref> <op> <literal>", op one of == != >= <= > <, the
+# literal a quoted string, number, true, false or null. No eval. Prints
+# true|false; prints nothing when the expression does not parse.
+_local_eval_cond() {
+  jq -rn --arg e "$1" --argjson ctx "$2" --argjson pinp "$3" "$_OSL_JQ_REF"'
+    ($e | capture("^\\s*(?<l>[a-zA-Z_][a-zA-Z0-9_.-]*)\\s*(?<op>==|!=|>=|<=|>|<)\\s*(?<r>.*?)\\s*$")) as $m
+    | ($m.r | if test("^'"'"'.*'"'"'$") or test("^\".*\"$") then .[1:-1]
+              elif . == "true" then true elif . == "false" then false elif . == "null" then null
+              else tonumber end) as $r
+    | ($m.l | ref($ctx; $pinp)) as $l
+    | {"==": ($l == $r), "!=": ($l != $r), ">=": ($l >= $r), "<=": ($l <= $r), ">": ($l > $r), "<": ($l < $r)}[$m.op]
+  ' 2>/dev/null || true
+}
+
+# _local_exit_check <step_json> <out_json> <ctx_json> <proc_inputs_json>
+# SPEC §3.15: when the step's exit_when holds — evaluated over the context plus
+# `outputs` (this step's output) — prints its exit_outputs ({} when absent).
+# Prints nothing when it does not hold or there is none; returns 1 when the
+# expression does not parse.
+_local_exit_check() {
+  local expr v; expr="$(jq -r '.exit_when // "" | tostring' <<<"$1")"
+  [[ -z "$expr" ]] && return 0
+  v="$(_local_eval_cond "$expr" "$(jq -c --argjson o "$2" '. + {outputs: $o}' <<<"$3")" "$4")"
+  case "$v" in
+    true)  jq -c '.exit_outputs // {}' <<<"$1" ;;
+    false) ;;
+    *)     return 1 ;;
+  esac
+}
+
+# _local_llm_fail <cli> <bin> <what> <stdout> <stderr_file>
+# Prints the step's failure output for a CLI-provider call: {error, stderr
+# (first 1 KiB + last 3 KiB), provider_message}. provider_message is the CLI's
+# own error text: claude/cursor .result of an is_error envelope (cursor: else its
+# first stderr line); codex's last turn.failed/error event (unwrapping a JSON
+# API error); kimi's "error: ..." stderr line. A usage,
+# quota or rate limit becomes error "provider_limit: <message>" so the caller
+# can tell it from a crash; the engine never retries it.
+_local_llm_fail() {
+  jq -nc --arg cli "$1" --arg bin "$2" --arg what "$3" --arg out "$4" --rawfile err "$5" '
+    ($err | if length > 4096 then .[:1024] + "\n…\n" + .[-3072:] else . end) as $e
+    | (if $cli == "claude-code" or $cli == "cursor" then
+         ($out | try fromjson catch null) | if type == "object" and .is_error == true then (.result // .error // "")
+         elif $cli == "cursor" then [$err | split("\n")[] | select(test("\\S"))] | first // "" | .[:500] else "" end
+       elif $cli == "codex" then
+         [$out | split("\n")[] | try fromjson catch empty | objects
+          | if .type == "turn.failed" then .error.message elif .type == "error" then .message else empty end] | last // ""
+         | (try (fromjson | .error.message // .message) catch null) // .
+       elif $cli == "kimi" then
+         [$err | split("\n")[] | select(startswith("error: ")) | .[7:]] | last // ""
+       else "" end | tostring) as $pm
+    | "(hit|reached) (your|the) [^.\n]{0,40}limit|usage limit|rate[ _-]?limit|quota|too many requests|\\b429\\b|resource_exhausted" as $re
+    | ([$e | split("\n")[] | select(test($re; "i"))] | first // "") as $limit_line
+    | {error: (if ($pm | test($re; "i")) then "provider_limit: " + $pm
+               elif $limit_line != "" then "provider_limit: " + $limit_line
+               else $bin + " " + $what + (if $pm != "" then ": " + $pm else "" end) end),
+       stderr: $e, provider_message: $pm}'
+}
+
+# _local_llm_add_usage <source> <raw_output>
+# Parse one llm call's token usage + cost and add it to s_llm_usage (the
+# caller's, summed across retries). Normalized so providers compare:
+#   input_tokens      — every input token the call processed, cached included
+#   cache_read_tokens — the cached subset of input_tokens
+#   output_tokens, cost_usd — null where the provider reports nothing
+# Sources (verified against each CLI's real output):
+#   claude-code / anthropic: .usage {input, cache_creation_input, cache_read_input,
+#     output}_tokens; claude-code adds .total_cost_usd. input_tokens there excludes
+#     cache tokens, so they are added back in.
+#   codex: --json JSONL, every turn.completed .usage {input_tokens (cached
+#     included), cached_input_tokens, output_tokens}; no dollar figure.
+#   cursor: --output-format json .usage {inputTokens, outputTokens, cacheReadTokens}.
+#   kimi: reports no usage (text and stream-json alike) → null.
+_local_llm_add_usage() {
+  local u=""
+  case "$1" in
+    claude-code|anthropic)
+      u="$(jq -c '.usage as $u | if $u == null then null else
+            {input_tokens: (if $u.input_tokens == null then null
+                            else $u.input_tokens + ($u.cache_creation_input_tokens // 0) + ($u.cache_read_input_tokens // 0) end),
+             output_tokens: $u.output_tokens, cache_read_tokens: $u.cache_read_input_tokens,
+             cost_usd: (.total_cost_usd // null)} end' <<<"$2" 2>/dev/null)" || u="" ;;
+    codex)
+      u="$(jq -Rsc '[split("\n")[] | fromjson? | select(.type? == "turn.completed") | .usage | objects]
+            | if length == 0 then null else
+              {input_tokens: (map(.input_tokens // 0) | add), output_tokens: (map(.output_tokens // 0) | add),
+               cache_read_tokens: (map(.cached_input_tokens // 0) | add), cost_usd: null} end' <<<"$2" 2>/dev/null)" || u="" ;;
+    cursor)
+      u="$(jq -c '.usage as $u | if $u == null then null else
+            {input_tokens: $u.inputTokens, output_tokens: $u.outputTokens,
+             cache_read_tokens: $u.cacheReadTokens, cost_usd: null} end' <<<"$2" 2>/dev/null)" || u="" ;;
+  esac
+  [[ -z "$u" ]] && u="null"
+  s_llm_usage="$(jq -cn --argjson a "$s_llm_usage" --argjson b "$u" '
+    if $b == null then $a elif $a == null then $b
+    else reduce ("input_tokens", "output_tokens", "cache_read_tokens", "cost_usd") as $f ({};
+      .[$f] = (if $a[$f] == null and $b[$f] == null then null else ($a[$f] // 0) + ($b[$f] // 0) end)) end')"
+}
+
+# _local_mark_exited <run_dir> <step_id> <exit_outputs_json> — record an
+# exit_when early exit on the manifest (the run then finalizes as completed).
+_local_mark_exited() {
+  jq -c --arg s "$2" --argjson o "$3" '.exited_early = {step: $s, exit_outputs: $o}' \
+    "$1/manifest.json" > "$1/manifest.json.tmp" && mv "$1/manifest.json.tmp" "$1/manifest.json"
+}
+
+# _local_next_hint <run_dir> — the "next:" lines for a paused run: the exact
+# submit command with the fields waiting.expects names (enum values spelled
+# out), and for an escalated judgment why it escalated plus the agent's
+# proposal from its waiting receipt.
+_local_next_hint() {
+  local d="$1"
+  jq -r --slurpfile audit <(cat "$d/audit.jsonl" 2>/dev/null) \
+        --slurpfile proc <(cat "$d/process.snapshot.json" 2>/dev/null || echo '{}') '
+    .run_id as $id | .waiting as $w
+    | ([$audit[] | select(.step == $w.step and .status == "waiting")] | last) as $r
+    | ([($proc[0].steps // [])[] | select(.id == $w.step)][0].judgment.confidence_threshold) as $th
+    | (if $w.reason == "escalated" then
+         "escalated: " + ({low_confidence: "the agent'"'"'s confidence (\($r.proposal.confidence // "?")) is below the threshold (\($th // "?"))",
+                           require_human_review: "the step requires human review",
+                           no_agent: "no agent is configured for this judgment (judgment.allow_agent, model, prompt)"}[$r.escalation // ""]
+                          // "the step needs a human decision")
+         + (if $r.proposal then "\nproposal: " + ($r.proposal | tojson | .[0:400]) else "" end) + "\n"
+       else "" end)
+    + "next:  opensop submit \($id) \($w.step)"
+    + ([$w.expects.schema[]? | " --output " + .name + "="
+        + ((.values // (if (.type // "" | tostring | startswith("enum[")) then (.type | ltrimstr("enum[") | rtrimstr("]") | split(",") | map(gsub("^\\s+|\\s+$"; ""))) else null end))
+           | if . then "<" + join("|") + ">" else "..." end)] | join(""))
+  ' "$d/manifest.json"
+}
+
+# _local_wait_meta <proc_file> <index>
+# The manifest's waiting.reason + waiting.expects for the step that paused.
+# Shared by every path that finalizes a paused run (run, submit, heal, parent
+# continuation). A judgment escalation expects its declared outputs (its
+# inputs[] are what it reads, not what a human submits).
+_local_wait_meta() {
+  jq -c --argjson idx "$2" '
+    .steps[$idx] as $s
+    | (if $s.type == "judgment" then $s.outputs else ($s.inputs // $s.outputs) end
+       # a {name: type} map is read as the SPEC field list [{name, type}]
+       | if type == "object" then to_entries | map({name: .key, type: (.value | if type == "object" then (.type // "string") else . end)}) else . end) as $decl
+    | { reason: ({form: "waiting_for_input", approval: "waiting_for_approval", judgment: "escalated"}[$s.type // "automated"]
+                 // "waiting_for_callback"),
+        expects: (if $decl != null and ($decl | length) > 0 then
+                    { outputs: [$decl[].name // empty], schema: $decl }
+                  elif $s.type == "approval" then
+                    { outputs: ["decision"],
+                      schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
+                  else { outputs: [], schema: [] } end) }
+  ' "$1"
+}
+
 # Mark a still-"running" manifest as interrupted. Registered as an EXIT trap
 # during a local run so a kill/crash never leaves a run stuck at "running".
 _local_finalize_trap() {
-  local mf="${1:-}/manifest.json"
+  local mf="${1:-}/manifest.json" pf="${1:-}/.step.$$"
+  # Stop the step loop and the running step's process group (_local_exec_step)
+  # so an interrupted run leaves no orphaned step processes behind.
+  if [ -f "$pf" ]; then
+    # shellcheck disable=SC2046  # the file holds "<loop pid> <pid or -pgid>"
+    kill -TERM -- $(cat "$pf") 2>/dev/null || true
+    rm -f "$pf"
+  fi
   [ -f "$mf" ] || return 0
   jq -e '.status=="running"' "$mf" >/dev/null 2>&1 || return 0
   jq -c '.status="interrupted"' "$mf" > "$mf.tmp" 2>/dev/null && mv "$mf.tmp" "$mf"
 }
 
+# _local_exec_step <run_dir> <loop_pid> <stdin> <stderr_log> <cmd...>
+#   Runs a script step's command in its own process group (setsid, when
+#   available) and records "<loop_pid> -<pgid>" in <run_dir>/.step.<cli pid>
+#   while it runs, so _local_finalize_trap can stop the loop and the step's
+#   whole tree when the CLI is killed mid-step. Prints the command's stdout and
+#   returns its exit status. Runs in $run_cwd (the run loop's local). Without setsid (macOS) only the step's own pid is
+#   recorded, so its children may outlive an interrupted run.
+_local_exec_step() {
+  local run_dir="$1" loop_pid="$2" in="$3" errlog="$4"; shift 4
+  local pf="$run_dir/.step.$$" pid rc=0
+  # Run where the run was started (the caller's run_cwd), not wherever a later
+  # submit/heal is typed, so relative paths in a step mean the same on resume.
+  # We are inside $(...), so the cd doesn't leak.
+  [[ -n "${run_cwd:-}" && -d "$run_cwd" ]] && cd "$run_cwd"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" <<<"$in" 2>>"$errlog" & pid=$!
+    printf '%s -%s\n' "$loop_pid" "$pid" > "$pf"
+  else
+    "$@" <<<"$in" 2>>"$errlog" & pid=$!
+    printf '%s %s\n' "$loop_pid" "$pid" > "$pf"
+  fi
+  wait "$pid" || rc=$?
+  rm -f "$pf"
+  return "$rc"
+}
+
+# _local_interrupted_index <run_dir> <proc_file> — index of the step an
+# interrupted run was on: the first step with no completed/skipped receipt (a
+# failed receipt counts as done for a continue_on_error step). Prints the step
+# count when every step is done.
+_local_interrupted_index() {
+  jq -r --slurpfile r <(cat "$1/audit.jsonl" 2>/dev/null) '
+    (.steps // []) as $s
+    | first(range(0; $s | length) as $i | ($s[$i].id // "step-\($i)") as $id
+        | select([$r[] | select(.step == $id and (.status == "completed" or .status == "skipped"
+                   or (.status == "failed" and ($s[$i].continue_on_error // false))))] | length == 0)
+        | $i) // ($s | length)' "$2"
+}
+
 # opensop run <process.sop.json> --local [--input k=v ...]
+# _input_errors <schema-json {process:{inputs:[...]}}> <supplied-json>
+#   The required/type/enum/format checks shared by dry-run (local and remote)
+#   and local run. Prints a JSON array of {path, message}.
+_input_errors() {
+  jq -c --argjson supplied "$2" '
+    [ .process.inputs[]? |
+      . as $field |
+      ($supplied[$field.name]) as $val |
+      # Required check.
+      (if ($field.required == true) and ($val == null) then
+        {path: ("inputs." + $field.name), message: ("required field missing: " + $field.name)}
+      else null end),
+      # Type check (best-effort).
+      (if $val != null then
+        if   $field.type == "number"  and ($val | type) != "number"  then
+          {path: ("inputs." + $field.name), message: ($field.name + " must be a number")}
+        elif $field.type == "boolean" and ($val | type) != "boolean" then
+          {path: ("inputs." + $field.name), message: ($field.name + " must be a boolean")}
+        elif $field.type == "enum" and ($field.values != null) and ([$field.values[] | . == $val] | any | not) then
+          {path: ("inputs." + $field.name), message: ($field.name + " must be one of: " + ($field.values | join(", ")))}
+        elif $field.type == "string" and $field.format == "email" and ($val | type) == "string" and ($val | test("^[^@]+@[^@]+\\.[^@]+$") | not) then
+          {path: ("inputs." + $field.name), message: ($field.name + " does not look like an email address")}
+        else null end
+      else null end)
+    ] | map(select(. != null))
+  ' <<<"$1"
+}
+
+# _input_decls (jq def): normalise a process's `inputs` to the array form
+# [{name, type?, required?, default?, ...}]. The object form maps a name to
+# either a typed definition (an object with a "type" key, as `onboard`
+# scaffolds) or a plain default value.
+_INPUT_DECLS_JQ='def _input_decls:
+  if type == "array" then .
+  elif type == "object" then [to_entries[] |
+    if (.value | type) == "object" and (.value | has("type")) then {name: .key} + .value
+    else {name: .key, default: .value} end]
+  else [] end;'
+
+# _string_input_names <proc_file> — space-separated names of the inputs the
+# process declares as type string, so --input keeps their values verbatim.
+_string_input_names() {
+  jq -r "$_INPUT_DECLS_JQ"'(if has("process") then .process else . end).inputs // {} | _input_decls
+    | map(select(.type == "string") | .name) | join(" ")' "$1" 2>/dev/null || true
+}
+
+# Step types _local_step_loop can execute.
+_LOCAL_STEP_TYPES="automated shell noop form approval wait llm judgment loop webhook subprocess"
+
+# _local_input_defaults <schema-json> <supplied-json>
+#   Declared defaults deep-merged under the supplied inputs.
+_local_input_defaults() {
+  jq -c --argjson i "$2" '[.process.inputs[]? | select(.name != null and has("default")) | {(.name): .default}] | add // {} | . * $i' <<<"$1"
+}
+
 local_run() {
   [[ $# -lt 1 ]] && die "usage: opensop run <name|process.sop.json> [--input KEY=VALUE ...]" "usage_error" "run opensop help"
   local proc_arg="$1"; shift
@@ -3067,13 +3437,16 @@ local_run() {
   #   path-shaped (contains '/' or ends in .sop.json) → use as a file path
   #   bare name → resolve across the active cell chain (nearest wins)
   local proc_file=""
-  if [[ "$proc_arg" == *.sop.json ]] || [[ "$proc_arg" == */* ]]; then
+  # A path, or a file that exists here, is a file; anything else is a process name.
+  if [[ "$proc_arg" == *.json || "$proc_arg" == *.yaml || "$proc_arg" == *.yml || "$proc_arg" == */* || -f "$proc_arg" ]]; then
     proc_file="$proc_arg"
   else
     proc_file="$(_find_skill_in_cells "$proc_arg")"
-    [[ -z "$proc_file" ]] && die "skill not found: '$proc_arg' (looked in active cell + ancestors)" "file_not_found" \
-        "create processes/${proc_arg}.sop.json in a cell, or pass an explicit path"
+    [[ -z "$proc_file" ]] && die "process not found: '$proc_arg' (looked for processes/${proc_arg}.sop.json in this cell and its parents)" "file_not_found" \
+        "pass the file's path (e.g. ./${proc_arg}.sop.json), or run opensop init and put it in processes/"
   fi
+  [[ "$proc_file" == *.yaml || "$proc_file" == *.yml ]] && die "local runs take a JSON process file; $proc_file is YAML" "invalid_json" \
+    "convert it to .sop.json (YAML is the server registration format: opensop register)"
 
   [[ -f "$proc_file" ]] || die "process file not found: $proc_file" "file_not_found"
   jq -e . "$proc_file" >/dev/null 2>&1 || die "process file is not valid JSON: $proc_file" "invalid_json"
@@ -3081,18 +3454,20 @@ local_run() {
   local proc_dir name built inputs ctx
   proc_dir="$(cd "$(dirname "$proc_file")" && pwd)"
   name="$(jq -r '.name // "unnamed"' "$proc_file")"
+  local _string_inputs; _string_inputs="$(_string_input_names "$proc_file")"   # read by build_payload_object
   built="$(build_payload_object input "$@")"          # reuse the same input parsing as remote run
   inputs="$(echo "$built" | jq -c '.payload')"
   # Declared defaults, overridden by --input. `inputs` may be declared as an
   # object (name → default) or, per SPEC v0.6, as an array of {name,type,default?}.
   # Normalise the array form to a name → default object first, otherwise the `*`
   # merge fails with "array and object cannot be multiplied".
-  ctx="$(jq -c --argjson i "$inputs" '
-    ((.inputs // {}) as $decl
-     | if ($decl | type) == "array"
-       then ($decl | map(select(.name != null and has("default"))) | map({(.name): .default}) | add // {})
-       else $decl end) * $i
-  ' "$proc_file")"
+  local in_schema in_errors
+  in_schema="$(jq -c "$_INPUT_DECLS_JQ"'{process: {inputs: ((.inputs // {}) | _input_decls)}}' "$proc_file")"
+  ctx="$(_local_input_defaults "$in_schema" "$inputs")"
+  # Same checks as dry-run: refuse before a run dir exists.
+  in_errors="$(_input_errors "$in_schema" "$ctx")"
+  [[ "$in_errors" == "[]" ]] || die "invalid inputs for $name: $(jq -r 'map(.message) | join("; ")' <<<"$in_errors")" "usage_error" \
+    "pass them with --input KEY=VALUE (see: opensop dry-run $proc_arg)"
 
   # Validate the steps array up front — before creating a run dir — so an empty
   # or malformed process fails loudly instead of "completing" trivially.
@@ -3123,7 +3498,7 @@ local_run() {
   local run_id run_dir started started_ms
   run_id="$(_local_run_id)"; run_dir="$OPENSOP_LOCAL_HOME/runs/$run_id"
   mkdir -p "$run_dir"; started="$(_local_now)"; started_ms="$(_local_now_ms)"
-  trap '_local_finalize_trap "$run_dir"' EXIT    # safety net: never leave a run "running"
+  trap "_local_finalize_trap $(printf %q "$run_dir")" EXIT    # safety net: never leave a run "running"
   # started_at_ms: millisecond-precision epoch timestamp for the run start.
   # Written additively alongside started_at (second-granular ISO string) so that
   # local_submit can compute total wall time without the 0–999 ms rounding error
@@ -3133,7 +3508,9 @@ local_run() {
   # if the original process file is later moved or deleted (#101 gap 3).
   jq -nc --arg n "$name" --arg p "$proc_file" --arg d "$proc_dir" --arg id "$run_id" --arg t "$started" \
         --argjson sms "$started_ms" --argjson inp "$ctx" \
-    '{run_id:$id, process:$n, process_file:$p, process_dir:$d, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp}' \
+        --arg cwd "$PWD" --argjson md "$(jq -c '.metadata' <<<"$built")" \
+    '{run_id:$id, process:$n, process_file:$p, process_dir:$d, cwd:$cwd, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp}
+     + (if $md == {} then {} else {metadata:$md} end)' \
     > "$run_dir/manifest.json"
 
   # Snapshot the normalized process definition at run creation (#101).
@@ -3167,32 +3544,11 @@ local_run() {
     local wait_step wait_since
     wait_step="$(jq -r ".steps[$wait_index].id // \"step-$wait_index\"" "$snap_file")"
     wait_since="$(_local_now)"
-    # Build expects: field names + schema from the step's inputs/outputs array.
-    # For approval steps, default to decision:enum(approve,reject) when neither
-    # inputs[] nor outputs[] is declared (matches the runtime's implicit contract).
-    local wait_expects
-    wait_expects="$(jq -c --argjson idx "$wait_index" '
-      .steps[$idx] as $s |
-      ($s.inputs // $s.outputs // null) as $decl |
-      if $decl != null and ($decl | length) > 0 then
-        { outputs: [$decl[].name // empty],
-          schema:  $decl }
-      elif $s.type == "approval" then
-        { outputs: ["decision"],
-          schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-      else
-        { outputs: [], schema: [] }
-      end
-    ' "$snap_file")"
-    # Determine reason from step type (byte-parity with runtime sub_state strings).
-    local wait_stype wait_reason
-    wait_stype="$(jq -r ".steps[$wait_index].type // \"automated\"" "$snap_file")"
-    case "$wait_stype" in
-      form)     wait_reason="waiting_for_input" ;;
-      approval) wait_reason="waiting_for_approval" ;;
-      *)        wait_reason="waiting_for_callback" ;;
-    esac
-    local wait_duration_ms; wait_duration_ms=$(( $(_local_now_ms) - started_ms ))
+    # expects (field names + schema) and reason (byte-parity with runtime sub_state strings).
+    local wait_meta wait_expects wait_reason
+    wait_meta="$(_local_wait_meta "$snap_file" "$wait_index")"
+    wait_expects="$(jq -c '.expects' <<<"$wait_meta")"; wait_reason="$(jq -r '.reason' <<<"$wait_meta")"
+    local wait_duration_ms; wait_duration_ms=$(_local_ms_since "$started_ms")
     jq -c --arg s "waiting" \
           --argjson idx "$((wait_index + 1))" \
           --argjson widx "$wait_index" \
@@ -3212,7 +3568,7 @@ local_run() {
       ok "ran $C_BOLD$name$C_RESET locally — waiting at $wait_step"
       info "  run: $run_id"
       info "  dir: $run_dir"
-      info "next:  opensop submit $run_id $wait_step --output k=v"
+      info "$(_local_next_hint "$run_dir")"
     else
       jq -c . "$run_dir/manifest.json"
     fi
@@ -3220,7 +3576,7 @@ local_run() {
   fi
 
   local ended; ended="$(_local_now)"
-  local run_duration_ms; run_duration_ms=$(( $(_local_now_ms) - started_ms ))
+  local run_duration_ms; run_duration_ms=$(_local_ms_since "$started_ms")
   jq -c --arg s "$run_status" --arg e "$ended" --argjson dur "$run_duration_ms" \
      '.status=$s | .ended_at=$e | .duration_ms=$dur' \
      "$run_dir/manifest.json" > "$run_dir/manifest.json.tmp" && mv "$run_dir/manifest.json.tmp" "$run_dir/manifest.json"
@@ -3265,6 +3621,13 @@ _local_step_loop() {
   fi
   local audit="$run_dir/audit.jsonl"
   local n_steps; n_steps="$(jq '(.steps // []) | length' "$proc_file")"
+  local loop_pid="$BASHPID"   # this loop's (sub)shell, for _local_exec_step
+  # run_cwd: where the run was first invoked (manifest.cwd), so a resumed run or
+  # a continued parent defaults CLI workdirs to the same place, not to wherever
+  # `submit` happened to run. run_pinp: the run's initial inputs (process.inputs.*).
+  local run_cwd run_pinp
+  run_cwd="$(jq -r '.cwd // ""' "$run_dir/manifest.json" 2>/dev/null || true)"; [[ -z "$run_cwd" ]] && run_cwd="$PWD"
+  run_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
 
   local i="$start_index"
   while [ "$i" -lt "$n_steps" ]; do
@@ -3281,7 +3644,7 @@ _local_step_loop() {
     if [[ -z "$sexec" ]]; then
       case "$stype" in
         automated|shell|webhook)                          sexec="external" ;;
-        noop|form|approval|notification|wait|judgment|llm|subprocess) sexec="internal" ;;
+        noop|form|approval|notification|wait|judgment|llm|subprocess|loop) sexec="internal" ;;
         *)                                                sexec="external" ;;
       esac
     fi
@@ -3292,6 +3655,24 @@ _local_step_loop() {
     s_started="$(_local_now)"; s_started_ms="$(_local_now_ms)"
     # C1a: per-step metrics; llm-specific fields are set inside the llm case below.
     local s_llm_model="" s_llm_tokens_in=0 s_llm_tokens_out=0 s_llm_token_source="none"
+    local s_llm_provider="" s_llm_permission="" s_llm_cli_version="" lp_exit=""
+    local s_llm_usage="null" s_llm_attempts=0   # summed across retries; see _local_llm_add_usage
+    local s_script_sha=""   # automated: the script file's sha256, so a changed script shows in the receipt
+
+    # SPEC §3.2 condition: evaluated before dispatch; false → the step is
+    # skipped (a "skipped" receipt, no output in context). An expression the
+    # §2.6 evaluator cannot parse fails the step rather than guessing.
+    local s_cond; s_cond="$(jq -r '.condition // "" | tostring' <<<"$step")"
+    if [[ -n "$s_cond" ]]; then
+      case "$(_local_eval_cond "$s_cond" "$ctx" "$run_pinp")" in
+        true) ;;
+        false)
+          jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg a "$s_started" --arg c "$s_cond" \
+            '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"skipped", condition:$c, started_at:$a, ended_at:$a, duration_ms:0}' >> "$audit"
+          i=$((i+1)); continue ;;
+        *) stype="__bad_condition__" ;;
+      esac
+    fi
 
     # SPEC §3.3: a script step receives its DECLARED inputs (resolved from prior
     # step outputs / process inputs via each entry's `from:` reference). The local
@@ -3351,6 +3732,14 @@ _local_step_loop() {
         fi
       fi
     fi
+    # $OSL_CONTEXT is one env string, capped at 128 KiB (MAX_ARG_STRLEN) like an
+    # argv string; past that it is left unset (stdin still carries the context)
+    # instead of failing the exec with "Argument list too long".
+    local step_env=(-u OSL_CONTEXT)
+    if [[ "$stype" == automated || "$stype" == shell ]]; then
+      if (( $(printf '%s' "$step_input_ctx" | wc -c) < 131000 )); then step_env=(OSL_CONTEXT="$step_input_ctx")
+      else echo "opensop: context is over 128 KiB — \$OSL_CONTEXT unset for this step; read the context from stdin" >>"$run_dir/$sid.stderr.log"; fi
+    fi
 
     case "$stype" in
       automated)
@@ -3368,16 +3757,17 @@ _local_step_loop() {
         # file is executable, invoke it directly so the shebang applies (Ruby,
         # Python, etc.); otherwise fall back to bash (so shell scripts committed
         # without +x keep working).
+        [ -f "$script" ] && s_script_sha="$(_sha256 <"$script" 2>/dev/null || true)"
         if [ ! -f "$script" ]; then out_raw="step script not found: $script"; rc=127
         elif [ -x "$script" ]; then
-          out_raw="$(OSL_CONTEXT="$step_input_ctx" OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" "$script" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?
+          out_raw="$(_local_exec_step "$run_dir" "$loop_pid" "$step_input_ctx" "$run_dir/$sid.stderr.log" env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" "$script")" || rc=$?
         else
-          out_raw="$(OSL_CONTEXT="$step_input_ctx" OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash "$script" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?
+          out_raw="$(_local_exec_step "$run_dir" "$loop_pid" "$step_input_ctx" "$run_dir/$sid.stderr.log" env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash "$script")" || rc=$?
         fi
         fi ;;
       shell)
         if [[ -n "$_decl_input_error" ]]; then out_raw="$_decl_input_error"; rc=1
-        else out_raw="$(OSL_CONTEXT="$step_input_ctx" OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash -c "$srun" <<<"$step_input_ctx" 2>>"$run_dir/$sid.stderr.log")" || rc=$?; fi ;;
+        else out_raw="$(_local_exec_step "$run_dir" "$loop_pid" "$step_input_ctx" "$run_dir/$sid.stderr.log" env ${step_env[@]+"${step_env[@]}"} OSL_RUN_DIR="$run_dir" OSL_STEP="$sid" bash -c "$srun")" || rc=$?; fi ;;
       noop) out_raw="{}"; rc=0 ;;
       form)
         # Pause — append a "waiting" receipt and return the waiting signal.
@@ -3386,7 +3776,7 @@ _local_step_loop() {
         # the field consistently with all other step types.  result_hash="pending"
         # is the canonical sentinel for a step that has not yet produced output
         # (local_diff treats "pending" as non-comparable per Fix 2).
-        local _form_pause_ms; _form_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+        local _form_pause_ms; _form_pause_ms=$(_local_ms_since "$s_started_ms")
         jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                --arg a "$s_started" --argjson dur "$_form_pause_ms" \
           '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -3398,7 +3788,7 @@ _local_step_loop() {
         # Approval pause — byte-parity with StepExecutors::Approval (reason: waiting_for_approval).
         # context.json is already up-to-date (written after last completed step).
         # C1a Fix 3: same duration_ms + result_hash:"pending" treatment as form above.
-        local _appr_pause_ms; _appr_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+        local _appr_pause_ms; _appr_pause_ms=$(_local_ms_since "$s_started_ms")
         jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                --arg a "$s_started" --argjson dur "$_appr_pause_ms" \
           '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -3424,7 +3814,7 @@ _local_step_loop() {
           # C1a Fix 3: duration_ms + result_hash:"pending" for consistency.
           local wait_until_val _wait_pause_ms
           wait_until_val="$(jq -r '.until' <<<"$wait_block")"
-          _wait_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+          _wait_pause_ms=$(_local_ms_since "$s_started_ms")
           jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                  --arg a "$s_started" --arg u "$wait_until_val" --argjson dur "$_wait_pause_ms" \
             '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -3437,34 +3827,129 @@ _local_step_loop() {
           out_raw='{"waited":true}'
           rc=0
         fi ;;
-      llm)
+      llm|judgment)
         # LLM step — mirrors StepExecutors::Llm + LlmProviders::Anthropic.
         #
         # Fields:
-        #   model (required; must start with "claude")
+        #   model (required; {{ var }}-templated from context). Provider by prefix:
+        #     claude*               → Anthropic HTTP API (curl + ANTHROPIC_API_KEY)
+        #     claude-code:<model>   → `claude -p`        (local extension; CLI providers)
+        #     codex:<model>         → `codex exec`
+        #     cursor:<model>        → `cursor-agent -p`
+        #     kimi:<model>          → `kimi -p`
+        #     An empty <model> after the colon means the CLI's own default.
         #   prompt | prompt_file (resolved relative to proc_dir)
         #   expected_output_schema (object — optional)
         #   max_retries (default 2; total attempts = max_retries + 1)
         #   retry_on_incomplete (default true; false => 1 attempt)
+        #   workdir    (CLI providers; {{ var }}-templated; default: the run's cwd)
+        #   permission (CLI providers; {{ var }}-templated; read-only (default) | workspace-write | full-access)
         #
-        # Test seam: if OSL_LLM_STUB is set, skip the network call entirely and
+        # Test seams: if OSL_LLM_STUB is set, skip the network/CLI call entirely and
         # treat its value as the raw model response text (same fence-strip +
         # schema validation still runs). Mirrors the runtime's provider_resolver
         # test seam (TestStub). Never set this in production.
+        # OSL_LLM_ARGV_FILE=<path>: each CLI-provider attempt appends
+        # {cli, cwd, argv} as one JSON line there (combine with OSL_LLM_STUB to
+        # test argv building without running the CLI).
+        #
+        # judgment (SPEC §3.9) shares this arm. With judgment.allow_agent and a
+        # model + prompt/prompt_file, the answer is validated against the step's
+        # outputs plus confidence:number; it then pauses `escalated` when
+        # judgment.require_human_review is true or confidence <
+        # judgment.confidence_threshold. Without an agent it escalates at once,
+        # as the server does. Resume: opensop submit <run> <step> --output decision=...
         #
         # DESIGN NOTE: all early-exit paths use rc=1 + a sentinel variable llm_ok=false
         # rather than `break`, because `break` inside `case ... esac` that is itself
         # inside `while ... done` breaks the outer while loop (not the case block).
         local llm_ok=true llm_model llm_prompt_file llm_schema_json llm_max_retries llm_retry
-        llm_model="$(jq -r '.model // ""' <<<"$step")"
-        if [[ -z "$llm_model" ]]; then
+        local jd_escalate="" jd_proposal="null"
+        local llm_cli="" llm_cli_model="" llm_perm="" llm_workdir="" llm_bin="" llm_bin_path="" llm_timeout=""
+        local llm_pinp; llm_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
+        if [[ "$stype" == judgment ]] && ! jq -e '.judgment.allow_agent == true and (.model // "") != ""
+              and ((.prompt // .prompt_file // "") != "")' <<<"$step" >/dev/null; then
+          jd_escalate="no_agent"; llm_ok=false
+        fi
+        if ! llm_model="$(_local_render "$(jq -r '.model // ""' <<<"$step")" "$ctx" "$llm_pinp")"; then
+          # (a judgment already escalating no_agent keeps that outcome)
+          [[ "$llm_ok" == true ]] && { out_raw="$(_local_render_err model "$llm_model")"; rc=1; llm_ok=false; }
+          llm_model=""
+        elif [[ "$llm_ok" == true && -z "$llm_model" ]]; then
           out_raw='{"error":"llm step is missing model"}'; rc=1; llm_ok=false
         fi
         if [[ "$llm_ok" == true ]]; then
           case "$llm_model" in
-            claude*) ;;
+            claude-code:*|codex:*|cursor:*|kimi:*)
+              llm_cli="${llm_model%%:*}"; llm_cli_model="${llm_model#*:}"
+              s_llm_provider="$llm_cli"; s_llm_model="$llm_model" ;;
+            claude*) s_llm_provider="anthropic" ;;
             *) out_raw="{\"error\":\"no provider configured for model '$llm_model'\"}"; rc=1; llm_ok=false ;;
           esac
+        fi
+
+        # CLI providers: permission + workdir. SPEC §2.9.2 — enforcement is
+        # optional, half-enforcement is not: a permission the CLI cannot back is
+        # refused, never run with more access. Mapping (verified against each
+        # CLI's --help and a write probe):
+        #   claude-code  read-only: --tools Read,Grep,Glob   workspace-write: --permission-mode auto
+        #                full-access: --permission-mode bypassPermissions
+        #   codex        -s read-only | workspace-write | danger-full-access
+        #   cursor       read-only: --mode ask   workspace-write: --sandbox enabled
+        #                full-access: --force --sandbox disabled
+        #   kimi         full-access only: `kimi -p` has no sandbox, writes without
+        #                asking, and refuses --plan/--auto alongside --prompt.
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          # {{ ref }}-templated like model/workdir, so an earlier step can choose it;
+          # the rendered value must still be in the closed vocabulary below (an
+          # unresolved token stays literal and is refused).
+          if ! llm_perm="$(_local_render "$(jq -r '.permission // "read-only"' <<<"$step")" "$ctx" "$llm_pinp")"; then
+            out_raw="$(_local_render_err permission "$llm_perm")"; rc=1; llm_ok=false; llm_perm=""
+          fi
+          s_llm_permission="$llm_perm"
+          if [[ "$llm_ok" == true ]]; then case "$llm_perm" in
+            read-only|workspace-write|full-access) ;;
+            *) out_raw="{\"error\":\"permission must be read-only, workspace-write or full-access, got '$llm_perm'\"}"; rc=1; llm_ok=false ;;
+          esac; fi
+        fi
+        if [[ "$llm_ok" == true && "$llm_cli" == kimi && "$llm_perm" != full-access ]]; then
+          out_raw="{\"error\":\"kimi cannot enforce permission '$llm_perm' (kimi -p has no sandbox) — refusing to run with more access; declare permission: full-access to run it unconfined\"}"; rc=1; llm_ok=false
+        fi
+        # timeout (SPEC §3.8 example `timeout: 2m`): bounds every CLI attempt via
+        # coreutils timeout (TERM, KILL 10s later, to the CLI's whole process
+        # group). Absent → unbounded, as before. Declared but no `timeout` binary
+        # → refused rather than run unbounded.
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          llm_timeout="$(jq -r '.timeout // "" | tostring' <<<"$step")"
+          if [[ -n "$llm_timeout" && ! "$llm_timeout" =~ ^[0-9]+(\.[0-9]+)?[smhd]?$ ]]; then
+            out_raw="{\"error\":\"timeout must be a number of seconds or look like 30s, 2m, 1h; got '$llm_timeout'\"}"; rc=1; llm_ok=false
+          elif [[ -n "$llm_timeout" ]] && ! command -v timeout >/dev/null 2>&1; then
+            out_raw='{"error":"step declares timeout but the timeout command (coreutils) is not installed — refusing to run unbounded"}'; rc=1; llm_ok=false
+          fi
+        fi
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          if ! llm_workdir="$(_local_render "$(jq -r '.workdir // ""' <<<"$step")" "$ctx" "$llm_pinp")"; then
+            out_raw="$(_local_render_err workdir "$llm_workdir")"; rc=1; llm_ok=false
+          elif [[ -z "$llm_workdir" ]]; then llm_workdir="$run_cwd"; fi
+          if [[ "$llm_ok" == true && ! -d "$llm_workdir" ]]; then
+            out_raw="$(jq -nc --arg d "$llm_workdir" '{error:("workdir not found: " + $d)}')"; rc=1; llm_ok=false
+          fi
+        fi
+        if [[ "$llm_ok" == true && -n "$llm_cli" ]]; then
+          case "$llm_cli" in
+            claude-code) llm_bin=claude ;; codex) llm_bin=codex ;; cursor) llm_bin=cursor-agent ;; kimi) llm_bin=kimi ;;
+          esac
+          if [[ -n "${OSL_LLM_STUB:-}" ]]; then
+            s_llm_cli_version="stub"
+          else
+            llm_bin_path="$(command -v "$llm_bin" || true)"
+            [[ -z "$llm_bin_path" && "$llm_bin" == kimi && -x "$HOME/.kimi-code/bin/kimi" ]] && llm_bin_path="$HOME/.kimi-code/bin/kimi"
+            if [[ -z "$llm_bin_path" ]]; then
+              out_raw="{\"error\":\"$llm_bin not found on PATH (needed for model '$llm_model')\"}"; rc=1; llm_ok=false
+            else
+              s_llm_cli_version="$("$llm_bin_path" --version </dev/null 2>/dev/null | head -1)" || true
+            fi
+          fi
         fi
 
         # Prompt body: inline prompt or prompt_file (relative to proc_dir).
@@ -3486,19 +3971,24 @@ _local_step_loop() {
           fi
         fi
 
-        # Substitute {{ var }} tokens from the current context (jq).
-        # Each {{var}} is replaced by ctx[var] (stringified) if present; left as-is if not.
+        # Substitute {{ var }} tokens from the current context.
         local llm_rendered_prompt=""
         if [[ "$llm_ok" == true ]]; then
-          llm_rendered_prompt="$(jq -rn \
-            --arg tmpl "$llm_prompt_body" \
-            --argjson ctx "$ctx" \
-            '$tmpl | gsub("\\{\\{\\s*(?<v>[a-zA-Z_][a-zA-Z0-9_]*)\\s*\\}\\}";
-              if $ctx[.v] != null then ($ctx[.v] | tostring) else "{{" + .v + "}}" end)')"
+          if ! llm_rendered_prompt="$(_local_render "$llm_prompt_body" "$ctx" "$llm_pinp")"; then
+            out_raw="$(_local_render_err prompt "$llm_rendered_prompt")"; rc=1; llm_ok=false
+          fi
         fi
 
-        # Schema (optional).
-        if [[ "$llm_ok" == true ]]; then
+        # Schema (optional). A judgment's schema is its declared outputs (each
+        # required unless it has required_if or required:false) plus confidence.
+        if [[ "$llm_ok" == true && "$stype" == judgment ]]; then
+          # (a {name: type} outputs map is already that schema's shorthand)
+          llm_schema_json="$(jq -c '(.outputs // []) | if type == "object" then . else
+              [.[] | select(.name != null)
+              | {(.name): ({type: (.type // "string"), required: (.required_if == null and .required != false)}
+                           + (if .values then {values: .values} else {} end))}]
+            | add // {} end | . + {confidence: {type: "number", required: true}}' <<<"$step")"
+        elif [[ "$llm_ok" == true ]]; then
           llm_schema_json="$(jq -c '.expected_output_schema // {}' <<<"$step")"
         fi
 
@@ -3516,7 +4006,7 @@ _local_step_loop() {
         fi
 
         # Require curl for the real API call (test seam bypasses this).
-        if [[ "$llm_ok" == true && -z "${OSL_LLM_STUB:-}" ]]; then
+        if [[ "$llm_ok" == true && -z "$llm_cli" && -z "${OSL_LLM_STUB:-}" ]]; then
           require_curl
           if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
             out_raw='{"error":"ANTHROPIC_API_KEY is not set"}'; rc=1; llm_ok=false
@@ -3539,6 +4029,7 @@ No prose, no code fences. Output only the JSON object."
         # Retry loop — only entered when all pre-checks passed (llm_ok=true).
         local llm_attempt=1 llm_last_errors="" llm_validated="" llm_failed=false
         while [[ "$llm_ok" == true && "$llm_attempt" -le "$llm_max_attempts" ]]; do
+          s_llm_attempts=$(( s_llm_attempts + 1 ))
           # Prepend corrective preamble on retry.
           local llm_attempt_prompt
           if [[ "$llm_attempt" -gt 1 && -n "$llm_last_errors" ]]; then
@@ -3550,10 +4041,101 @@ $llm_rendered_prompt"
             llm_attempt_prompt="$llm_rendered_prompt"
           fi
 
-          # Get the raw text response: stub or real API call.
+          # CLI providers: one prompt (schema instruction + rendered prompt),
+          # non-interactive, only the final text captured. argv[0] is the bare
+          # command name; it is exec'd via llm_bin_path. The prompt goes on stdin
+          # (no 128 KiB MAX_ARG_STRLEN cap) for claude, codex (`-`) and cursor —
+          # each verified to read a piped prompt.
+          # ponytail: kimi -p takes the prompt only as an argument, so a kimi
+          # prompt is still capped at 128 KiB; move it to stdin once kimi reads one.
+          local llm_argv=() llm_lastmsg="" llm_stdin=""
+          if [[ -n "$llm_cli" ]]; then
+            local llm_full_prompt="$llm_system_prompt
+
+$llm_attempt_prompt"
+            case "$llm_cli" in
+              claude-code)
+                llm_argv=(claude -p --output-format json --no-session-persistence)
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
+                case "$llm_perm" in
+                  read-only)       llm_argv+=(--tools Read,Grep,Glob) ;;
+                  workspace-write) llm_argv+=(--permission-mode auto) ;;  # acceptEdits would block Bash under -p
+                  full-access)     llm_argv+=(--permission-mode bypassPermissions) ;;
+                esac
+                llm_stdin="$llm_full_prompt" ;;
+              codex)
+                llm_lastmsg="$(mktemp)"
+                llm_argv=(codex exec --skip-git-repo-check --ephemeral --color never --json -C "$llm_workdir" -o "$llm_lastmsg")
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(-m "$llm_cli_model")
+                case "$llm_perm" in
+                  read-only)       llm_argv+=(-s read-only) ;;
+                  workspace-write) llm_argv+=(-s workspace-write) ;;
+                  full-access)     llm_argv+=(-s danger-full-access) ;;
+                esac
+                llm_argv+=(-); llm_stdin="$llm_full_prompt" ;;
+              cursor)
+                llm_argv=(cursor-agent -p --output-format json --trust --workspace "$llm_workdir")
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(--model "$llm_cli_model")
+                case "$llm_perm" in
+                  read-only)       llm_argv+=(--mode ask) ;;
+                  workspace-write) llm_argv+=(--sandbox enabled) ;;
+                  full-access)     llm_argv+=(--force --sandbox disabled) ;;
+                esac
+                llm_stdin="$llm_full_prompt" ;;
+              kimi)
+                # No --auto/--yolo/--plan: kimi rejects each alongside --prompt; plain -p
+                # already runs every tool without asking (hence full-access only).
+                llm_argv=(kimi --output-format text)
+                [[ -n "$llm_cli_model" ]] && llm_argv+=(-m "$llm_cli_model")
+                llm_argv+=(-p "$llm_full_prompt") ;;
+            esac
+            if [[ -n "${OSL_LLM_ARGV_FILE:-}" ]]; then
+              printf '%s\0' "${llm_argv[@]}" | jq -cRs --arg cli "$llm_cli" --arg cwd "$llm_workdir" --arg in "$llm_stdin" \
+                '{cli:$cli, cwd:$cwd, argv:(split("\u0000")[:-1]), stdin:$in}' >> "$OSL_LLM_ARGV_FILE"
+            fi
+          fi
+
+          # Get the raw text response: stub, CLI provider, or real API call.
           local llm_raw_text=""
           if [[ -n "${OSL_LLM_STUB:-}" ]]; then
             llm_raw_text="$OSL_LLM_STUB"
+            [[ -n "$llm_lastmsg" ]] && rm -f "$llm_lastmsg"
+          elif [[ -n "$llm_cli" ]]; then
+            local llm_cli_out="" llm_cli_stdout="" llm_cli_rc=0 llm_to=() llm_errf
+            [[ -n "$llm_timeout" ]] && llm_to=(timeout --kill-after=10 "$llm_timeout")
+            llm_errf="$(mktemp)"
+            llm_cli_out="$(cd "$llm_workdir" && ${llm_to[@]+"${llm_to[@]}"} "$llm_bin_path" "${llm_argv[@]:1}" < <(printf '%s' "$llm_stdin") 2>"$llm_errf")" || llm_cli_rc=$?
+            llm_cli_stdout="$llm_cli_out"
+            cat "$llm_errf" >>"$run_dir/$sid.stderr.log"
+            # Usage first: a failed or timed-out call may still have spent tokens.
+            _local_llm_add_usage "$llm_cli" "$llm_cli_out"
+            # The codex -o file is read and removed here on every outcome (success,
+            # failure, timeout) — nothing below may `continue` past it. (codex's
+            # stdout is the --json event stream; the final message is the -o file.)
+            if [[ "$llm_cli" == codex && -n "$llm_lastmsg" ]]; then
+              llm_cli_out="$(cat "$llm_lastmsg" 2>/dev/null || true)"; rm -f "$llm_lastmsg"
+            fi
+            if [[ -n "$llm_timeout" ]] && [[ "$llm_cli_rc" -eq 124 || "$llm_cli_rc" -eq 137 ]]; then
+              out_raw="$(_local_llm_fail "$llm_cli" "$llm_bin" "timed out after $llm_timeout (step timeout)" "$llm_cli_stdout" "$llm_errf")"
+              rm -f "$llm_errf"; rc=1; llm_failed=true; llm_ok=false; continue
+            fi
+            if [[ "$llm_cli_rc" -ne 0 ]]; then
+              out_raw="$(_local_llm_fail "$llm_cli" "$llm_bin" "exited $llm_cli_rc" "$llm_cli_stdout" "$llm_errf")"
+              rm -f "$llm_errf"; rc=1; llm_failed=true; llm_ok=false; continue
+            fi
+            case "$llm_cli" in
+              claude-code|cursor)
+                # --output-format json: a single result object; .result is the final text.
+                if ! llm_raw_text="$(jq -er 'if .is_error == true then error("is_error") else .result end | strings' <<<"$llm_cli_out" 2>/dev/null)"; then
+                  out_raw="$(_local_llm_fail "$llm_cli" "$llm_bin" "returned no result text" "$llm_cli_stdout" "$llm_errf" \
+                    | jq -c --arg o "${llm_cli_out:0:300}" '. + {detail:$o}')"
+                  rm -f "$llm_errf"; rc=1; llm_failed=true; llm_ok=false; continue
+                fi ;;
+              # kimi prints the final answer on stdout behind a "• " bullet (thinking goes to stderr).
+              kimi) llm_raw_text="$(sed '1s/^• //' <<<"$llm_cli_out")" ;;
+              *)    llm_raw_text="$llm_cli_out" ;;
+            esac
+            rm -f "$llm_errf"
           else
             # Build request body.
             local llm_req_body
@@ -3579,8 +4161,8 @@ $llm_rendered_prompt"
               -H "content-type: application/json"
               -o "$llm_resp_tmp"
               -w "%{http_code}"
-              -d "$llm_req_body")
-            if ! llm_http_status="$(curl "${llm_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
+              --data-binary @-)   # body on stdin: it grows with the prompt (128 KiB argv cap)
+            if ! llm_http_status="$(printf '%s' "$llm_req_body" | curl "${llm_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
               rm -f "$llm_resp_tmp"
               out_raw='{"error":"curl failed calling Anthropic API"}'; rc=1; llm_failed=true; llm_ok=false; continue
             fi
@@ -3591,6 +4173,7 @@ $llm_rendered_prompt"
             fi
 
             local llm_resp_json; llm_resp_json="$(cat "$llm_resp_tmp")"; rm -f "$llm_resp_tmp"
+            _local_llm_add_usage anthropic "$llm_resp_json"
 
             # C1a: capture token usage from the Anthropic response (usage block).
             # Only update the outer metrics variables on the final (successful) attempt;
@@ -3633,27 +4216,44 @@ $llm_rendered_prompt"
             continue
           fi
 
-          # Validate against expected_output_schema (required + type + enum checks).
-          # Schema here is an object {field_name: {type, required, ...}} or {} for any.
+          # Validate against expected_output_schema — the full SPEC §3.8 mini-grammar,
+          # recursively. A field spec is an object {type, required, values,
+          # properties, items} or a shorthand string: string | number | boolean |
+          # object | enum[a,b] | array[<type>]. An object with none of the spec keys
+          # is a nested object's properties. Fields are required only when
+          # required:true. Same check for the API and every CLI provider.
           local llm_schema_errors
           llm_schema_errors="$(jq -rn \
             --argjson schema "$llm_schema_json" \
-            --argjson parsed "$llm_parsed" \
-            '[ $schema | to_entries[] |
-               . as $e | $e.key as $k | $e.value as $fdef |
-               ($parsed[$k]) as $val |
-               (if ($fdef.required == true) and ($val == null) then
-                  "required field missing: " + $k
-                else null end),
-               (if $val != null then
-                 if   $fdef.type == "number"  and ($val | type) != "number"  then $k + " must be a number"
-                 elif $fdef.type == "boolean" and ($val | type) != "boolean" then $k + " must be a boolean"
-                 elif $fdef.type == "string"  and ($val | type) != "string"  then $k + " must be a string"
-                 elif $fdef.type == "enum" and ($fdef.values != null) and ([$fdef.values[] | . == $val] | any | not) then
-                   $k + " must be one of: " + ($fdef.values | join(", "))
-                 else null end
-               else null end)
-            ] | map(select(. != null)) | join("; ")')"
+            --argjson parsed "$llm_parsed" '
+            def trim: gsub("^\\s+|\\s+$"; "");
+            def norm:
+              if type == "string" then
+                (capture("^\\s*enum\\[(?<v>.*)\\]\\s*$") | {type: "enum", values: (.v | split(",") | map(trim))})
+                // (capture("^\\s*array\\[(?<v>.*)\\]\\s*$") | {type: "array", items: .v})
+                // {type: trim}
+              elif type == "object" and ((has("type") or has("required") or has("values") or has("properties") or has("items")) | not)
+                then {type: "object", properties: .}
+              elif type == "object" then .
+              else {} end;
+            def verrs($v; $path):
+              norm as $s
+              | if $v == null then (if $s.required == true then ["required field missing: " + $path] else [] end)
+                elif $s.type == "number"  then (if ($v | type) == "number"  then [] else [$path + " must be a number"] end)
+                elif $s.type == "boolean" then (if ($v | type) == "boolean" then [] else [$path + " must be a boolean"] end)
+                elif $s.type == "string"  then (if ($v | type) == "string"  then [] else [$path + " must be a string"] end)
+                elif $s.type == "enum" then
+                  (if $s.values == null or any($s.values[]; . == $v) then []
+                   else [$path + " must be one of: " + ($s.values | map(tostring) | join(", "))] end)
+                elif $s.type == "object" then
+                  (if ($v | type) != "object" then [$path + " must be an object"]
+                   else [($s.properties // {}) | to_entries[] as $e | $e.value | verrs($v[$e.key]; $path + "." + $e.key)[]] end)
+                elif $s.type == "array" then
+                  (if ($v | type) != "array" then [$path + " must be an array"]
+                   elif $s.items == null then []
+                   else [range(0; $v | length) as $i | $s.items | verrs($v[$i]; $path + "[" + ($i | tostring) + "]")[]] end)
+                else [] end;
+            [$schema | to_entries[] as $e | $e.value | verrs($parsed[$e.key]; $e.key)[]] | join("; ")')"
 
           if [[ -n "$llm_schema_errors" ]]; then
             llm_last_errors="$llm_schema_errors"
@@ -3673,13 +4273,44 @@ $llm_rendered_prompt"
           llm_ok=false  # sentinel to exit the while (validated successfully)
         done
 
-        if [[ "$llm_failed" == true ]]; then
+        if [[ -n "$jd_escalate" ]]; then
+          : # judgment with no agent — escalated below
+        elif [[ "$llm_failed" == true ]]; then
           : # out_raw and rc already set inside the loop
         elif [[ -n "$llm_validated" ]]; then
           out_raw="$llm_validated"; rc=0
         elif [[ "$rc" -ne 1 ]]; then
           # Exhausted attempts without a fatal error — validation always failed.
           out_raw="{\"error\":\"llm output failed schema validation after $llm_max_attempts attempt(s): $llm_last_errors\"}"; rc=1
+        fi
+
+        # judgment: escalate (pause, reason "escalated") on a forced human review
+        # or a confidence below threshold; the agent's answer rides along as
+        # `proposal`. A judgment that completes falls through like any step.
+        if [[ "$stype" == judgment && -z "$jd_escalate" && "$rc" -eq 0 ]]; then
+          if jq -e '.judgment.require_human_review == true' <<<"$step" >/dev/null; then
+            jd_escalate="require_human_review"
+          elif jq -e --argjson o "$out_raw" '.judgment.confidence_threshold != null
+                 and $o.confidence < .judgment.confidence_threshold' <<<"$step" >/dev/null; then
+            jd_escalate="low_confidence"
+          fi
+          [[ -n "$jd_escalate" ]] && jd_proposal="$out_raw"
+        fi
+        if [[ -n "$jd_escalate" ]]; then
+          local _jd_pause_ms; _jd_pause_ms=$(_local_ms_since "$s_started_ms")
+          jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
+                 --arg a "$s_started" --argjson dur "$_jd_pause_ms" --arg why "$jd_escalate" \
+                 --argjson prop "$jd_proposal" --arg pv "$s_llm_provider" --arg m "$s_llm_model" \
+                 --arg perm "$s_llm_permission" --arg cv "$s_llm_cli_version" \
+                 --argjson usage "$s_llm_usage" --argjson att "$s_llm_attempts" \
+            '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
+              reason:"escalated", escalation:$why, started_at:$a,
+              duration_ms:$dur, result_hash:"pending"}
+             + (if $prop != null then {proposal:$prop} else {} end)
+             + ({provider:$pv, model:$m, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))
+             + (if $att > 0 then {usage: ($usage // {input_tokens:null, output_tokens:null, cache_read_tokens:null, cost_usd:null}), attempts:$att} else {} end)' >> "$audit"
+          echo "waiting:$i"
+          return 0
         fi ;;
       webhook)
         # Webhook step — mirrors StepExecutors::Webhook (webhook.rb) +
@@ -3955,10 +4586,10 @@ $llm_rendered_prompt"
             # Body (not for GET/DELETE).
             case "$wh_method" in
               GET|DELETE) ;;
-              *)          wh_curl_args+=(--data-raw "$wh_body") ;;
+              *)          wh_curl_args+=(--data-binary @-) ;;  # body on stdin: no 128 KiB argv cap
             esac
 
-            if ! wh_resp_code="$(curl "${wh_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
+            if ! wh_resp_code="$(printf '%s' "$wh_body" | curl "${wh_curl_args[@]}" 2>>"$run_dir/$sid.stderr.log")"; then
               rm -f "$wh_curl_tmp"
               out_raw='{"error":"curl failed for webhook step"}'; rc=1; wh_ok=false; return
             fi
@@ -4027,7 +4658,7 @@ $llm_rendered_prompt"
                 # Outbound request succeeded — now pause.
                 # C1a follow-up: add duration_ms (start→pause) + result_hash:"pending"
                 # to match the contract already implemented for form/approval/wait.until.
-                local _wh_cb_pause_ms; _wh_cb_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+                local _wh_cb_pause_ms; _wh_cb_pause_ms=$(_local_ms_since "$s_started_ms")
                 jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                        --arg a "$s_started" --arg cb "$wh_cb_id" --argjson dur "$_wh_cb_pause_ms" \
                   '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:"waiting",
@@ -4179,7 +4810,8 @@ $llm_rendered_prompt"
             --arg prid "$run_id" \
             --arg psid "$sid" \
             --argjson pidx "$i" \
-            '{run_id:$id, process:$n, process_file:$p, process_dir:$d, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp,
+            --arg cwd "$run_cwd" \
+            '{run_id:$id, process:$n, process_file:$p, process_dir:$d, cwd:$cwd, started_at:$t, started_at_ms:$sms, status:"running", inputs:$inp,
               parent_run_id:$prid, parent_step_id:$psid, parent_step_index:$pidx}' \
             > "$sp_child_run_dir/manifest.json"
 
@@ -4234,7 +4866,7 @@ $llm_rendered_prompt"
               # Append a waiting audit receipt for this parent step.
               # C1a follow-up: add duration_ms (start→pause) + result_hash:"pending"
               # to match the contract already implemented for form/approval/wait.until.
-              local _sp_pause_ms; _sp_pause_ms=$(( $(_local_now_ms) - s_started_ms ))
+              local _sp_pause_ms; _sp_pause_ms=$(_local_ms_since "$s_started_ms")
               jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" \
                      --arg a "$s_started" --arg crid "$sp_child_run_id" --arg crdir "$sp_child_run_dir" \
                      --argjson dur "$_sp_pause_ms" \
@@ -4248,18 +4880,148 @@ $llm_rendered_prompt"
               out_raw="{\"error\":\"subprocess: unexpected loop status: $sp_loop_status\"}"; rc=1; sp_ok=false ;;
           esac
         fi ;;
+      loop)
+        # Loop step — SPEC §3.14. Nested "loop" block:
+        #   for_each: <ref>[*] | <array>  (+ as: <name>, default "item")
+        #   repeat_until: "<expr>"        predicate checked at the END of each iteration
+        #   while: "<expr>"               runs while true; checked at the START of each iteration
+        #   max_iterations: <int> | "{{ process.inputs.x }}"  (default 100)
+        #   aggregate: {<output>: sum|concat|last}
+        # body: [steps] (top-level, as in the SPEC example; loop.body also accepted)
+        #   run in order through _local_step_loop — one sub-run per iteration under
+        #   <run_dir>/loop/<step-id>/iter-<n>/ with its own receipts. Body steps and
+        #   predicates see the context plus loop.<as> and loop.index (0-based).
+        #   Each iteration starts from the previous iteration's context, so a body
+        #   can read last round's outputs; nothing from the body reaches the parent
+        #   context except through aggregate. aggregate <k> takes field <k> from the
+        #   last body step output that has it.
+        # Output: {iterations: <n>, <k>: <aggregated value>...}.
+        # Nested loops work (a body loop recurses through the same arm).
+        # ponytail: a body step that pauses (form, approval, escalated judgment,
+        #   wait.until, webhook callback, paused subprocess) fails the loop — no
+        #   mid-loop resume. Ceiling: no human-in-the-loop inside a body; add a loop
+        #   cursor to the manifest and teach local_submit to re-enter it if needed.
+        local lp_ok=true lp_err="" lp_body lp_kind lp_expr="" lp_as="" lp_max lp_items="null" lp_agg lp_pinp
+        lp_pinp="$(jq -c '.inputs // {}' "$run_dir/manifest.json" 2>/dev/null || echo '{}')"
+        lp_body="$(jq -c '.body // .loop.body // []' <<<"$step")"
+        lp_agg="$(jq -c '.loop.aggregate // {}' <<<"$step")"
+        lp_kind="$(jq -r '.loop // {} | [("for_each", "repeat_until", "while") as $k | select(has($k)) | $k]
+                          | if length == 1 then .[0] else "" end' <<<"$step")"
+        if [[ -z "$lp_kind" ]]; then
+          lp_ok=false; lp_err="loop step needs exactly one of loop.for_each, loop.repeat_until, loop.while"
+        elif ! jq -e 'type == "array" and length > 0' <<<"$lp_body" >/dev/null; then
+          lp_ok=false; lp_err="loop step needs a non-empty body array"
+        elif ! jq -e 'type == "object" and all(.[]; . == "sum" or . == "concat" or . == "last")' <<<"$lp_agg" >/dev/null; then
+          lp_ok=false; lp_err="loop.aggregate values must be sum, concat or last"
+        fi
+        if [[ "$lp_ok" == true ]]; then
+          if ! lp_max="$(_local_render "$(jq -r '.loop.max_iterations // 100 | tostring' <<<"$step")" "$ctx" "$lp_pinp")"; then
+            lp_ok=false; lp_err="cannot render loop.max_iterations: $lp_max"
+          elif [[ ! "$lp_max" =~ ^[1-9][0-9]*$ ]]; then
+            lp_ok=false; lp_err="loop.max_iterations must be a positive integer, got '$lp_max'"
+          fi
+        fi
+        if [[ "$lp_ok" == true && "$lp_kind" == for_each ]]; then
+          lp_as="$(jq -r '.loop.as // "item"' <<<"$step")"
+          lp_items="$(jq -c --argjson ctx "$ctx" --argjson pinp "$lp_pinp" "$_OSL_JQ_REF"'
+            .loop.for_each | if type == "array" then . elif type == "string" then (sub("\\[\\*\\]$"; "") | ref($ctx; $pinp)) else null end' <<<"$step")"
+          if ! jq -e 'type == "array"' <<<"$lp_items" >/dev/null; then
+            lp_ok=false; lp_err="loop.for_each did not resolve to an array"
+          elif [[ "$(jq length <<<"$lp_items")" -gt "$lp_max" ]]; then
+            lp_ok=false; lp_err="loop.for_each has $(jq length <<<"$lp_items") items, more than max_iterations ($lp_max)"
+          fi
+        elif [[ "$lp_ok" == true ]]; then
+          lp_expr="$(jq -r --arg k "$lp_kind" '.loop[$k] | tostring' <<<"$step")"
+        fi
+
+        local lp_n=0 lp_done=false lp_ctx="$ctx" lp_vals='{}' lp_cond lp_status lp_dir
+        local lp_file="$run_dir/loop/$sid/body.sop.json"
+        if [[ "$lp_ok" == true ]]; then
+          mkdir -p "$run_dir/loop/$sid"
+          jq -nc --arg n "$sid" --argjson b "$lp_body" '{name:$n, steps:$b}' > "$lp_file"
+        fi
+        while [[ "$lp_ok" == true && "$lp_done" == false ]]; do
+          lp_ctx="$(jq -c --arg as "$lp_as" --argjson n "$lp_n" --argjson items "$lp_items" '
+            .loop = ({index: $n} + (if $as == "" then {} else {($as): $items[$n]} end))' <<<"$lp_ctx")"
+          if [[ "$lp_kind" == for_each && "$lp_n" -ge "$(jq length <<<"$lp_items")" ]]; then
+            lp_done=true
+          elif [[ "$lp_kind" == while ]] && lp_cond="$(_local_eval_cond "$lp_expr" "$lp_ctx" "$lp_pinp")" && [[ "$lp_cond" != true ]]; then
+            if [[ "$lp_cond" == false ]]; then lp_done=true
+            else lp_ok=false; lp_err="cannot evaluate loop.while expression: $lp_expr"; fi
+          elif [[ "$lp_n" -ge "$lp_max" ]]; then
+            lp_ok=false; lp_err="loop reached max_iterations ($lp_max) without its $lp_kind predicate being satisfied: $lp_expr"
+          else
+            lp_dir="$run_dir/loop/$sid/iter-$lp_n"; mkdir -p "$lp_dir"
+            jq -nc --arg id "iter-$lp_n" --arg p "$sid" --argjson inp "$lp_pinp" --arg cwd "$run_cwd" \
+              '{run_id:$id, process:$p, cwd:$cwd, status:"running", inputs:$inp}' > "$lp_dir/manifest.json"
+            lp_status="$(_local_step_loop "$lp_dir" "$lp_file" 0 "$lp_ctx" "$proc_dir")" || lp_status="failed"
+            case "$lp_status" in
+              completed)
+                [[ -f "$lp_dir/context.json" ]] && lp_ctx="$(cat "$lp_dir/context.json")"
+                # A body step's exit_when ends the loop and, through lp_exit, the run.
+                lp_exit="$(jq -c '.exited_early.exit_outputs // empty' "$lp_dir/manifest.json")"
+                [[ -n "$lp_exit" ]] && lp_done=true
+                lp_vals="$(jq -c --argjson c "$lp_ctx" --argjson b "$lp_body" --argjson agg "$lp_agg" '
+                  reduce ($agg | keys_unsorted[]) as $k (.;
+                    ([$b[] | $c[.id // ""] | objects | select(has($k)) | .[$k]] | last) as $v
+                    | if $v == null then . else .[$k] += [$v] end)' <<<"$lp_vals")"
+                lp_n=$(( lp_n + 1 ))
+                if [[ "$lp_kind" == repeat_until ]]; then
+                  lp_cond="$(_local_eval_cond "$lp_expr" "$lp_ctx" "$lp_pinp")"
+                  case "$lp_cond" in
+                    true)  lp_done=true ;;
+                    false) ;;
+                    *)     lp_ok=false; lp_err="cannot evaluate loop.repeat_until expression: $lp_expr" ;;
+                  esac
+                fi ;;
+              waiting:*)
+                local lp_widx="${lp_status#waiting:}"
+                lp_ok=false
+                lp_err="body step '$(jq -r ".steps[$lp_widx].id" "$lp_file")' ($(jq -r ".steps[$lp_widx].type" "$lp_file")) paused in iteration $lp_n — a pausing step inside a loop body is not supported locally" ;;
+              *)
+                lp_ok=false; lp_err="iteration $lp_n failed (receipts: $lp_dir)" ;;
+            esac
+          fi
+        done
+
+        if [[ "$lp_ok" == true ]]; then
+          out_raw="$(jq -nc --argjson vals "$lp_vals" --argjson agg "$lp_agg" --argjson n "$lp_n" '
+            {iterations: $n} + ($agg | with_entries(.key as $k | .value as $mode | ($vals[$k] // []) as $xs | .value = (
+              if $mode == "sum" then
+                (if all($xs[]; type == "number") then ($xs | add // 0) else error("aggregate sum on non-number values for " + $k) end)
+              elif $mode == "concat" then
+                (if ($xs | length) > 0 and all($xs[]; type == "string") then ($xs | join(""))
+                 else [$xs[] | if type == "array" then .[] else . end] end)
+              else ($xs | last) end)))' 2>&1)" || { lp_ok=false; lp_err="$out_raw"; }
+        fi
+        if [[ "$lp_ok" == true ]]; then rc=0
+        else out_raw="$(jq -nc --arg e "loop '$sid': $lp_err" '{error:$e}')"; rc=1; fi ;;
+      __bad_condition__)
+        stype="$(jq -r '.type // "automated"' <<<"$step")"
+        out_raw="$(jq -nc --arg c "$s_cond" '{error:("cannot evaluate condition: " + $c)}')"; rc=1 ;;
       *)    out_raw="unsupported step type for local execution: $stype"; rc=2 ;;
     esac
 
     local out_json
-    if jq -e . >/dev/null 2>&1 <<<"$out_raw"; then
+    if jq -e 'true' >/dev/null 2>&1 <<<"$out_raw"; then
       out_json="$(jq -c 'if type=="object" then . else {value:.} end' <<<"$out_raw")"
     else
       out_json="$(jq -nc --arg s "$out_raw" '{stdout:$s}')"
     fi
+
+    # SPEC §3.15 exit_when: after a step completes, a true predicate ends the
+    # run early as completed, recording exit_outputs (manifest.exited_early).
+    # A loop whose body exited early propagates the exit (lp_exit).
+    local s_exit=""
+    if [ "$rc" -eq 0 ]; then
+      if ! s_exit="$(_local_exit_check "$step" "$out_json" "$ctx" "$run_pinp")"; then
+        out_json="$(jq -nc --arg e "$(jq -r '.exit_when' <<<"$step")" '{error:("cannot evaluate exit_when: " + $e)}')"; rc=1
+      fi
+      [[ -z "$s_exit" ]] && s_exit="$lp_exit"
+    fi
     local s_ended_ms; s_ended_ms="$(_local_now_ms)"
     s_ended="$(_local_now)"
-    local step_duration_ms; step_duration_ms=$(( s_ended_ms - s_started_ms ))
+    local step_duration_ms; step_duration_ms=$(( s_ended_ms - s_started_ms )); (( step_duration_ms < 0 )) && step_duration_ms=0
     local sstatus; [ "$rc" -eq 0 ] && sstatus="completed" || sstatus="failed"
     # Fold the step's stderr into the receipt so `show` surfaces it; drop the
     # temp log afterwards (and never leave an empty one lying around).
@@ -4276,22 +5038,30 @@ $llm_rendered_prompt"
     result_hash="$(printf '%s' "$_canon" | _sha256 2>/dev/null || true)"
     result_hash="${result_hash:0:64}"
     [[ -z "$result_hash" ]] && result_hash="unavailable"
-    # C1a: assemble the metric supplement; include llm fields only for llm steps.
+    # C1a: assemble the metric supplement; include llm fields only for llm/judgment
+    # steps. provider/permission/cli_version: which backend answered (CLI providers
+    # record the permission they ran under and the CLI's --version).
     local llm_metrics="{}"
-    if [[ "$stype" == "llm" && -n "$s_llm_model" ]]; then
+    if [[ -n "$s_llm_model" ]]; then
       llm_metrics="$(jq -nc \
         --arg model "$s_llm_model" \
         --argjson tin "$s_llm_tokens_in" \
         --argjson tout "$s_llm_tokens_out" \
         --arg src "$s_llm_token_source" \
-        '{model:$model, tokens_in:$tin, tokens_out:$tout, token_source:$src}')"
+        --arg pv "$s_llm_provider" --arg perm "$s_llm_permission" --arg cv "$s_llm_cli_version" \
+        --argjson usage "$s_llm_usage" --argjson att "$s_llm_attempts" \
+        '{model:$model, tokens_in:$tin, tokens_out:$tout, token_source:$src}
+         + ({provider:$pv, permission:$perm, cli_version:$cv} | with_entries(select(.value != "")))
+         + {usage: ($usage // {input_tokens:null, output_tokens:null, cache_read_tokens:null, cost_usd:null}), attempts:$att}')"
     fi
     jq -nc --arg rid "$run_id" --arg sid "$sid" --arg t "$stype" --arg ex "$sexec" --arg st "$sstatus" --argjson rc "$rc" \
       --arg a "$s_started" --arg b "$s_ended" --argjson out "$out_json" --arg se "$serr" \
-      --argjson dur "$step_duration_ms" --arg rh "$result_hash" --argjson llmm "$llm_metrics" \
+      --argjson dur "$step_duration_ms" --arg rh "$result_hash" --argjson llmm "$llm_metrics" --arg xo "$s_exit" --arg ss "${s_script_sha:0:64}" \
       '{run_id:$rid, step:$sid, type:$t, executor:$ex, status:$st, exit_code:$rc,
         started_at:$a, ended_at:$b, duration_ms:$dur, result_hash:$rh, output:$out}
        + (if $se=="" then {} else {stderr:$se} end)
+       + (if $xo=="" then {} else {exited_early:true, exit_outputs:($xo | fromjson)} end)
+       + (if $ss=="" then {} else {script_sha256:$ss} end)
        + $llmm' >> "$audit"
 
     if [ "$rc" -eq 0 ]; then
@@ -4299,8 +5069,19 @@ $llm_rendered_prompt"
       # Live checkpoint: atomic write (temp+mv) so a truncated write never silently
       # strips outputs — a future resume can re-enter at the cursor safely.
       printf '%s' "$ctx" > "$run_dir/context.json.tmp" && mv "$run_dir/context.json.tmp" "$run_dir/context.json"
+      if [[ -n "$s_exit" ]]; then
+        _local_mark_exited "$run_dir" "$sid" "$s_exit"
+        echo "completed"; return 0
+      fi
     else
-      [[ "$OUTPUT_MODE" != json ]] && err "[$sid] failed (exit $rc): $(jq -rc '.stdout // .' <<<"$out_json" | head -c 160)"
+      # The step's stderr tail (bounded) goes into the failure line, fault.json
+      # and the debug_prompt: it is usually the only place the reason is.
+      local serr_tail="" _fmsg _fline
+      [[ -n "$serr" ]] && serr_tail="$(printf '%s' "$serr" | tail -c 4096)"
+      _fmsg="$(jq -rc '.stdout // .' <<<"$out_json" | head -c 160)"
+      _fline="[$sid] failed (exit $rc)${_fmsg:+: $_fmsg}"
+      [[ -n "$serr" ]] && _fline+="$(printf '\n  stderr: %s' "$(printf '%s\n' "$serr" | tail -n 5 | tail -c 1024 | sed '2,$s/^/          /')")"
+      [[ "$OUTPUT_MODE" != json ]] && err "$_fline"
       if [ "$scont" != "true" ]; then
         # D2: write fault record before returning "failed".
         # Per SPEC §11.4 rule 3: warn the user BEFORE writing, unconditionally
@@ -4320,10 +5101,12 @@ $llm_rendered_prompt"
           --argjson inputs "$ctx" \
           --argjson step_def "$step_def" \
           --argjson out "$out_json" \
+          --arg serr "$serr_tail" \
           '"Step \"" + $sid + "\" (type: " + $stype + ") failed in run " + $rid + " with exit code " + ($rc_val | tostring) + ".\n" +
            "Step definition: " + ($step_def | tojson) + ".\n" +
            "The step received these inputs (accumulated context at time of failure): " + ($inputs | tojson) + ".\n" +
            "The step produced this output/error: " + ($out | tojson) + ".\n" +
+           (if $serr != "" then "The step wrote this to stderr (last 4 KiB): " + ($serr | tojson) + ".\n" else "" end) +
            "To diagnose: inspect the step definition and the inputs above. " +
            "Common fixes: correct the step script or shell command, supply missing/corrected inputs via \"--input k=v\", or fix an upstream step output that this step depends on. " +
            (if (($step_def.effects // "") | length) > 0 then
@@ -4343,6 +5126,7 @@ $llm_rendered_prompt"
           --arg debug_prompt "$debug_prompt" \
           --arg ts "$fault_ts" \
           --arg proc_file "$proc_file" \
+          --arg serr "$serr_tail" \
           '{run_id:$rid,
             faulted_at:$ts,
             process_file:$proc_file,
@@ -4350,7 +5134,8 @@ $llm_rendered_prompt"
             exit_code:$exit_code,
             inputs:$inputs,
             output:$output,
-            debug_prompt:$debug_prompt}' > "$fault_file"
+            debug_prompt:$debug_prompt}
+           + (if $serr != "" then {stderr:$serr} else {} end)' > "$fault_file"
         # Update manifest with fault reference.
         jq -c --arg f "$fault_file" '. + {fault_file:$f}' \
           "$run_dir/manifest.json" > "$run_dir/manifest.json.tmp" \
@@ -4657,27 +5442,9 @@ _local_continue_parent_body() {
       local p_wait_step2 p_wait_since2
       p_wait_step2="$(jq -r ".steps[$p_wait_idx2].id // \"step-$p_wait_idx2\"" "$parent_proc_file")"
       p_wait_since2="$(_local_now)"
-      local p_wait_expects2
-      p_wait_expects2="$(jq -c --argjson idx "$p_wait_idx2" '
-        .steps[$idx] as $s |
-        ($s.inputs // $s.outputs // null) as $decl |
-        if $decl != null and ($decl | length) > 0 then
-          { outputs: [$decl[].name // empty],
-            schema:  $decl }
-        elif $s.type == "approval" then
-          { outputs: ["decision"],
-            schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-        else
-          { outputs: [], schema: [] }
-        end
-      ' "$parent_proc_file")"
-      local p_wait_stype2 p_wait_reason2
-      p_wait_stype2="$(jq -r ".steps[$p_wait_idx2].type // \"automated\"" "$parent_proc_file")"
-      case "$p_wait_stype2" in
-        form)     p_wait_reason2="waiting_for_input" ;;
-        approval) p_wait_reason2="waiting_for_approval" ;;
-        *)        p_wait_reason2="waiting_for_callback" ;;
-      esac
+      local p_wait_meta2 p_wait_expects2 p_wait_reason2
+      p_wait_meta2="$(_local_wait_meta "$parent_proc_file" "$p_wait_idx2")"
+      p_wait_expects2="$(jq -c '.expects' <<<"$p_wait_meta2")"; p_wait_reason2="$(jq -r '.reason' <<<"$p_wait_meta2")"
       jq -c --arg s "waiting" \
             --argjson idx "$((p_wait_idx2 + 1))" \
             --argjson widx "$p_wait_idx2" \
@@ -4775,6 +5542,20 @@ local_submit() {
   local waiting_step; waiting_step="$(jq -r '.waiting.step // ""' "$mf")"
   [ "$waiting_step" = "$step_id" ] || die "run $run_id is waiting on '$waiting_step', not '$step_id'" "usage_error" "submit step id must match manifest.waiting.step"
 
+  # Child gate: a parent paused on a still-waiting subprocess child resumes only
+  # through the child (its completion continues the parent, #107). Submitting to
+  # the parent would skip the child's remaining steps. The child run id lives on
+  # the parent step's waiting receipt.
+  local waiting_child
+  waiting_child="$(jq -r --arg s "$step_id" 'select(.step == $s and .status == "waiting") | .child_run_id // empty' \
+    "$run_dir/audit.jsonl" 2>/dev/null | tail -1)"
+  if [[ -n "$waiting_child" ]] \
+     && [ "$(jq -r '.status // ""' "$OPENSOP_LOCAL_HOME/runs/$waiting_child/manifest.json" 2>/dev/null)" = "waiting" ]; then
+    local child_step; child_step="$(jq -r '.waiting.step // "<step>"' "$OPENSOP_LOCAL_HOME/runs/$waiting_child/manifest.json")"
+    die "run $run_id is waiting on subprocess child run $waiting_child (step '$child_step') — submit to the child, not the parent" \
+        "usage_error" "opensop submit $waiting_child $child_step --output k=v"
+  fi
+
   # Parse submitted outputs.
   local built; built="$(build_payload_object output "$@")"
   local submitted; submitted="$(jq -c '.payload' <<<"$built")"
@@ -4871,12 +5652,18 @@ local_submit() {
 
   # Inject the submitted outputs under the step id (same merge shape as local_run ~:1926).
   local out_json
-  if jq -e . >/dev/null 2>&1 <<<"$submitted"; then
+  if jq -e 'true' >/dev/null 2>&1 <<<"$submitted"; then
     out_json="$(jq -c 'if type=="object" then . else {value:.} end' <<<"$submitted")"
   else
     out_json="$(jq -nc --arg s "$submitted" '{stdout:$s}')"
   fi
   ctx="$(jq -c --arg id "$step_id" --argjson o "$out_json" '.[$id]=$o' <<<"$ctx")"
+
+  # SPEC §3.15: exit_when on the resumed step (e.g. an escalated judgment a human
+  # just decided) ends the run here. Checked before anything is written.
+  local submit_exit=""
+  submit_exit="$(_local_exit_check "$(jq -c ".steps[$wait_index]" "$proc_file")" "$out_json" "$ctx" "$(jq -c '.inputs // {}' "$mf")")" \
+    || die "cannot evaluate exit_when on step '$step_id'" "parse_error" "exit_when must be \"<ref> <op> <literal>\" (SPEC §2.6)"
 
   # Append a completed receipt for the step we're resuming from.
   # Derive type + executor dynamically from the process file (matches _local_step_loop
@@ -4886,7 +5673,7 @@ local_submit() {
   if [[ -z "$resumed_sexec" ]]; then
     case "$resumed_stype" in
       automated|shell|webhook)                                               resumed_sexec="external" ;;
-      noop|form|approval|notification|wait|judgment|llm|subprocess) resumed_sexec="internal" ;;
+      noop|form|approval|notification|wait|judgment|llm|subprocess|loop) resumed_sexec="internal" ;;
       *)                                                                      resumed_sexec="external" ;;
     esac
   fi
@@ -4910,7 +5697,7 @@ local_submit() {
   # loading, output normalisation, context merge, and receipt construction — the
   # full submission processing interval per SPEC §10.2.
   local submit_end_ms; submit_end_ms="$(_local_now_ms)"
-  local submit_duration_ms; submit_duration_ms=$(( submit_end_ms - submit_start_ms ))
+  local submit_duration_ms; submit_duration_ms=$(( submit_end_ms - submit_start_ms )); (( submit_duration_ms < 0 )) && submit_duration_ms=0
 
   jq -nc \
     --arg rid "$run_id" --arg sid "$step_id" --arg t "$resumed_stype" --arg ex "$resumed_sexec" \
@@ -4933,13 +5720,17 @@ local_submit() {
      "$mf" > "$mf.tmp" && mv "$mf.tmp" "$mf"
 
   # Safety net: if we crash mid-resume, mark interrupted (not left as running).
-  trap '_local_finalize_trap "$run_dir"' EXIT
+  trap "_local_finalize_trap $(printf %q "$run_dir")" EXIT
 
   # Re-enter the step loop at resume_index (NEVER re-runs steps < resume_index).
   # Pass proc_dir as 5th arg so script paths resolve against the original process
   # directory even when proc_file is the per-run snapshot (#101).
   local loop_status
-  loop_status="$(_local_step_loop "$run_dir" "$proc_file" "$resume_index" "$ctx" "$proc_dir")"
+  if [[ -n "$submit_exit" ]]; then
+    _local_mark_exited "$run_dir" "$step_id" "$submit_exit"; loop_status="completed"
+  else
+    loop_status="$(_local_step_loop "$run_dir" "$proc_file" "$resume_index" "$ctx" "$proc_dir")"
+  fi
 
   local run_status
   case "$loop_status" in
@@ -4957,27 +5748,9 @@ local_submit() {
     local wait_step2 wait_since2
     wait_step2="$(jq -r ".steps[$wait_index2].id // \"step-$wait_index2\"" "$proc_file")"
     wait_since2="$(_local_now)"
-    local wait_expects2
-    wait_expects2="$(jq -c --argjson idx "$wait_index2" '
-      .steps[$idx] as $s |
-      ($s.inputs // $s.outputs // null) as $decl |
-      if $decl != null and ($decl | length) > 0 then
-        { outputs: [$decl[].name // empty],
-          schema:  $decl }
-      elif $s.type == "approval" then
-        { outputs: ["decision"],
-          schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-      else
-        { outputs: [], schema: [] }
-      end
-    ' "$proc_file")"
-    local wait_stype2 wait_reason2
-    wait_stype2="$(jq -r ".steps[$wait_index2].type // \"automated\"" "$proc_file")"
-    case "$wait_stype2" in
-      form)     wait_reason2="waiting_for_input" ;;
-      approval) wait_reason2="waiting_for_approval" ;;
-      *)        wait_reason2="waiting_for_callback" ;;
-    esac
+    local wait_meta2 wait_expects2 wait_reason2
+    wait_meta2="$(_local_wait_meta "$proc_file" "$wait_index2")"
+    wait_expects2="$(jq -c '.expects' <<<"$wait_meta2")"; wait_reason2="$(jq -r '.reason' <<<"$wait_meta2")"
     jq -c --arg s "waiting" \
           --argjson idx "$((wait_index2 + 1))" \
           --argjson widx "$wait_index2" \
@@ -4992,7 +5765,7 @@ local_submit() {
     trap - EXIT
     if is_tty && [[ "$OUTPUT_MODE" != "json" ]]; then
       ok "submitted $step_id — run $run_id now waiting at $wait_step2"
-      info "next:  opensop submit $run_id $wait_step2 --output k=v"
+      info "$(_local_next_hint "$run_dir")"
     else
       jq -c . "$mf"
     fi
@@ -5261,13 +6034,16 @@ local_dry_run() {
 
   # Resolve process file — same logic as local_run.
   local proc_file=""
-  if [[ "$proc_arg" == *.sop.json ]] || [[ "$proc_arg" == */* ]]; then
+  # A path, or a file that exists here, is a file; anything else is a process name.
+  if [[ "$proc_arg" == *.json || "$proc_arg" == *.yaml || "$proc_arg" == *.yml || "$proc_arg" == */* || -f "$proc_arg" ]]; then
     proc_file="$proc_arg"
   else
     proc_file="$(_find_skill_in_cells "$proc_arg")"
-    [[ -z "$proc_file" ]] && die "skill not found: '$proc_arg' (looked in active cell + ancestors)" "file_not_found" \
-        "create processes/${proc_arg}.sop.json in a cell, or pass an explicit path"
+    [[ -z "$proc_file" ]] && die "process not found: '$proc_arg' (looked for processes/${proc_arg}.sop.json in this cell and its parents)" "file_not_found" \
+        "pass the file's path (e.g. ./${proc_arg}.sop.json), or run opensop init and put it in processes/"
   fi
+  [[ "$proc_file" == *.yaml || "$proc_file" == *.yml ]] && die "local runs take a JSON process file; $proc_file is YAML" "invalid_json" \
+    "convert it to .sop.json (YAML is the server registration format: opensop register)"
   [[ -f "$proc_file" ]] || die "process file not found: $proc_file" "file_not_found"
   jq -e . "$proc_file" >/dev/null 2>&1 || die "process file is not valid JSON: $proc_file" "invalid_json"
 
@@ -5286,17 +6062,17 @@ local_dry_run() {
   done
 
   # Build input object.
-  local inputs="{}"
+  local inputs="{}" _string_inputs; _string_inputs="$(_string_input_names "$proc_file")"
   if [[ -n "$json_blob" ]]; then
-    inputs=$(echo "$json_blob" | jq .) || die "invalid JSON in --inputs" "invalid_json"
+    inputs=$(echo "$json_blob" | jq . 2>/dev/null) || die "invalid JSON in --inputs" "invalid_json"
   elif [[ -n "$file_path" ]]; then
-    inputs=$(jq . "$file_path") || die "could not read $file_path as JSON" "invalid_json"
+    inputs=$(jq . "$file_path" 2>/dev/null) || die "could not read $file_path as JSON" "invalid_json"
   fi
   if (( ${#kv_pairs[@]} > 0 )); then
     for kv in "${kv_pairs[@]}"; do
       [[ "$kv" != *=* ]] && die "--input expects KEY=VALUE, got: $kv" "usage_error"
       local k="${kv%%=*}" v="${kv#*=}"
-      if echo "$v" | jq -e . >/dev/null 2>&1; then
+      if [[ " $_string_inputs " != *" $k "* ]] && echo "$v" | jq -e 'true' >/dev/null 2>&1; then
         inputs=$(echo "$inputs" | jq --arg k "$k" --argjson v "$v" '.[$k] = $v')
       else
         inputs=$(echo "$inputs" | jq --arg k "$k" --arg v "$v" '.[$k] = $v')
@@ -5309,44 +6085,26 @@ local_dry_run() {
   # The .sop.json may have inputs as an array (new style) or an object (dict-style).
   # Normalise to an array of {name, type?, required?, ...} for the validator.
   local schema_json
-  schema_json="$(jq -c '
+  schema_json="$(jq -c "$_INPUT_DECLS_JQ"'
     # Resolve process root — may be wrapped under "process" key or flat.
     (if has("process") then .process else . end) as $p |
     # Normalise inputs to array form for the validator.
-    (if ($p.inputs | type) == "array" then $p.inputs
-     elif ($p.inputs | type) == "object" then
-       [$p.inputs | to_entries[] | {name: .key} + (
-         if (.value | type) == "object" then .value else {} end)]
-     else []
-     end) as $inputs_arr |
+    ($p.inputs | _input_decls) as $inputs_arr |
     {process: ($p + {inputs: $inputs_arr})}
   ' "$proc_file")"
 
   # Validate inputs against process.inputs definition — same jq as cmd_dry_run.
   local errors_json
-  errors_json=$(echo "$schema_json" | jq -c \
-    --argjson supplied "$inputs" '
-    [ .process.inputs[]? |
-      . as $field |
-      ($supplied[$field.name]) as $val |
-      # Required check.
-      (if ($field.required == true) and ($val == null) then
-        {path: ("inputs." + $field.name), message: ("required field missing: " + $field.name)}
-      else null end),
-      # Type check (best-effort).
-      (if $val != null then
-        if   $field.type == "number"  and ($val | type) != "number"  then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a number")}
-        elif $field.type == "boolean" and ($val | type) != "boolean" then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be a boolean")}
-        elif $field.type == "enum" and ($field.values != null) and ([$field.values[] | . == $val] | any | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " must be one of: " + ($field.values | join(", ")))}
-        elif $field.type == "string" and $field.format == "email" and ($val | type) == "string" and ($val | test("^[^@]+@[^@]+\\.[^@]+$") | not) then
-          {path: ("inputs." + $field.name), message: ($field.name + " does not look like an email address")}
-        else null end
-      else null end)
-    ] | map(select(. != null))
-  ')
+  errors_json=$(_input_errors "$schema_json" "$(_local_input_defaults "$schema_json" "$inputs")")
+  # Step types the local engine cannot run fail at run time ("unsupported step
+  # type for local execution"); flag them here, including inside loop bodies.
+  errors_json="$(jq -c --argjson e "$errors_json" --arg ok "$_LOCAL_STEP_TYPES" '
+    ($ok | split(" ")) as $ok |
+    $e + [.process.steps[]? | recurse(.body? | if type == "array" then .[] elif type == "object" then . else empty end)
+      | select(type == "object") | select([$ok[] == .type] | any | not)
+      | {path: ("steps." + (.id // "?") + ".type"),
+         message: ("step \(.id // "?"): type \(.type // "(missing)") is not supported by the local engine (supported: \($ok | join(", ")))")}]
+  ' <<<"$schema_json")"
 
   local valid=true
   local err_count; err_count=$(echo "$errors_json" | jq 'length')
@@ -5426,20 +6184,78 @@ local_status() {
 
   # Build response JSON that mirrors remote cmd_status's API response shape.
   # audit.jsonl → steps array: each line is one receipt; status → state;
-  # waiting receipts carry .reason → sub_state.
-  local resp
+  # waiting receipts carry .reason → sub_state. Event rows (heal) aren't steps; `show` has them.
+  # Local-only extras an agent needs to act: run_dir (where the receipts are),
+  # waiting.description (the paused step's own text) and error (why it failed).
+  local snap="$run_dir/process.snapshot.json" resp
+  [ -f "$snap" ] || snap="$(jq -r '.process_file // ""' "$mf")"
   resp="$(jq -nc \
     --argjson m "$(cat "$mf")" \
-    --argjson steps "$(jq -s '[.[] | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
+    --argjson steps "$([ -f "$run_dir/audit.jsonl" ] && jq -s '[.[] | select(.event == null) | {step_id: .step, type, state: .status, sub_state: (.reason // null), started_at, ended_at}]' "$run_dir/audit.jsonl" 2>/dev/null || echo '[]')" \
+    --argjson proc "$(jq -c '{steps: [(.steps // [])[]? | {id, description: (.description // .prompt // null)}]}' "$snap" 2>/dev/null || echo '{"steps":[]}')" \
+    --argjson fail "$([ -f "$run_dir/audit.jsonl" ] && jq -sc '[.[] | select(.status == "failed")] | last' "$run_dir/audit.jsonl" 2>/dev/null || echo null)" \
+    --arg dir "$run_dir" \
     '{
        id:           $m.run_id,
        process:      {name: $m.process},
        state:        $m.status,
        started_at:   $m.started_at,
        completed_at: ($m.ended_at // null),
-       waiting:      ($m.waiting  // null),
+       waiting:      (if $m.waiting then
+                        $m.waiting + {description: ([$proc.steps[] | select(.id == $m.waiting.step) | .description][0] // null)}
+                      else null end),
+       error:        (if $m.status == "failed" and $fail != null then
+                        {step: $fail.step, exit_code: ($fail.exit_code // null),
+                         message: ([$fail.error, $fail.stderr, ($fail.output | if type == "object" then (.error // .stdout) else . end)]
+                                   | map(select(. != null and . != "") | if type == "string" then . else tojson end)
+                                   | first // "" | .[-2000:])}
+                      else null end),
+       run_dir:      $dir,
        steps:        $steps
      }')"
+  # A failed loop iteration or subprocess child reports only "see <dir>": follow
+  # those receipts down (bounded) so the error names the step that really failed.
+  local _emsg _edir _inner _depth=0
+  _emsg="$(jq -r '.error.message // empty' <<<"$resp")"
+  while (( _depth++ < 5 )) && [[ "$_emsg" =~ \((receipts:|see)\ ([^\)]+)\)$ ]]; do
+    _edir="${BASH_REMATCH[2]%/}"
+    [ -f "$_edir/audit.jsonl" ] || break
+    _inner="$(jq -sc '[.[] | select(.status == "failed")] | last // empty
+      | {step, exit_code, message: ([.output.error?, .stderr, (.output | if type == "object" then .stdout else . end)]
+          | map(select(. != null and . != "") | if type == "string" then . else tojson end) | first // "")}' \
+      "$_edir/audit.jsonl" 2>/dev/null)" || break
+    [ -n "$_inner" ] || break
+    resp="$(jq -c --argjson i "$_inner" '.error.message = ((.error.message + " → " + $i.step
+      + " (exit " + (($i.exit_code // "?") | tostring) + "): " + $i.message) | .[-2000:])' <<<"$resp")"
+    _emsg="$(jq -r '.message' <<<"$_inner")"
+  done
+
+  # An interrupted run (CLI killed mid-step) is resumed with heal --apply, which
+  # re-runs the step it was on, or closed with cancel.
+  if [[ "$(jq -r '.state' <<<"$resp")" == "interrupted" ]]; then
+    local _istep=""
+    [ -f "$snap" ] && _istep="$(jq -r --argjson i "$(_local_interrupted_index "$run_dir" "$snap")" \
+      '(.steps // [])[$i] | if . then (.id // "step-\($i)") else "" end' "$snap")"
+    resp="$(jq -c --arg s "$_istep" '. + {interrupted: {step: (if $s == "" then null else $s end)},
+      next: ["opensop heal \(.id) --apply", "opensop cancel \(.id)"]}' <<<"$resp")"
+  fi
+
+  # The exact next command, for scripts and agents as well as the terminal view.
+  case "$(jq -r '.state' <<<"$resp")" in
+    waiting)
+      local _hint; _hint="$(_local_next_hint "$run_dir" 2>/dev/null | sed -n 's/^next:  //p' | head -1)"
+      [ -n "$_hint" ] && resp="$(jq -c --arg n "$_hint" '. + {next: [$n]}' <<<"$resp")" ;;
+    failed)
+      resp="$(jq -c '. + {next: ["opensop heal \(.id) --apply"]}' <<<"$resp")" ;;
+  esac
+
+  # Render {{ ref }} in the waiting step's text against the run's context.
+  local _wdesc _wrendered
+  _wdesc="$(jq -r '.waiting.description // empty' <<<"$resp")"
+  if [[ "$_wdesc" == *"{{"* && -f "$run_dir/context.json" ]] &&
+     _wrendered="$(_local_render "$_wdesc" "$(cat "$run_dir/context.json")" "$(jq -c '.inputs // {}' "$mf")")"; then
+    resp="$(jq -c --arg d "$_wrendered" '.waiting.description = $d' <<<"$resp")"
+  fi
 
   if is_tty && [[ "$OUTPUT_MODE" != "json" ]]; then
     local state ended
@@ -5448,12 +6264,22 @@ local_status() {
     local color="$C_BLUE"
     [[ "$state" == "completed" ]] && color="$C_GREEN"
     [[ "$state" == "failed"    ]] && color="$C_RED"
-    [[ "$state" == "cancelled" ]] && color="$C_YELLOW"
-    printf '%sinstance:%s %s\n' "$C_BOLD" "$C_RESET" "$rid"
+    [[ "$state" == "cancelled" || "$state" == "interrupted" ]] && color="$C_YELLOW"
+    printf '%srun:%s      %s\n' "$C_BOLD" "$C_RESET" "$rid"
     printf '%sprocess:%s  %s\n' "$C_BOLD" "$C_RESET" "$(echo "$resp" | jq -r '.process.name')"
     printf '%sstate:%s    %s%s%s%s\n' "$C_BOLD" "$C_RESET" "$color" "$state" "$C_RESET" "${ended:+ ($ended)}"
+    printf '%sreceipts:%s %s\n' "$C_BOLD" "$C_RESET" "$run_dir"
+    echo "$resp" | jq -r '
+      if .error then "\nfailed at \(.error.step) (exit \(.error.exit_code // "?")): \(.error.message)\nnext: opensop heal \(.id) --apply   (after fixing the cause)"
+      elif .waiting then "\nwaiting on \(.waiting.step) (\(.waiting.reason))\(if .waiting.description then ": " + .waiting.description else "" end)\nnext: opensop submit \(.id) \(.waiting.step)\([.waiting.expects.outputs[]? | " --output " + . + "=..."] | join(""))"
+      elif .interrupted then "\ninterrupted\(if .interrupted.step then " during " + .interrupted.step else "" end) (the CLI was killed mid-run)\nnext: opensop heal \(.id) --apply   (re-runs \(.interrupted.step // "the step") and continues)\n  or: opensop cancel \(.id)"
+      else empty end'
     echo
-    echo "$resp" | jq -r '.steps[]? | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
+    # One row per step, latest receipt wins (a healed or resumed step has
+    # several); run-level events (cancel, heal) carry no step type.
+    echo "$resp" | jq -r '[.steps[]? | select(.type != null)]
+      | reduce .[] as $s ({o: [], m: {}}; (if .m[$s.step_id] then . else .o += [$s.step_id] end) | .m[$s.step_id] = $s)
+      | .o[] as $k | .m[$k] | "\(.step_id)\t\(.type)\t\(.state)\t\(.sub_state // "")"' | \
       while IFS=$'\t' read -r step_id stype sstate sub; do
         local glyph
         case "$sstate" in
@@ -5495,7 +6321,7 @@ local_steps() {
 
   jq -nc \
     --arg rid "$rid" \
-    --argjson steps "$(jq -s '[.[] | {
+    --argjson steps "$([ -f "$run_dir/audit.jsonl" ] && jq -s '[.[] | {
         step_id:    .step,
         type,
         state:      .status,
@@ -5784,8 +6610,8 @@ local_diff() {
 
   # Read audit receipts for each run (one JSON object per line → array via jq -s).
   local steps1 steps2
-  steps1="$(jq -s '.' "$dir1/audit.jsonl" 2>/dev/null || echo '[]')"
-  steps2="$(jq -s '.' "$dir2/audit.jsonl" 2>/dev/null || echo '[]')"
+  steps1="$([ -f "$dir1/audit.jsonl" ] && jq -s '.' "$dir1/audit.jsonl" 2>/dev/null || echo '[]')"
+  steps2="$([ -f "$dir2/audit.jsonl" ] && jq -s '.' "$dir2/audit.jsonl" 2>/dev/null || echo '[]')"
 
   # Read final context for each run.
   local ctx1 ctx2
@@ -5868,9 +6694,9 @@ local_diff() {
 
 # local_cancel <run_id> [--reason TEXT]
 #
-# Cancel a local run that is running or waiting.
+# Cancel a local run that is running, waiting or interrupted.
 # Mirrors remote cmd_cancel semantics:
-#   - Only running/waiting runs can be cancelled (completed/failed/cancelled → rejected,
+#   - Only running/waiting/interrupted runs can be cancelled (completed/failed/cancelled → rejected,
 #     same invalid-transition behaviour as the runtime).
 #   - Sets manifest.status = "cancelled", clears the waiting block, writes ended_at.
 #   - Appends a "cancelled" receipt to audit.jsonl (includes reason if given).
@@ -5894,12 +6720,12 @@ local_cancel() {
   local mf="$run_dir/manifest.json"
   [ -f "$mf" ] || die "run directory found but manifest.json is missing: $run_dir" "cli_error"
 
-  # Status gate: only running/waiting runs can be cancelled.
+  # Status gate: only running/waiting/interrupted runs can be cancelled.
   local mf_status; mf_status="$(jq -r '.status' "$mf")"
   case "$mf_status" in
-    running|waiting) ;;
+    running|waiting|interrupted) ;;
     completed|failed|cancelled)
-      die "run $run_id is '$mf_status' — only running or waiting runs can be cancelled" \
+      die "run $run_id is '$mf_status' — only running, waiting or interrupted runs can be cancelled" \
           "usage_error" "use opensop status $run_id to inspect the run" ;;
     *)
       die "run $run_id has unexpected status '$mf_status' — cannot cancel" \
@@ -5950,11 +6776,17 @@ local_cancel() {
 
 # opensop runs  — list local runs (always local; the server analogue is `instances`)
 local_runs() {
-  [ -d "$OPENSOP_LOCAL_HOME/runs" ] || { info "(no local runs yet — opensop run <process.sop.json>)"; return 0; }
+  local json=false; [[ "$(_resolve_output_mode)" == json ]] && json=true
+  if [ ! -d "$OPENSOP_LOCAL_HOME/runs" ]; then
+    $json && echo '[]' || info "(no local runs yet — opensop run <process.sop.json>)"
+    return 0
+  fi
+  local d
   for d in "$OPENSOP_LOCAL_HOME"/runs/*/; do
     [ -f "$d/manifest.json" ] || continue
-    jq -r '"\(.run_id)\t\(.status)\t\(.process)\t\(.started_at)"' "$d/manifest.json"
-  done | sort
+    if $json; then jq -c '{run_id, status, process, started_at}' "$d/manifest.json"
+    else jq -r '"\(.run_id)\t\(.status)\t\(.process)\t\(.started_at)"' "$d/manifest.json"; fi
+  done | if $json; then jq -sc 'sort_by(.run_id)'; else sort; fi
 }
 
 # opensop show <run_id>  — a local run's manifest + per-step receipts
@@ -5962,12 +6794,12 @@ local_show() {
   local rid="${1:-}"; [ -n "$rid" ] || die "usage: opensop show <run_id>" "usage_error" "run opensop runs"
   local d="$OPENSOP_LOCAL_HOME/runs/$rid"
   [ -d "$d" ] || die "no such local run: $rid (see: opensop runs)" "instance_not_found"
-  if [[ "$OUTPUT_MODE" == "json" ]]; then
-    jq -nc --argjson m "$(cat "$d/manifest.json")" --argjson s "$(jq -s '.' "$d/audit.jsonl" 2>/dev/null || echo '[]')" \
+  if [[ "$(_resolve_output_mode)" == "json" ]]; then
+    jq -nc --argjson m "$(cat "$d/manifest.json")" --argjson s "$([ -f "$d/audit.jsonl" ] && jq -s '.' "$d/audit.jsonl" 2>/dev/null || echo '[]')" \
       '{manifest:$m, steps:$s}'
   else
     info "── manifest ──"; jq . "$d/manifest.json"
-    info "── steps ──";   jq -c '{step,status,exit_code} + (if .stderr then {stderr:(.stderr|.[0:200])} else {} end)' "$d/audit.jsonl" 2>/dev/null
+    info "── steps ──";   [ ! -f "$d/audit.jsonl" ] || jq -c '{step,status,exit_code} + (if .stderr then {stderr:(.stderr|.[0:200])} else {} end)' "$d/audit.jsonl" 2>/dev/null
   fi
 }
 
@@ -6018,19 +6850,37 @@ local_heal() {
   [ -f "$mf" ] || die "run directory found but manifest.json is missing: $run_dir" "cli_error"
 
   local mf_status; mf_status="$(jq -r '.status' "$mf")"
-  if [[ "$mf_status" != "failed" ]]; then
-    die "run $run_id is '$mf_status', not 'failed' — heal requires a failed run" "cli_error" \
-        "check 'opensop status $run_id' — only failed runs have fault records"
+  if [[ "$mf_status" != "failed" && "$mf_status" != "interrupted" ]]; then
+    die "run $run_id is '$mf_status', not 'failed' or 'interrupted' — heal requires a failed or interrupted run" "cli_error" \
+        "check 'opensop status $run_id'"
   fi
 
-  local fault_file; fault_file="$(jq -r '.fault_file // ""' "$mf")"
-  if [[ -z "$fault_file" || ! -f "$fault_file" ]]; then
-    die "no fault record found for run $run_id" "cli_error" \
-        "fault records are written only for steps that fail without continue_on_error; the fault file may have been deleted"
+  local fault_file fault_json failed_step_id heal_index=-1
+  if [[ "$mf_status" == "interrupted" ]]; then
+    # The CLI was killed mid-step: there is no fault record. The step to re-run
+    # is the first one without a completed receipt; synthesize the fault view.
+    local _int_src="$run_dir/process.snapshot.json"
+    [ -f "$_int_src" ] || _int_src="$(jq -r '.process_file // ""' "$mf")"
+    [ -f "$_int_src" ] || die "process file not found: $_int_src" "file_not_found"
+    heal_index="$(_local_interrupted_index "$run_dir" "$_int_src")"
+    fault_file="(none — run was interrupted)"
+    fault_json="$(jq -c --argjson i "$heal_index" --arg rid "$run_id" --slurpfile m "$mf" \
+      '(.steps // [])[$i] as $s
+       | {run_id: $rid, interrupted: true, exit_code: null, faulted_at: null,
+          step: {id: (if $s then ($s.id // "step-\($i)") else null end), type: (if $s then ($s.type // "automated") else null end)},
+          inputs: ($m[0].inputs // {}),
+          debug_prompt: ("Run " + $rid + " was interrupted (the CLI was killed) "
+            + (if $s then "while step \"" + ($s.id // "step-\($i)") + "\" was running. It has no completed receipt; heal --apply re-runs it and continues."
+               else "after its last step finished. heal --apply finalizes it." end))}' "$_int_src")"
+  else
+    fault_file="$(jq -r '.fault_file // ""' "$mf")"
+    if [[ -z "$fault_file" || ! -f "$fault_file" ]]; then
+      die "no fault record found for run $run_id" "cli_error" \
+          "fault records are written only for steps that fail without continue_on_error; the fault file may have been deleted"
+    fi
+    fault_json="$(cat "$fault_file")"
   fi
-
-  local fault_json; fault_json="$(cat "$fault_file")"
-  local failed_step_id; failed_step_id="$(jq -r '.step.id // ""' <<<"$fault_json")"
+  failed_step_id="$(jq -r '.step.id // ""' <<<"$fault_json")"
 
   # Look up the failed step's declared `effects` (SPEC §3.2), if any, so both
   # diagnosis and --apply can guard against re-executing a step that acts on
@@ -6062,6 +6912,11 @@ local_heal() {
       printf '  exit code: %s\n'      "$exit_code"
       printf '  faulted at:%s\n'      "$faulted_at"
       printf '  fault file:%s\n'      "$fault_file"
+      local fault_serr;  fault_serr="$(jq -r '.stderr // ""' <<<"$fault_json")"
+      if [[ -n "$fault_serr" ]]; then
+        info "── stderr (tail) ──"
+        printf '%s\n' "$fault_serr" | tail -n 20
+      fi
       info "── debug_prompt ──"
       printf '%s\n' "$debug_p"
       info "── inputs snapshot (may contain sensitive data — see SPEC §11.4) ──"
@@ -6120,9 +6975,10 @@ local_heal() {
   # failed_step_id was already computed above (used by the effects guard).
 
   # Find the index of the failed step in the process file (snapshot or fallback).
+  # An interrupted run already has heal_index.
   local n_steps; n_steps="$(jq '(.steps // []) | length' "$proc_file")"
-  local heal_index=-1 _hi=0
-  while [ "$_hi" -lt "$n_steps" ]; do
+  local _hi=0
+  while [ "$heal_index" -lt 0 ] && [ "$_hi" -lt "$n_steps" ]; do
     local _hsid; _hsid="$(jq -r ".steps[$_hi].id // \"step-$_hi\"" "$proc_file")"
     if [[ "$_hsid" == "$failed_step_id" ]]; then heal_index="$_hi"; break; fi
     _hi=$((_hi+1))
@@ -6146,6 +7002,7 @@ local_heal() {
 
   # Merge any caller-supplied --input overrides.
   if (( ${#extra_args[@]} > 0 )); then
+    local _string_inputs; _string_inputs="$(_string_input_names "$proc_file")"   # read by build_payload_object
     local _heal_built; _heal_built="$(build_payload_object input "${extra_args[@]}")"
     local _heal_inp; _heal_inp="$(echo "$_heal_built" | jq -c '.payload')"
     ctx="$(jq -c --argjson i "$_heal_inp" '. * $i' <<<"$ctx")"
@@ -6158,6 +7015,7 @@ local_heal() {
   local heal_ts; heal_ts="$(_local_now)"
   local audit="$run_dir/audit.jsonl"
   local heal_note="heal --apply: re-running failed step"
+  [[ "$mf_status" == "interrupted" ]] && heal_note="heal --apply: re-running interrupted step"
   if [[ -n "$step_effects" && "$want_force_effects" == true ]]; then
     heal_note="heal --apply --force-effects: re-running step with declared effects (\"$step_effects\") — may double-execute"
   fi
@@ -6185,7 +7043,7 @@ local_heal() {
   jq -c '.status="running" | del(.ended_at) | del(.fault_file)' \
     "$run_dir/manifest.json" > "$run_dir/manifest.json.tmp" \
     && mv "$run_dir/manifest.json.tmp" "$run_dir/manifest.json"
-  trap '_local_finalize_trap "$run_dir"' EXIT
+  trap "_local_finalize_trap $(printf %q "$run_dir")" EXIT
 
   # Re-run the step loop starting at heal_index.
   # Pass proc_dir as 5th arg so scripts resolve against the original process
@@ -6208,24 +7066,9 @@ local_heal() {
     local wait_index; wait_index="${loop_status#waiting:}"
     local wait_step; wait_step="$(jq -r ".steps[$wait_index].id // \"step-$wait_index\"" "$proc_file")"
     local wait_since; wait_since="$(_local_now)"
-    local wait_expects; wait_expects="$(jq -c --argjson idx "$wait_index" '
-      .steps[$idx] as $s |
-      ($s.inputs // $s.outputs // null) as $decl |
-      if $decl != null and ($decl | length) > 0 then
-        { outputs: [$decl[].name // empty], schema: $decl }
-      elif $s.type == "approval" then
-        { outputs: ["decision"],
-          schema:  [{"name":"decision","type":"enum","values":["approve","reject"],"required":true}] }
-      else { outputs: [], schema: [] }
-      end
-    ' "$proc_file")"
-    local wait_stype; wait_stype="$(jq -r ".steps[$wait_index].type // \"automated\"" "$proc_file")"
-    local wait_reason
-    case "$wait_stype" in
-      form)     wait_reason="waiting_for_input" ;;
-      approval) wait_reason="waiting_for_approval" ;;
-      *)        wait_reason="waiting_for_callback" ;;
-    esac
+    local wait_meta wait_expects wait_reason
+    wait_meta="$(_local_wait_meta "$proc_file" "$wait_index")"
+    wait_expects="$(jq -c '.expects' <<<"$wait_meta")"; wait_reason="$(jq -r '.reason' <<<"$wait_meta")"
     jq -c --arg s "waiting" \
           --argjson idx "$(( wait_index + 1 ))" \
           --argjson widx "$wait_index" \
@@ -6253,7 +7096,7 @@ local_heal() {
       ok "healed run $C_BOLD$run_id$C_RESET — completed"
     elif [[ "$heal_run_status" == "waiting" ]]; then
       ok "healed run $C_BOLD$run_id$C_RESET — waiting at $wait_step"
-      info "  next: opensop submit $run_id $wait_step --output k=v"
+      info "$(_local_next_hint "$run_dir")"
     else
       err "heal --apply: re-run of step '$failed_step_id' failed again — new fault record written"
     fi
@@ -6368,8 +7211,8 @@ cmd_bench() {
   local bench_dir
   if [[ -z "$task_dir" ]]; then
     bench_dir="$(_bench_find_dir)" \
-      || die "built-in bench dir not found (expected adjacent to bin/opensop at ../bench)" \
-             "file_not_found" "pass an explicit task-dir: opensop bench <path>"
+      || die "bench runs from a git clone (its fixtures are not part of a curl install)" \
+             "file_not_found" "git clone https://github.com/opensop/opensop && cd opensop && cli/bin/opensop bench"
     task_dir="$bench_dir"
   fi
 
@@ -6859,15 +7702,14 @@ cmd_bench() {
 #   1. Orient  — explain what onboarding does; scaffold a starter .sop.json if
 #                no process file given; point at docs/AGENTS.md §openSOP-ize.
 #   2. Validate — run dry-run on the process file; report inputs/steps.
-#   3. Compare  — invoke bench (built-in task only) with --stub when no API key;
-#                 surfaces bench's scoreboard or graceful message.
-#   4. Next steps — print run / show / fork / lineage commands to explore.
+#   3. Next steps — print commands that work on a curl install (run, inspect,
+#                 keep it in a cell) and the guide URLs.
 #
-# Side-effect safety: onboard NEVER executes the user's process against
-# production.  The comparison is the bench's controlled task only.
+# Side-effect safety: onboard NEVER executes the user's process.
+# `bench` is a separate command and needs a git clone (its fixtures).
 #
 # --json emits:
-#   {scaffolded, process_file, validated, bench_result_or_skipped, bench_result?}
+#   {scaffolded, process_file, validated, next: [<command>...]}
 # --------------------------------------------------------------------------- #
 
 # _onboard_scaffold_template — emit a starter .sop.json JSON string.
@@ -6903,28 +7745,27 @@ _onboard_scaffold_template() {
 }
 
 cmd_onboard() {
-  local proc_arg="" stub_mode=false n_runs=10
+  local proc_arg=""
   local json_out=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --stub)       stub_mode=true; shift ;;
-      --n)          [[ $# -ge 2 ]] || die "--n requires a value" "usage_error" "opensop onboard [--n N]"; n_runs="$2"; shift 2 ;;
-      --n=*)        n_runs="${1#--n=}"; shift ;;
+      # onboard no longer runs bench; accepted (ignored) so old scripts work.
+      --stub|--n=*) warn "onboard no longer runs bench; $1 is ignored"; shift ;;
+      --n)          [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || die "--n requires a positive integer" "usage_error" "opensop onboard"
+                    warn "onboard no longer runs bench; --n is ignored"; shift 2 ;;
       --json)       OUTPUT_MODE="json"; shift ;;
       --help|-h)
-        printf 'usage: opensop onboard [<process.sop.json>] [--stub] [--n N] [--json]\n'
+        printf 'usage: opensop onboard [<process.sop.json>] [--json]\n'
         printf '\n'
         printf '  First-run experience: scaffold a starter process, validate it via dry-run,\n'
-        printf '  run the 3-arm bench comparison to see the reliability difference, and print\n'
-        printf '  next steps (run / show / fork / lineage).\n'
+        printf '  and print next steps (run / inspect / keep it in a cell).\n'
         printf '\n'
         printf '  If no process file is given, a starter .sop.json is scaffolded in cwd.\n'
         printf '  The transformation of an arbitrary prose skill into a .sop.json is an\n'
-        printf '  agent skill — see docs/AGENTS.md §6 (openSOP-ize) for the guide.\n'
+        printf '  agent skill — see %s §6 (openSOP-ize).\n' "$_ONBOARD_AGENTS_URL"
         printf '\n'
-        printf '  SIDE-EFFECT SAFE: onboard never executes your process against production.\n'
-        printf '  The comparison uses the bench built-in controlled task only.\n'
+        printf '  SIDE-EFFECT SAFE: onboard never executes your process.\n'
         printf '\n'
         printf 'Examples:\n'
         _cmd_help_examples onboard
@@ -6940,10 +7781,6 @@ cmd_onboard() {
   done
 
   [[ "$OUTPUT_MODE" == "json" ]] && json_out=true
-
-  # Validate n_runs
-  [[ "$n_runs" =~ ^[1-9][0-9]*$ ]] \
-    || die "--n must be a positive integer, got: $n_runs" "usage_error" "opensop onboard --n 3"
 
   # -----------------------------------------------------------------------
   # Step 1: Orient + scaffold (if no process file given)
@@ -6961,12 +7798,11 @@ cmd_onboard() {
       printf 'What onboarding does:\n'
       printf '  1. Scaffold a starter .sop.json in cwd (you fill in the details)\n'
       printf '  2. Validate it (dry-run: schema + input check)\n'
-      printf '  3. Run the 3-arm bench to show the reliability gain\n'
-      printf '  4. Print next steps (run / show / fork / lineage)\n'
+      printf '  3. Print next steps (run / inspect / keep it in a cell)\n'
       printf '\n'
       printf 'The %stransformation%s of an arbitrary prose skill into a .sop.json is an\n' "$C_BOLD" "$C_RESET"
-      printf 'agent skill — not something bash automates.  See:\n'
-      printf '  docs/AGENTS.md §6  (openSOP-ize — the key agent skill)\n'
+      printf 'agent skill — not something bash automates.  See §6 (openSOP-ize) of:\n'
+      printf '  %s\n' "$_ONBOARD_AGENTS_URL"
       printf '\n'
     fi
 
@@ -6988,7 +7824,7 @@ cmd_onboard() {
         printf '  opensop onboard %s\n' "$scaffold_path"
         printf '\n'
         printf 'Or use the openSOP-ize agent skill to transform a prose prompt:\n'
-        printf '  docs/AGENTS.md §6\n'
+        printf '  %s (§6)\n' "$_ONBOARD_AGENTS_URL"
         printf '\n'
       fi
     fi
@@ -7020,7 +7856,7 @@ cmd_onboard() {
   _struct_errors="$(jq -r '
     (if has("process") then .process else . end) as $p |
     # Locally-supported step types (SPEC §3 local set).
-    ["automated","shell","noop","form","approval","wait","llm","webhook","subprocess"] as $ok_types |
+    ["automated","shell","noop","form","approval","wait","llm","judgment","loop","webhook","subprocess"] as $ok_types |
     [
       # 1. name must be a non-empty string.
       (if (($p.name | type) != "string") or ($p.name | length) == 0 then
@@ -7070,11 +7906,8 @@ cmd_onboard() {
       jq -nc \
         --argjson scaffolded "$( $scaffolded && echo true || echo false)" \
         --arg process_file "$proc_file" \
-        --argjson validated false \
-        --argjson bench_result_or_skipped '"skipped"' \
         --arg error_detail "$_struct_errors" \
         '{scaffolded:$scaffolded,process_file:$process_file,validated:false,
-          bench_result_or_skipped:$bench_result_or_skipped,
           error:"validation_failed",message:$error_detail}'
     else
       printf '%sstructural validation failed:%s\n' "$C_RED" "$C_RESET"
@@ -7099,16 +7932,10 @@ cmd_onboard() {
   # We inject placeholder values matching each field's declared type.
   local -a onboard_dry_run_args=("$proc_file")
   local proc_inputs_json
-  proc_inputs_json="$(jq -c '
+  proc_inputs_json="$(jq -c "$_INPUT_DECLS_JQ"'
     (if has("process") then .process else . end) as $p |
-    ($p.inputs // {}) |
-    if type == "object" then
-      to_entries[] |
-      select(.value.required == true) |
-      {key: .key, type: (.value.type // "string")}
-    elif type == "array" then
-      .[] | select(.required == true) | {key: .name, type: (.type // "string")}
-    else empty end
+    ($p.inputs // {}) | _input_decls[] |
+    select(.required == true and has("default") == false) | {key: .name, type: (.type // "string")}
   ' "$proc_file" 2>/dev/null || true)"
   while IFS= read -r field_entry; do
     [[ -z "$field_entry" ]] && continue
@@ -7162,136 +7989,62 @@ cmd_onboard() {
         --argjson scaffolded "$( $scaffolded && echo true || echo false)" \
         --arg process_file "$proc_file" \
         --argjson validated false \
-        --argjson bench_result_or_skipped '"skipped"' \
         '{scaffolded:$scaffolded,process_file:$process_file,validated:$validated,
-          bench_result_or_skipped:$bench_result_or_skipped,
           error:"validation_failed"}'
     fi
     exit 1
   fi
 
   # -----------------------------------------------------------------------
-  # Step 3: Compare — invoke bench (built-in task only)
+  # Step 3: Next steps — every command works on a curl install.
   # -----------------------------------------------------------------------
-  if ! $json_out; then
-    printf '%s--- step 3: compare (3-arm bench) ---%s\n' "$C_BOLD" "$C_RESET"
-    printf '\n'
-    printf 'Running the bench comparison (skill vs json_only vs opensop).\n'
-    printf 'This uses the built-in extract-action-items task — not your process —\n'
-    printf 'so no side effects are triggered on your real data.\n'
-    printf '\n'
-  fi
-
-  # Build bench args. Always use the built-in task; never accept user-supplied dirs here.
-  # Users who want to benchmark a custom task use `opensop bench <task>` directly.
-  local -a bench_args=()
-  bench_args+=("--n" "$n_runs")
-  $stub_mode && bench_args+=("--stub")
-
-  # Run bench. Two paths:
-  #   --json  → capture JSON output; embed in our JSON summary.
-  #   pretty  → run bench in pretty mode (scoreboard to terminal); capture stderr
-  #             in a tmp file so we can extract error messages on failure.
-  local bench_rc=0
-  local bench_result_or_skipped="completed"
-  local bench_result_json="null"
-
-  # bench's die() calls exit 1 — it terminates the whole process when called
-  # in the main execution context. We run bench in a subshell (bash -c or $(...))
-  # so that an exit 1 inside bench exits only the subshell.  Stderr is captured
-  # to a tmpfile so the key-missing prose message can be surfaced cleanly.
-  local bench_out_tmp; bench_out_tmp="$(mktemp)"
-  local bench_err_tmp; bench_err_tmp="$(mktemp)"
-
-  if $json_out; then
-    # JSON mode: run bench in a subshell (stdout to tmpfile; stderr to tmpfile).
-    ( OUTPUT_MODE=json cmd_bench "${bench_args[@]}" ) >"$bench_out_tmp" 2>"$bench_err_tmp" \
-      || bench_rc=$?
-    local bench_json_out; bench_json_out="$(cat "$bench_out_tmp" 2>/dev/null || true)"
-    if [[ $bench_rc -eq 0 ]] && [[ -n "$bench_json_out" ]]; then
-      bench_result_json="$(printf '%s' "$bench_json_out" | jq -c . 2>/dev/null || echo 'null')"
-    else
-      # Bench failed — extract error message from stderr (bench's prose or JSON die output).
-      local bench_err_raw; bench_err_raw="$(cat "$bench_err_tmp" 2>/dev/null || true)"
-      local bench_err_msg; bench_err_msg="$(printf '%s' "$bench_err_raw" | jq -r '.message // empty' 2>/dev/null || true)"
-      [[ -z "$bench_err_msg" ]] && bench_err_msg="$bench_err_raw"
-      [[ -z "$bench_err_msg" ]] && bench_err_msg="bench failed (rc=$bench_rc)"
-      bench_result_json="$(jq -nc --arg m "$bench_err_msg" '{error:$m}')"
-    fi
-  else
-    # Pretty mode: bench scoreboard goes to stdout (terminal); stderr to tmpfile.
-    # Run bench in a subshell so bench's exit 1 (on die) does not kill onboard.
-    ( cmd_bench "${bench_args[@]}" ) 2>"$bench_err_tmp" || bench_rc=$?
-    if [[ $bench_rc -ne 0 ]]; then
-      # Extract error message from bench's stderr (prose or JSON).
-      local bench_err_raw; bench_err_raw="$(cat "$bench_err_tmp" 2>/dev/null || true)"
-      local bench_err
-      bench_err="$(printf '%s' "$bench_err_raw" | jq -r '.message // empty' 2>/dev/null || true)"
-      [[ -z "$bench_err" ]] && bench_err="$bench_err_raw"
-      printf '\n'
-      if [[ -n "$bench_err" ]]; then
-        warn "bench skipped: $bench_err"
-      else
-        warn "bench skipped (no API key or bench error)"
-      fi
-      printf '\n'
-      printf 'To run bench offline: opensop onboard %s --stub\n' "$proc_file"
-      printf 'To run with a key: export ANTHROPIC_API_KEY=sk-ant-... then re-run.\n'
-      printf '\n'
-    fi
-  fi
-
-  rm -f "$bench_out_tmp" "$bench_err_tmp"
-  [[ $bench_rc -ne 0 ]] && bench_result_or_skipped="skipped"
-
-  # -----------------------------------------------------------------------
-  # Step 4: Next steps
-  # -----------------------------------------------------------------------
+  local pname; pname="$(jq -r '(if has("process") then .process else . end).name // "my-process"' "$proc_file")"
+  local in_args
+  in_args="$(jq -r "$_INPUT_DECLS_JQ"'(if has("process") then .process else . end).inputs // {} | _input_decls
+    | map(select(.required == true and has("default") == false) | " --input \(.name)=...") | join("")' "$proc_file" 2>/dev/null || true)"
+  # A step on the Anthropic API (model claude-*) needs ANTHROPIC_API_KEY;
+  # say so, and how to run without one.
+  local needs_key=false
+  jq -e '[(if has("process") then .process else . end).steps[]? | select(.type == "llm" or .type == "judgment")
+          | .model // "" | select(startswith("claude") and (startswith("claude-code:") | not))] | length > 0' \
+     "$proc_file" >/dev/null 2>&1 && needs_key=true
+  local -a next_cmds=("opensop run $proc_file$in_args" "opensop status <run_id>" "opensop show <run_id>")
   if ! $json_out; then
     printf '%s--- next steps ---%s\n' "$C_BOLD" "$C_RESET"
     printf '\n'
     printf 'Run your process:\n'
-    printf '  opensop run %s --input <key>=<value>\n' "$proc_file"
+    printf '  opensop run %s%s\n' "$proc_file" "$in_args"
+    if $needs_key; then
+      printf '  %s(its model calls the Anthropic API: export ANTHROPIC_API_KEY=... first,\n' "$C_DIM"
+      printf '   or set "model" to "claude-code:" / "codex:" to use a logged-in Claude Code or Codex CLI)%s\n' "$C_RESET"
+    fi
     printf '\n'
     printf 'Inspect receipts:\n'
     printf '  opensop runs                 # list all local runs\n'
+    printf '  opensop status <run_id>      # state, and what to do next\n'
     printf '  opensop show <run_id>        # manifest + per-step receipts\n'
-    printf '  opensop show <run_id> --json # machine-readable full receipt\n'
     printf '\n'
-    printf 'Evolve your process:\n'
-    printf '  opensop fork <name>          # copy and version-track\n'
-    printf '  opensop lineage <name>       # status, metadata, history\n'
-    printf '  opensop annotate <name> promote '"'"'{"to":"m1"}'"'"'\n'
+    printf 'Keep it in a cell (named, versioned, forkable):\n'
+    printf '  opensop init && mkdir -p processes && mv %s processes/\n' "$proc_file"
+    printf '  opensop run %s%s\n' "$pname" "$in_args"
+    printf '  opensop lineage %s\n' "$pname"
     printf '\n'
-    printf 'openSOP-ize a prose prompt → .sop.json:\n'
-    printf '  docs/AGENTS.md §6           # the transformation skill\n'
+    printf 'Guides:\n'
+    printf '  %s   # openSOP-ize: §6\n' "$_ONBOARD_AGENTS_URL"
+    printf '  https://github.com/opensop/opensop/blob/main/docs/EVOLUTION.md   # evolution tiers (m0–m6)\n'
     printf '\n'
-    printf 'Learn about evolution tiers (m0–m6):\n'
-    printf '  EVOLUTION.md\n'
-    printf '\n'
-  fi
-
-  # -----------------------------------------------------------------------
-  # JSON summary output
-  # -----------------------------------------------------------------------
-  if $json_out; then
-    local bench_combined="null"
-    if [[ "$bench_result_or_skipped" == "completed" ]] && [[ "$bench_result_json" != "null" ]]; then
-      bench_combined="$bench_result_json"
-    fi
+  else
     jq -nc \
       --argjson scaffolded "$( $scaffolded && echo true || echo false)" \
       --arg process_file "$proc_file" \
-      --argjson validated true \
-      --arg bench_result_or_skipped "$bench_result_or_skipped" \
-      --argjson bench_result "$bench_combined" \
-      '{scaffolded:$scaffolded,
-        process_file:$process_file,
-        validated:$validated,
-        bench_result_or_skipped:$bench_result_or_skipped,
-        bench_result:$bench_result}'
+      --argjson next "$(printf '%s\n' "${next_cmds[@]}" | jq -R . | jq -sc .)" \
+      --argjson needs_key "$needs_key" \
+      '{scaffolded:$scaffolded, process_file:$process_file, validated:true, next:$next,
+        requires: (if $needs_key then ["ANTHROPIC_API_KEY (or a claude-code:/codex: model)"] else [] end)}'
   fi
 }
+
+_ONBOARD_AGENTS_URL="https://github.com/opensop/opensop/blob/main/docs/AGENTS.md"
 
 # --------------------------------------------------------------------------- #
 # Subcommand: skill
@@ -7334,7 +8087,7 @@ allowed-tools:
 metadata:
   homepage: https://github.com/opensop/opensop
   spec: SPEC.md
-  version: "0.9.1"
+  version: "0.10.0"
 compatibility:
   - claude
   - codex
@@ -7370,7 +8123,7 @@ opensop skill install --runtime <flavour>             install this skill into ag
 opensop skill paths [--json]                          show per-runtime install paths
 opensop skill show                                    print this SKILL.md to stdout
 opensop doctor [--json]                               self-check: jq, bash, skill status
-opensop onboard [<process.sop.json>]                  first-run experience: scaffold + bench
+opensop onboard [<process.sop.json>]                  first-run experience: scaffold + validate
 ```
 
 All commands emit compact JSON when piped or when `--json` is passed.
@@ -7382,12 +8135,14 @@ Errors emit `{error, message, hint?}` to stderr in JSON mode.
    `opensop suggest "<task description>"` over guessing file paths.  Use
    `opensop list` to enumerate what is available.
 
-2. **Poll after run.** After `opensop run`, check `opensop status <run_id>`
-   in a loop until `status` is not `running` or `waiting`.
+2. **Run is synchronous.** A local `opensop run` returns when the run
+   completes, fails, or pauses at a waiting step; there is nothing to poll.
+   Read the outcome with `opensop status <run_id> --json | jq .state`
+   (`completed`, `failed`, `waiting`). Poll only `--remote` runs.
 
-3. **Resume paused steps.** When `status == waiting`, read
-   `manifest.waiting` from `opensop show <run_id> --json` to learn which
-   step is paused and what outputs it expects.  Call `opensop submit`.
+3. **Resume paused steps.** When `.state == "waiting"`, read `.waiting`
+   from `opensop status <run_id> --json` to learn which step is paused and
+   what outputs it expects (`.waiting.expects`).  Call `opensop submit`.
 
 4. **Heal failures.** When `status == failed`, use `opensop heal <run_id>`
    to get a structured fault record, then `--apply` to retry.
@@ -7397,7 +8152,7 @@ Errors emit `{error, message, hint?}` to stderr in JSON mode.
 
 ## SOPs / the library
 
-The canonical public SOP library lives at github.com/opensop/sops —
+The public SOP library is the `sops/` directory of github.com/opensop/opensop —
 shareable `.sop.json` processes, one folder per SOP. Use `opensop pull`
 to fetch one and `opensop import` to bring in a local or piped file:
 
@@ -7453,7 +8208,7 @@ opensop run ./processes/greet.sop.json --input name=Alice
 opensop run greet --input name=Bob          # bare name resolves from cell chain
 
 # Inspect
-opensop show 20250101T120000Z-12345-6789 --json | jq '.status'
+opensop status 20250101T120000Z-12345-6789 --json | jq .state
 opensop steps 20250101T120000Z-12345-6789
 
 # Resume a paused form step
@@ -7540,11 +8295,11 @@ four conventions. If you are inventing a resume protocol, you have not read it.
 
 ## Why not `opensop run`
 
-§5.3's local dispatch table has rows for `automated`, `shell`, `noop`, `form`,
-`approval`, and "anything else → `rc=2`, unsupported step type". `llm` is not a
-row, so a planner SOP with an `llm` step is categorically outside the local
-engine. And §3.4 `shell` runs `bash -c` directly — no tool loop, so no
-`tool_call`/`tool_result` ever. Write a separate program, and do not split
+§5.3's local engine dispatches `llm` (including CLI-backed agents), `judgment`
+and `loop`, but it writes step receipts, not `execution-event` traces: an agent
+spawned by an `llm` step leaves no `session_started`, no `agent_created`, no
+`tool_call`/`tool_result`. And §3.4 `shell` runs `bash -c` directly — no tool
+loop either. Write a separate program, and do not split
 execution between the CLI and your harness: `evidence` and `agent_contract` are
 engine-agnostic post-hoc concerns, so a split engine buys nothing.
 
@@ -7865,13 +8620,18 @@ _skill_valid_flavours() {
 
 # _skill_expand_root FLAVOUR SCOPE TPL — expand one registry path template to
 # an absolute ROOT skills directory (no skill name leaf). Expands a leading
-# ~/ to $HOME. Special-cases codex|user to honor a live CODEX_HOME env var
+# ~/ to $HOME. Special-cases codex|user and hermes|user to honor a live
+# CODEX_HOME / HERMES_HOME env var
 # (see the comment above _skill_flavour_registry) instead of the registry's
 # static fallback template.
 _skill_expand_root() {
   local flavour="$1" scope="$2" tpl="$3"
   if [[ "$flavour" == "codex" && "$scope" == "user" ]]; then
     printf '%s' "${CODEX_HOME:-$HOME/.codex}/skills"
+    return 0
+  fi
+  if [[ "$flavour" == "hermes" && "$scope" == "user" ]]; then
+    printf '%s' "${HERMES_HOME:-$HOME/.hermes}/skills"
     return 0
   fi
   if [[ "$tpl" == '~/'* ]]; then
@@ -8211,10 +8971,15 @@ cmd_doctor() {
   # opensop on PATH (check if we resolve; BASH_SOURCE[0] is always us)
   local opensop_path
   opensop_path=$(command -v opensop 2>/dev/null || true)
+  # Version of the opensop on PATH, read from the file (not executed). A
+  # different version than the one running means two installs are in play.
+  local path_version=""
+  [[ -n "$opensop_path" && -f "$opensop_path" ]] && path_version="$(grep -m1 'OPENSOP_CLI_VERSION=' "$opensop_path" 2>/dev/null \
+    | sed 's/.*OPENSOP_CLI_VERSION="\{0,1\}\([^"]*\)"\{0,1\}.*/\1/' || true)"
 
   # jq: critical dependency.
   local jq_ok=false jq_version="absent"
-  if command -v jq >/dev/null 2>&1; then
+  if type -P jq >/dev/null 2>&1; then
     jq_ok=true
     jq_version=$(jq --version 2>/dev/null || echo "unknown")
   fi
@@ -8292,6 +9057,7 @@ cmd_doctor() {
     jq -nc \
       --arg version "$version" \
       --arg opensop_path "$opensop_path" \
+      --arg path_version "$path_version" \
       --arg jq_version "$jq_version" \
       --argjson jq_ok "$jq_ok" \
       --arg bash_version "$bash_version" \
@@ -8299,6 +9065,8 @@ cmd_doctor() {
       --argjson skills "$skills_json" \
       --argjson ok "$(! $critical && echo true || echo false)" \
       '{version:$version, opensop_path:$opensop_path,
+        path_version:(if $path_version == "" then null else $path_version end),
+        path_version_mismatch:($path_version != "" and $path_version != $version),
         jq:{ok:$jq_ok, version:$jq_version},
         bash:{ok:$bash_ok, version:$bash_version},
         skills:$skills, ok:$ok}'
@@ -8311,7 +9079,12 @@ cmd_doctor() {
 
   # Version + PATH.
   if [[ -n "$opensop_path" ]]; then
-    printf '  %s%-12s%s %s\n' "$C_GREEN" "opensop" "$C_RESET" "$opensop_path"
+    if [[ -n "$path_version" && "$path_version" != "$version" ]]; then
+      printf '  %s%-12s%s %s is v%s, but this opensop (%s) is v%s — two installs; remove or upgrade one\n' \
+             "$C_YELLOW" "opensop" "$C_RESET" "$opensop_path" "$path_version" "${BASH_SOURCE[0]}" "$version"
+    else
+      printf '  %s%-12s%s %s\n' "$C_GREEN" "opensop" "$C_RESET" "$opensop_path"
+    fi
   else
     printf '  %s%-12s%s not found on PATH (running from: %s)\n' \
            "$C_YELLOW" "opensop" "$C_RESET" "${BASH_SOURCE[0]}"
@@ -8364,16 +9137,17 @@ cmd_doctor() {
 # --------------------------------------------------------------------------- #
 # Subcommand: pull
 #
-# Download an SOP from the OpenSOP SOP library (<author>/<slug>/<slug>.sop.json
-# in the opensop/sops repo on GitHub).
+# Download an SOP from the OpenSOP SOP library (sops/<author>/<slug>/<slug>.sop.json
+# in the opensop/opensop repo on GitHub).
 #
 # Usage:
 #   opensop pull <author>/<slug>[@<ref>] [--output <path>] [--force] [--verify <sha256>]
 #
 # Resolution:
-#   Fetches: $OPENSOP_SOPS_BASE/<ref>/<author>/<slug>/<slug>.sop.json
+#   Fetches: $OPENSOP_SOPS_BASE/<author>/<slug>/<slug>.sop.json with {ref} in the
+#   base replaced by <ref> (a base without {ref} gets /<ref> appended).
 #   Default ref: main. May be a branch name or an immutable commit SHA for pinning.
-#   Default OPENSOP_SOPS_BASE: https://raw.githubusercontent.com/opensop/sops
+#   Default OPENSOP_SOPS_BASE: https://raw.githubusercontent.com/opensop/opensop/{ref}/sops
 #   Override OPENSOP_SOPS_BASE in tests to point at a local fixture dir (file://).
 #   OPENSOP_RECIPES_BASE is a deprecated alias, honoured (with a stderr warning)
 #   only when OPENSOP_SOPS_BASE is unset.
@@ -8390,7 +9164,7 @@ cmd_doctor() {
 _output_is_json() {
   case "$OUTPUT_MODE" in
     json) return 0 ;;
-    auto) [[ -t 1 ]] && return 1 || return 0 ;;
+    auto) is_tty && return 1 || return 0 ;;
     *)    return 1 ;;
   esac
 }
@@ -8573,9 +9347,10 @@ cmd_pull() {
     sops_base="$OPENSOP_RECIPES_BASE"
     info "OPENSOP_RECIPES_BASE is deprecated — use OPENSOP_SOPS_BASE instead" >&2
   else
-    sops_base="https://raw.githubusercontent.com/opensop/sops"
+    sops_base="https://raw.githubusercontent.com/opensop/opensop/{ref}/sops"
   fi
-  local fetch_url="${sops_base}/${ref}/${author}/${slug}/${slug}.sop.json"
+  [[ "$sops_base" == *"{ref}"* ]] && sops_base="${sops_base//\{ref\}/$ref}" || sops_base="${sops_base}/${ref}"
+  local fetch_url="${sops_base}/${author}/${slug}/${slug}.sop.json"
 
   # Progress goes to stderr so stdout stays clean for JSON consumers.
   info "fetching ${fetch_url} …" >&2
@@ -8603,7 +9378,7 @@ cmd_pull() {
     if [[ ! -f "$local_path" ]]; then
       rm -f "$tmp_file"
       die "SOP not found at ${fetch_url}" "file_not_found" \
-          "check the author/slug — valid slugs live in the opensop/sops library"
+          "check the author/slug — valid slugs live in sops/ of github.com/opensop/opensop"
     fi
     cp "$local_path" "$tmp_file" || { rm -f "$tmp_file"; die "could not copy from $local_path" "cli_error"; }
   else
@@ -8612,7 +9387,7 @@ cmd_pull() {
       rm -f "$tmp_file"
       die "could not download SOP (curl exit $curl_rc): ${fetch_url}" \
           "network_error" \
-          "check the author/slug and your network — valid slugs live in the opensop/sops library"
+          "check the author/slug and your network — valid slugs live in sops/ of github.com/opensop/opensop"
     fi
   fi
 
@@ -8673,7 +9448,7 @@ cmd_pull() {
 # `sop.*` is the current distribution-metadata object (SPEC 2.8); `recipe.*` is
 # a deprecated alias. If both are present in the file, `sop` wins.
 _sop_print_summary() {
-  local file="$1" source_url="$2" sha256="$3"
+  local file="$1" source_url="$2" sha256="$3" file_label="${4:-written to:}"
   local meta
   meta=$(jq -c '
     (if has("process") then .process else . end) as $p |
@@ -8706,7 +9481,7 @@ _sop_print_summary() {
   if [[ -n "$sha256" ]]; then
     printf '  %-16s %s\n' "sha256:"  "$sha256"
   fi
-  printf '  %-16s %s\n' "written to:" "$file"
+  printf '  %-16s %s\n' "$file_label" "$file"
 }
 
 # --------------------------------------------------------------------------- #
@@ -8884,7 +9659,7 @@ cmd_info() {
   if _output_is_json; then
     _sop_json "$file" "$sop_source" "$file_hash" "$sop_install" "$sop_tags"
   else
-    _sop_print_summary "$file" "$sop_source" "$file_hash"
+    _sop_print_summary "$file" "$sop_source" "$file_hash" "file:"
     if [[ -n "$sop_install" ]]; then
       printf '  %-16s %s\n' "install:" "$sop_install"
     fi

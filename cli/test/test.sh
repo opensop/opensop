@@ -5876,7 +5876,7 @@ upg_cli_sha_before="$(_upg_sha256 "$cli")"
 # Run the upgrade from the throwaway copy with the decoy FIRST on PATH.
 set +e
 upg_src_out="$(PATH="${upg_decoy_dir}:${upg_curl_stub_dir}:${PATH}" \
-  "${upg_throwaway_dir}/opensop" upgrade --json 2>&1)"; upg_src_rc=$?
+  OPENSOP_UPGRADE_LATEST=v9.9.9 "${upg_throwaway_dir}/opensop" upgrade --json 2>&1)"; upg_src_rc=$?
 set -e
 
 # The controlled upgrade must succeed…
@@ -6079,7 +6079,7 @@ CURLSTUB2
 chmod +x "$upg_curl_nosum"
 
 set +e
-upg_nosumout="$(PATH="${upg_fake_dir}:${PATH}" "$upg_nosum_bin" upgrade --json 2>&1)"; upg_nosum_rc=$?
+upg_nosumout="$(PATH="${upg_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=99.0.0 "$upg_nosum_bin" upgrade --json 2>&1)"; upg_nosum_rc=$?
 set -e
 [ "$upg_nosum_rc" -ne 0 ] || { echo "FAIL: upgrade without checksum file (no --allow-unverified) should exit non-zero; got: $upg_nosumout"; exit 1; }
 echo "$upg_nosumout" | grep -q "cli_error" \
@@ -6121,7 +6121,7 @@ CURLSTUB3
 chmod +x "${upg_fake_dir}/curl"
 
 set +e
-upg_mmout="$(PATH="${upg_fake_dir}:${PATH}" "$upg_mismatch_bin" upgrade --json 2>&1)"; upg_mm_rc=$?
+upg_mmout="$(PATH="${upg_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=99.0.0 "$upg_mismatch_bin" upgrade --json 2>&1)"; upg_mm_rc=$?
 set -e
 [ "$upg_mm_rc" -ne 0 ] || { echo "FAIL: upgrade with checksum mismatch should exit non-zero; got: $upg_mmout"; exit 1; }
 echo "$upg_mmout" | grep -q "cli_error" \
@@ -6191,7 +6191,7 @@ chmod +x "${sym_fake_dir}/curl"
 sym_before="$(sha256sum "$sym_real_bin" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$sym_real_bin" | awk '{print $1}')"
 
 set +e
-sym_out="$(PATH="${sym_fake_dir}:${PATH}" "$sym_link" upgrade --json 2>&1)"; sym_rc=$?
+sym_out="$(PATH="${sym_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=0.99.0-symlink-test "$sym_link" upgrade --json 2>&1)"; sym_rc=$?
 set -e
 
 [ "$sym_rc" -eq 0 ] || {
@@ -6278,7 +6278,7 @@ CURLSTUB_MODE
   chmod +x "${mode_fake_dir}/curl"
 
   set +e
-  mode_out="$(PATH="${mode_fake_dir}:${PATH}" "$mode_bin" upgrade --allow-unverified --json 2>&1)"; mode_rc=$?
+  mode_out="$(PATH="${mode_fake_dir}:${PATH}" OPENSOP_UPGRADE_LATEST=0.99.0 "$mode_bin" upgrade --allow-unverified --json 2>&1)"; mode_rc=$?
   set -e
   [ "$mode_rc" -eq 0 ] || {
     echo "FAIL: upgrade (mode ${test_mode}) should exit 0 (upgrade completed); got $mode_rc: $mode_out"
@@ -7570,11 +7570,10 @@ onboard_validated="$(echo "$onboard_scaffold_out" | jq -r '.validated' 2>/dev/nu
   || { echo "FAIL: E1 onboard (no-arg) — expected validated=true, got '$onboard_validated'"; exit 1; }
 echo "PASS: E1 onboard (no-arg) — validated=true (dry-run passed on scaffolded file)"
 
-# bench_result_or_skipped is a string (either "completed" or "skipped")
-onboard_bench_status="$(echo "$onboard_scaffold_out" | jq -r '.bench_result_or_skipped' 2>/dev/null || echo "")"
-[ -n "$onboard_bench_status" ] \
-  || { echo "FAIL: E1 onboard (no-arg) — bench_result_or_skipped missing from JSON summary"; exit 1; }
-echo "PASS: E1 onboard (no-arg) — bench_result_or_skipped present: '$onboard_bench_status'"
+# onboard no longer runs bench; the summary lists next commands instead.
+echo "$onboard_scaffold_out" | jq -e '(.next | length) > 0 and (has("bench_result_or_skipped") | not)' >/dev/null \
+  || { echo "FAIL: E1 onboard (no-arg) — expected next[] and no bench fields: $onboard_scaffold_out"; exit 1; }
+echo "PASS: E1 onboard (no-arg) — next[] present, no bench"
 
 popd >/dev/null
 
@@ -7600,11 +7599,11 @@ echo "$onboard_bad_out" | jq -e '.error // .message // .validation_errors' >/dev
   }
 echo "PASS: E1 onboard (invalid JSON) — error output present"
 
-# --- (c) valid .sop.json + --stub --n 1 + --json: parseable summary with bench ---
+# --- (c) valid .sop.json + --json: parseable summary ---
 onboard_valid_json="$onboard_tmp/my-process.sop.json"  # scaffolded by (a)
 
 set +e
-onboard_valid_out="$("$cli" onboard "$onboard_valid_json" --stub --n 1 --json 2>&1)"
+onboard_valid_out="$("$cli" onboard "$onboard_valid_json" --json 2>&1)"
 onboard_valid_rc=$?
 set -e
 
@@ -7621,20 +7620,7 @@ onboard_valid_validated="$(echo "$onboard_valid_out" | jq -r '.validated' 2>/dev
   || { echo "FAIL: E1 onboard (valid+stub) — expected validated=true, got '$onboard_valid_validated'"; exit 1; }
 echo "PASS: E1 onboard (valid+stub) — validated=true"
 
-# bench ran (--stub means it should always succeed)
-onboard_valid_bench_status="$(echo "$onboard_valid_out" | jq -r '.bench_result_or_skipped' 2>/dev/null || echo "")"
-[ "$onboard_valid_bench_status" = "completed" ] \
-  || { echo "FAIL: E1 onboard (valid+stub) — bench_result_or_skipped should be 'completed' with --stub, got '$onboard_valid_bench_status'"; exit 1; }
-echo "PASS: E1 onboard (valid+stub) — bench_result_or_skipped=completed"
-
-# bench_result contains the arms scoreboard
-onboard_valid_arms="$(echo "$onboard_valid_out" | jq '.bench_result.arms | length' 2>/dev/null || echo "")"
-[ "${onboard_valid_arms:-0}" -gt 0 ] \
-  || { echo "FAIL: E1 onboard (valid+stub) — bench_result.arms should be non-empty, got '$onboard_valid_arms'"; exit 1; }
-echo "PASS: E1 onboard (valid+stub) — bench_result.arms present and non-empty"
-
-# --- (d) no-key path: bench skipped gracefully (no hang, no crash) ---
-# Unset ANTHROPIC_API_KEY and run without --stub; bench should skip gracefully.
+# --- (d) no-key path: onboard succeeds and says what the run needs ---
 onboard_nokey_out=""
 onboard_nokey_rc=0
 set +e
@@ -7642,19 +7628,17 @@ onboard_nokey_out="$(ANTHROPIC_API_KEY="" "$cli" onboard "$onboard_valid_json" -
 onboard_nokey_rc=$?
 set -e
 
-# onboard itself should exit 0 (bench failure is graceful, not fatal)
 [ "$onboard_nokey_rc" -eq 0 ] \
-  || { echo "FAIL: E1 onboard (no-key) — should exit 0 even when bench skips; got $onboard_nokey_rc (output: ${onboard_nokey_out:0:400})"; exit 1; }
-echo "PASS: E1 onboard (no-key) — exits 0 (bench skipped gracefully)"
+  || { echo "FAIL: E1 onboard (no-key) — should exit 0; got $onboard_nokey_rc (output: ${onboard_nokey_out:0:400})"; exit 1; }
+echo "PASS: E1 onboard (no-key) — exits 0"
 
 echo "$onboard_nokey_out" | jq -e . >/dev/null 2>&1 \
   || { echo "FAIL: E1 onboard (no-key) — --json output not parseable: ${onboard_nokey_out:0:400}"; exit 1; }
-echo "PASS: E1 onboard (no-key) — --json output parseable even when bench skips"
+echo "PASS: E1 onboard (no-key) — --json output parseable"
 
-onboard_nokey_bench="$(echo "$onboard_nokey_out" | jq -r '.bench_result_or_skipped' 2>/dev/null || echo "")"
-[ "$onboard_nokey_bench" = "skipped" ] \
-  || { echo "FAIL: E1 onboard (no-key) — expected bench_result_or_skipped=skipped, got '$onboard_nokey_bench'"; exit 1; }
-echo "PASS: E1 onboard (no-key) — bench_result_or_skipped=skipped (graceful no-key path)"
+echo "$onboard_nokey_out" | jq -e '.requires | any(test("ANTHROPIC_API_KEY"))' >/dev/null \
+  || { echo "FAIL: E1 onboard (no-key) — expected requires[] to name ANTHROPIC_API_KEY: $onboard_nokey_out"; exit 1; }
+echo "PASS: E1 onboard (no-key) — requires[] names what the scaffold run needs"
 
 # --------------------------------------------------------------------------- #
 # E1: onboard — structural validation gate (negative tests)
@@ -8681,10 +8665,7 @@ for stub in \
     '{"items":[{"owner":"Al","task":["a","b"]}]}' \
     '{"items":[null,{"owner":"Al","task":"real"}]}' \
     '{"items":[{"owner":"Al"}]}' \
-    '{"items":["a bare string"]}' \
-    '{"items":7}' \
-    '{"items":"a scalar"}' \
-    '{"items":{"owner":"x","task":"y"}}'; do
+    '{"items":["a bare string"]}'; do
   mh="$(mktemp -d)"
   mm="$(OSL_LLM_STUB="$stub" OPENSOP_LOCAL_HOME="$mh" "$cli" run "$mai" --input notes=x --input meeting_title=T --json 2>/dev/null)"
   st="$(echo "$mm" | jq -r '.status')"; rid="$(echo "$mm" | jq -r '.run_id')"
@@ -8696,6 +8677,19 @@ for stub in \
     || { echo "FAIL: meeting-action-items produced an EMPTY artifact on malformed items ($stub)"; exit 1; }
 done
 echo "PASS: meeting-action-items — malformed LLM items render non-empty (never crash or silently empty)"
+# A non-array `items` violates the declared schema (items: {type: array}) and
+# fails at the llm step with a clear error (v0.10.0 validates array/object types).
+for stub in '{"items":7}' '{"items":"a scalar"}' '{"items":{"owner":"x","task":"y"}}'; do
+  mh="$(mktemp -d)"
+  set +e
+  mm="$(OSL_LLM_STUB="$stub" OPENSOP_LOCAL_HOME="$mh" "$cli" run "$mai" --input notes=x --input meeting_title=T --json 2>/dev/null)"
+  set -e
+  rid="$(echo "$mm" | jq -r '.run_id')"
+  jq -e 'select(.status=="failed") | .output.error | contains("items must be an array")' "$mh/runs/$rid/audit.jsonl" >/dev/null \
+    || { rm -rf "$mh"; echo "FAIL: meeting-action-items non-array items ($stub) should fail schema validation"; exit 1; }
+  rm -rf "$mh"
+done
+echo "PASS: meeting-action-items — a non-array items fails the declared array schema with a clear error"
 
 # --- lead-qualification: the outcome enum is runtime-enforced ---
 lq="$sops_dir/lead-qualification/lead-qualification.sop.json"
@@ -9371,8 +9365,8 @@ echo "PASS: SPEC091-c — onboard-emitted process file stamped 0.9.1 and passes 
 
 # (d) --version prints both clocks: the CLI version and the supported SPEC list.
 version_out="$("$cli" --version 2>&1)"
-echo "$version_out" | grep -q "opensop 0.9.1" \
-  || { echo "FAIL: SPEC091-d --version should print the CLI version 0.9.1, got: $version_out"; exit 1; }
+echo "$version_out" | grep -q "opensop 0.10.0" \
+  || { echo "FAIL: SPEC091-d --version should print the CLI version 0.10.0, got: $version_out"; exit 1; }
 echo "$version_out" | grep -q "0.1, 0.2, 0.6, 0.7, 0.9.1" \
   || { echo "FAIL: SPEC091-d --version should print the supported SPEC version list, got: $version_out"; exit 1; }
 echo "PASS: SPEC091-d — --version prints both the CLI version and the supported SPEC versions"
@@ -9444,6 +9438,980 @@ echo "$ev_bad_out" | jq -e '.valid == false and (.errors[]?.message | test("unkn
 echo "PASS: SPEC091-h — evidence.required vocabulary matches schema 0.9.1's event enum + effective_prompt; stale 'handoff' name rejected"
 
 rm -rf "$spec08_dir"
+
+# --------------------------------------------------------------------------- #
+# v0.10.0: CLI-backed llm providers, local judgment (§3.9), local loop (§3.14).
+#
+# Hermetic: fake claude/codex/cursor-agent/kimi binaries on PATH record each
+# call to $FAKE_CLI_LOG and answer {"ok":true} the way the real CLI emits its
+# final text (claude: json .result; codex: -o file; cursor: text; kimi: "• "
+# bullet). OSL_LLM_ARGV_FILE captures the argv the engine built.
+# --------------------------------------------------------------------------- #
+p092="$OPENSOP_LOCAL_HOME/p092"; mkdir -p "$p092/bin" "$p092/work"
+export FAKE_CLI_LOG="$p092/cli.log"; : > "$FAKE_CLI_LOG"
+for b in claude codex cursor-agent kimi; do
+  cat > "$p092/bin/$b" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "--version" ] && { echo "fake-$(basename "$0") 1.0"; exit 0; }
+echo "$(basename "$0") cwd=$PWD stdin=$(grep -c 'Say ok' || true)" >> "$FAKE_CLI_LOG"
+[ -n "${FAKE_SLEEP:-}" ] && exec sleep "$FAKE_SLEEP"
+# FAKE_FAIL: each CLI's real failure shape (claude: is_error envelope on stdout).
+case "${FAKE_FAIL:-}" in
+  claude-limit) echo "{\"type\":\"result\",\"is_error\":true,\"result\":\"You've hit your session limit · resets 5pm\"}"; exit 1 ;;
+  kimi-limit)   echo "kimi version 2.2.0" >&2
+                echo "error: failed to run prompt: provider.auth_error: 403 You've reached your 5-hour usage limit." >&2; exit 1 ;;
+  crash)        echo "boom: worker crashed" >&2; exit 2 ;;
+esac
+# FAKE_BAD_FIRST=<file>: the first call answers schema-invalid JSON (forces one retry).
+ans='{"ok":true}'
+if [ -n "${FAKE_BAD_FIRST:-}" ] && [ ! -e "$FAKE_BAD_FIRST" ]; then : > "$FAKE_BAD_FIRST"; ans='{"nope":1}'; fi
+case "$(basename "$0")" in
+  claude) jq -cn --arg r "$ans" '{type:"result", is_error:false, result:$r, total_cost_usd:0.25,
+            usage:{input_tokens:10, cache_creation_input_tokens:5, cache_read_input_tokens:100, output_tokens:7}}' ;;
+  codex)  echo '{"type":"thread.started","thread_id":"t"}'
+          echo '{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":3,"reasoning_output_tokens":0}}'
+          while [ $# -gt 0 ]; do [ "$1" = "-o" ] && printf '%s' "$ans" > "$2"; shift; done ;;
+  cursor-agent) jq -cn --arg r "$ans" '{type:"result", subtype:"success", is_error:false, result:$r,
+            usage:{inputTokens:30, outputTokens:4, cacheReadTokens:10, cacheWriteTokens:0}}' ;;
+  kimi)   echo "• $ans" ;;
+esac
+SH
+  chmod +x "$p092/bin/$b"
+done
+
+# _p092_proc <model> <permission> [<workdir>] → a one-llm-step process file path
+_p092_proc() {
+  jq -n --arg m "$1" --arg p "$2" --arg w "${3:-}" '{name:"p092", steps:[
+    {id:"ask", type:"llm", model:$m, permission:$p, prompt:"Say ok.",
+     expected_output_schema:{ok:{type:"boolean", required:true}}} + (if $w == "" then {} else {workdir:$w} end)]}' \
+    > "$p092/proc.sop.json"
+  echo "$p092/proc.sop.json"
+}
+
+# (a) argv per provider prefix + permission (stub path: no CLI is invoked).
+: > "$p092/argv.jsonl"
+for spec in "claude-code:opus-x read-only" "claude-code: workspace-write" "codex:gpt-x read-only" "codex: workspace-write" \
+            "cursor:sonnet-x read-only" "cursor: workspace-write" "kimi:k3 full-access"; do
+  set -- $spec
+  OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' PATH="$p092/bin:$PATH" \
+    "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json >/dev/null \
+    || { echo "FAIL: P092-a $1 $2 stub run should complete"; exit 1; }
+done
+_argv() { sed -n "${1}p" "$p092/argv.jsonl" | jq -c '.argv'; }
+[ "$(_argv 1)" = '["claude","-p","--output-format","json","--no-session-persistence","--model","opus-x","--tools","Read,Grep,Glob"]' ] \
+  || { echo "FAIL: P092-a claude-code read-only argv: $(_argv 1)"; exit 1; }
+[ "$(_argv 2)" = '["claude","-p","--output-format","json","--no-session-persistence","--permission-mode","auto"]' ] \
+  || { echo "FAIL: P092-a claude-code workspace-write argv (empty model → no --model): $(_argv 2)"; exit 1; }
+_argv 3 | jq -e --arg w "$p092/work" '.[0:2] == ["codex","exec"] and (index(["-C",$w])) and (index(["-s","read-only"])) and (index(["-m","gpt-x"])) and (index("-o")) and .[-1] == "-"' >/dev/null \
+  || { echo "FAIL: P092-a codex read-only argv: $(_argv 3)"; exit 1; }
+_argv 4 | jq -e '(index(["-s","workspace-write"])) and (index("-m") | not)' >/dev/null \
+  || { echo "FAIL: P092-a codex workspace-write argv: $(_argv 4)"; exit 1; }
+_argv 5 | jq -e --arg w "$p092/work" '.[0:2] == ["cursor-agent","-p"] and (index(["--workspace",$w])) and (index(["--mode","ask"])) and (index(["--model","sonnet-x"]))' >/dev/null \
+  || { echo "FAIL: P092-a cursor read-only argv: $(_argv 5)"; exit 1; }
+_argv 6 | jq -e '(index(["--sandbox","enabled"])) and (index("--mode") | not)' >/dev/null \
+  || { echo "FAIL: P092-a cursor workspace-write argv: $(_argv 6)"; exit 1; }
+[ "$(sed -n 7p "$p092/argv.jsonl" | jq -c '.argv[:-1]')" = '["kimi","--output-format","text","-m","k3","-p"]' ] \
+  || { echo "FAIL: P092-a kimi argv: $(sed -n 7p "$p092/argv.jsonl")"; exit 1; }
+jq -se '.[0:6] | all(.[]; .stdin | test("precise JSON generator") and test("Say ok."))' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-a claude/codex/cursor should get the schema instruction + rendered prompt on stdin"; exit 1; }
+sed -n 7p "$p092/argv.jsonl" | jq -e '.stdin == "" and (.argv[-1] | test("Say ok."))' >/dev/null \
+  || { echo "FAIL: P092-a kimi's prompt should stay its -p argument"; exit 1; }
+jq -se --arg w "$p092/work" 'all(.[]; .cwd == $w)' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-a every CLI call should run in the declared workdir"; exit 1; }
+echo "PASS: P092-a — argv per provider prefix and permission (model flag omitted for an empty model)"
+
+# (b) stub path: no CLI call at all (not even --version); receipt records provider/model/permission/cli_version.
+[ ! -s "$FAKE_CLI_LOG" ] || { echo "FAIL: P092-b OSL_LLM_STUB must skip every CLI call, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
+b_out="$(OSL_LLM_STUB='{"ok":true}' PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc codex:gpt-x read-only)" --json)"
+jq -e 'select(.step=="ask") | .provider == "codex" and .model == "codex:gpt-x" and .permission == "read-only" and .cli_version == "stub"' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$b_out")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-b receipt should record provider/model/permission/cli_version"; exit 1; }
+echo "PASS: P092-b — CLI-provider stub path makes no CLI call; receipt records provider, model, permission, cli_version"
+
+# (c) real invocation path against the fake CLIs: final-text capture per CLI, workdir, CLI version.
+for m in claude-code:x codex:x cursor:x; do
+  c_out="$(PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$m" read-only "$p092/work")" --json)" \
+    || { echo "FAIL: P092-c $m fake-CLI run should complete, got: $c_out"; exit 1; }
+  jq -e 'select(.step=="ask") | .output.ok == true and (.cli_version | startswith("fake-"))' \
+    "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$c_out")/audit.jsonl" >/dev/null \
+    || { echo "FAIL: P092-c $m output/cli_version not captured"; exit 1; }
+done
+c_out="$(PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc kimi: full-access "$p092/work")" --json)" \
+  || { echo "FAIL: P092-c kimi fake-CLI run should complete (bullet stripped), got: $c_out"; exit 1; }
+[ "$(grep -c "cwd=$p092/work" "$FAKE_CLI_LOG")" -eq 4 ] \
+  || { echo "FAIL: P092-c each CLI should run once in the workdir, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
+[ "$(grep -cE '^(claude|codex|cursor-agent) .* stdin=1$' "$FAKE_CLI_LOG")" -eq 3 ] && grep -q '^kimi .* stdin=0$' "$FAKE_CLI_LOG" \
+  || { echo "FAIL: P092-c claude/codex/cursor should read the prompt on stdin, kimi not, log: $(cat "$FAKE_CLI_LOG")"; exit 1; }
+echo "PASS: P092-c — claude/codex/cursor/kimi final text captured from each CLI's real output channel"
+
+# (d) model templating: an earlier shell step picks the model.
+cat > "$p092/tmpl.sop.json" <<'JSON'
+{ "name": "p092-tmpl", "steps": [
+  { "id": "pick", "type": "shell", "run": "echo '{\"model\":\"cursor:picked-model\"}'" },
+  { "id": "ask", "type": "llm", "model": "{{ pick.model }}", "prompt": "Say ok.",
+    "expected_output_schema": { "ok": { "type": "boolean", "required": true } } } ] }
+JSON
+: > "$p092/argv.jsonl"
+d_out="$(OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/tmpl.sop.json" --json)"
+jq -e 'select(.step=="ask") | .model == "cursor:picked-model" and .provider == "cursor"' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$d_out")/audit.jsonl" >/dev/null \
+  && jq -e '.argv | index(["--model","picked-model"])' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-d {{ pick.model }} should resolve to cursor:picked-model"; exit 1; }
+echo "PASS: P092-d — model is {{ var }}-templated from an earlier step's output"
+
+# (e) permission enforcement: kimi refuses read-only/workspace-write; bad values refused; unknown prefix refused.
+for spec in "kimi:k3 read-only kimi cannot enforce" "kimi: workspace-write kimi cannot enforce" \
+            "codex:x root permission must be" "gemini:x read-only no provider configured"; do
+  set -- $spec; want="${spec#* * }"
+  set +e
+  e_out="$(OSL_LLM_STUB='{"ok":true}' PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$1" "$2")" --json 2>/dev/null)"; e_rc=$?
+  set -e
+  [ "$e_rc" -ne 0 ] || { echo "FAIL: P092-e $1 $2 should fail"; exit 1; }
+  jq -e --arg w "$want" 'select(.step=="ask") | .status == "failed" and (.output.error | contains($w))' \
+    "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$e_out")/audit.jsonl" >/dev/null \
+    || { echo "FAIL: P092-e $1 $2 should fail with '$want'"; exit 1; }
+done
+echo "PASS: P092-e — a permission the CLI cannot back is refused (kimi), bad permission and unknown prefix refused"
+
+# (f) judgment: auto-complete, low-confidence escalation + submit resume, require_human_review, no agent.
+cat > "$p092/jd.sop.json" <<'JSON'
+{ "name": "p092-jd", "steps": [
+  { "id": "judge", "type": "judgment", "model": "codex:x", "prompt": "Decide.",
+    "judgment": { "allow_agent": true, "confidence_threshold": 0.8 },
+    "outputs": [ { "name": "decision", "type": "enum", "values": ["approve", "reject"] } ] },
+  { "id": "after", "type": "shell", "run": "jq -c '{saw: .judge.decision}'" } ] }
+JSON
+f_out="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.95}' "$cli" run "$p092/jd.sop.json" --json)"
+[ "$(jq -r '.status' <<<"$f_out")" = completed ] \
+  && [ "$(jq -r '.after.saw' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$f_out")/context.json")" = approve ] \
+  || { echo "FAIL: P092-f confident judgment should auto-complete, got: $f_out"; exit 1; }
+echo "PASS: P092-f — judgment above confidence_threshold completes with the agent's outputs"
+
+set +e
+f_bad="$(OSL_LLM_STUB='{"decision":"maybe","confidence":0.95}' "$cli" run "$p092/jd.sop.json" --json 2>/dev/null)"
+set -e
+[ "$(jq -r '.status' <<<"$f_bad")" = failed ] || { echo "FAIL: P092-f judgment outside the decision enum should fail validation"; exit 1; }
+echo "PASS: P092-f — judgment output is validated against the step's outputs (enum)"
+
+f_low="$(OSL_LLM_STUB='{"decision":"reject","confidence":0.3}' "$cli" run "$p092/jd.sop.json" --json)"
+f_rid="$(jq -r .run_id <<<"$f_low")"
+jq -e '.status == "waiting" and .waiting.reason == "escalated" and .waiting.step == "judge" and .waiting.expects.outputs == ["decision"]' <<<"$f_low" >/dev/null \
+  || { echo "FAIL: P092-f low confidence should pause escalated, got: $f_low"; exit 1; }
+jq -e 'select(.step=="judge" and .status=="waiting") | .reason == "escalated" and .escalation == "low_confidence" and .proposal.decision == "reject"' \
+  "$OPENSOP_LOCAL_HOME/runs/$f_rid/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-f escalated receipt should carry escalation + proposal"; exit 1; }
+set +e
+"$cli" submit "$f_rid" judge --output decision=perhaps --json >/dev/null 2>&1; f_v=$?
+set -e
+[ "$f_v" -ne 0 ] || { echo "FAIL: P092-f submit should validate decision against the enum"; exit 1; }
+f_sub="$("$cli" submit "$f_rid" judge --output decision=approve --decided-by human:reviewer --json)"
+[ "$(jq -r '.status' <<<"$f_sub")" = completed ] \
+  && [ "$(jq -r '.after.saw' "$OPENSOP_LOCAL_HOME/runs/$f_rid/context.json")" = approve ] \
+  || { echo "FAIL: P092-f submit should resume the escalated judgment, got: $f_sub"; exit 1; }
+echo "PASS: P092-f — low confidence escalates (reason escalated, proposal kept); submit validates and resumes"
+
+jq '.steps[0].judgment.require_human_review = true' "$p092/jd.sop.json" > "$p092/jd-hr.sop.json"
+f_hr="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.99}' "$cli" run "$p092/jd-hr.sop.json" --json)"
+jq -e 'select(.step=="judge" and .status=="waiting") | .escalation == "require_human_review"' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$f_hr")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-f require_human_review should escalate even when confident"; exit 1; }
+jq 'del(.steps[0].judgment.allow_agent)' "$p092/jd.sop.json" > "$p092/jd-na.sop.json"
+: > "$FAKE_CLI_LOG"
+f_na="$(PATH="$p092/bin:$PATH" "$cli" run "$p092/jd-na.sop.json" --json)"
+[ "$(jq -r '.waiting.reason' <<<"$f_na")" = escalated ] && [ ! -s "$FAKE_CLI_LOG" ] \
+  && jq -e 'select(.step=="judge") | .escalation == "no_agent"' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$f_na")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-f judgment without allow_agent should escalate immediately, no agent call"; exit 1; }
+echo "PASS: P092-f — require_human_review escalates; no allow_agent escalates at once without calling an agent"
+
+# (g) loop: for_each (concat + sum), repeat_until, max_iterations exceeded, pausing body refused, while.
+cat > "$p092/loop.sop.json" <<'JSON'
+{ "name": "p092-loop", "inputs": { "cap": "5" }, "steps": [
+  { "id": "fetch", "type": "shell", "run": "echo '{\"leads\":[{\"n\":\"a\",\"s\":1},{\"n\":\"b\",\"s\":2},{\"n\":\"c\",\"s\":3}]}'" },
+  { "id": "each", "type": "loop",
+    "loop": { "for_each": "steps.fetch.outputs.leads[*]", "as": "lead", "max_iterations": "{{ process.inputs.cap }}",
+              "aggregate": { "names": "concat", "total": "sum" } },
+    "body": [ { "id": "score", "type": "shell", "run": "jq -c '{names: [.loop.lead.n], total: .loop.lead.s}'" } ] },
+  { "id": "until", "type": "loop",
+    "loop": { "repeat_until": "steps.bump.outputs.k >= 3", "max_iterations": 10, "aggregate": { "k": "last" } },
+    "body": [ { "id": "bump", "type": "shell", "run": "jq -c '{k: ((.bump.k // 0) + 1)}'" } ] },
+  { "id": "whl", "type": "loop", "loop": { "while": "loop.index < 2" },
+    "body": [ { "id": "noop1", "type": "noop" } ] } ] }
+JSON
+g_out="$("$cli" run "$p092/loop.sop.json" --json)"
+g_ctx="$(cat "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_out")/context.json")"
+jq -e '.each == {iterations: 3, names: ["a","b","c"], total: 6}' <<<"$g_ctx" >/dev/null \
+  || { echo "FAIL: P092-g for_each concat+sum, got: $(jq -c .each <<<"$g_ctx")"; exit 1; }
+echo "PASS: P092-g — for_each over a step output aggregates concat + sum; max_iterations from process.inputs"
+jq -e '.until == {iterations: 3, k: 3}' <<<"$g_ctx" >/dev/null \
+  || { echo "FAIL: P092-g repeat_until should stop at k>=3 carrying state across iterations, got: $(jq -c .until <<<"$g_ctx")"; exit 1; }
+jq -e '.whl.iterations == 2 and (has("score") | not) and (has("bump") | not)' <<<"$g_ctx" >/dev/null \
+  || { echo "FAIL: P092-g while should run 2 iterations; body outputs must not leak to the parent context"; exit 1; }
+echo "PASS: P092-g — repeat_until terminates on its predicate; while checks at start; body outputs stay inside the loop"
+
+jq '.steps[2].loop.max_iterations = 2' "$p092/loop.sop.json" > "$p092/loop-max.sop.json"
+set +e
+g_max="$("$cli" run "$p092/loop-max.sop.json" --json 2>/dev/null)"; g_rc=$?
+set -e
+[ "$g_rc" -ne 0 ] && jq -e 'select(.step=="until") | .status == "failed" and (.output.error | contains("max_iterations (2)"))' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_max")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-g reaching max_iterations unsatisfied should fail the step clearly"; exit 1; }
+echo "PASS: P092-g — max_iterations reached without the predicate satisfied fails with a clear error"
+
+cat > "$p092/loop-pause.sop.json" <<'JSON'
+{ "name": "p092-loop-pause", "steps": [
+  { "id": "lp", "type": "loop", "loop": { "for_each": ["x"] },
+    "body": [ { "id": "gate", "type": "approval" } ] } ] }
+JSON
+set +e
+g_p="$("$cli" run "$p092/loop-pause.sop.json" --json 2>/dev/null)"; g_rc=$?
+set -e
+[ "$g_rc" -ne 0 ] && [ "$(jq -r .status <<<"$g_p")" = failed ] \
+  && jq -e 'select(.step=="lp") | .output.error | contains("body step '"'"'gate'"'"' (approval) paused")' \
+       "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$g_p")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-g a pausing body step should fail the loop clearly, got: $g_p"; exit 1; }
+echo "PASS: P092-g — a pausing body step (approval) is refused with a clear error, not silently skipped"
+
+# (h) step timeout bounds a CLI attempt; the codex -o temp file is cleaned up.
+mkdir -p "$p092/tmp"
+jq '.steps[0].timeout = "1s"' "$(_p092_proc codex:x read-only "$p092/work")" > "$p092/to.sop.json"
+h_t0="$(date +%s)"
+set +e
+h_out="$(FAKE_SLEEP=30 TMPDIR="$p092/tmp" PATH="$p092/bin:$PATH" "$cli" run "$p092/to.sop.json" --json 2>/dev/null)"; h_rc=$?
+set -e
+[ "$h_rc" -ne 0 ] && [ $(( $(date +%s) - h_t0 )) -lt 15 ] \
+  && jq -e 'select(.step=="ask") | .status == "failed" and (.output.error | contains("codex timed out after 1s"))' \
+       "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$h_out")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-h a CLI attempt over its step timeout should fail fast with a clear error"; exit 1; }
+[ -z "$(ls -A "$p092/tmp")" ] || { echo "FAIL: P092-h codex -o temp file left behind after timeout: $(ls -A "$p092/tmp")"; exit 1; }
+jq '.steps[0].timeout = "soon"' "$p092/to.sop.json" > "$p092/to-bad.sop.json"
+set +e
+h_bad="$(OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/to-bad.sop.json" --json 2>/dev/null)"
+set -e
+jq -e 'select(.step=="ask") | .output.error | contains("timeout must be")' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$h_bad")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-h a malformed timeout should be refused"; exit 1; }
+echo "PASS: P092-h — step timeout kills a hung CLI, fails the step clearly, leaves no temp file; bad timeout refused"
+
+# (i) default workdir is the run's invocation cwd (manifest.cwd), also after a submit from elsewhere.
+mkdir -p "$p092/inv" "$p092/elsewhere"
+cat > "$p092/cwd.sop.json" <<'JSON'
+{ "name": "p092-cwd", "steps": [
+  { "id": "gate", "type": "approval" },
+  { "id": "ask", "type": "llm", "model": "cursor:", "prompt": "Say ok.",
+    "expected_output_schema": { "ok": { "type": "boolean", "required": true } } } ] }
+JSON
+i_out="$(cd "$p092/inv" && "$cli" run "$p092/cwd.sop.json" --json)"; i_rid="$(jq -r .run_id <<<"$i_out")"
+[ "$(jq -r .cwd "$OPENSOP_LOCAL_HOME/runs/$i_rid/manifest.json")" = "$p092/inv" ] \
+  || { echo "FAIL: P092-i manifest should record the invocation cwd"; exit 1; }
+: > "$p092/argv.jsonl"
+(cd "$p092/elsewhere" && OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' \
+  "$cli" submit "$i_rid" gate --output decision=approve --json >/dev/null)
+[ "$(jq -r .cwd "$p092/argv.jsonl")" = "$p092/inv" ] \
+  || { echo "FAIL: P092-i resumed CLI step should default to the invocation cwd, got $(jq -r .cwd "$p092/argv.jsonl")"; exit 1; }
+echo "PASS: P092-i — default workdir is the run's invocation cwd, persisted in the manifest and used on resume"
+
+# (j) condition (skip with a receipt) and exit_when + exit_outputs (§3.15), incl. from a loop body and on submit.
+cat > "$p092/cond.sop.json" <<'JSON'
+{ "name": "p092-cond", "inputs": { "mode": "fast" }, "steps": [
+  { "id": "slow", "type": "shell", "condition": "process.inputs.mode == 'slow'", "run": "echo '{\"ran\":true}'" },
+  { "id": "fast", "type": "shell", "condition": "process.inputs.mode == 'fast'", "run": "echo '{\"score\":0.2}'" },
+  { "id": "gate", "type": "noop", "exit_when": "steps.fast.outputs.score < 0.4",
+    "exit_outputs": { "outcome": "rejected_low_score" } },
+  { "id": "never", "type": "shell", "run": "echo '{\"ran\":true}'" } ] }
+JSON
+j_out="$("$cli" run "$p092/cond.sop.json" --json)"; j_rid="$(jq -r .run_id <<<"$j_out")"
+jq -e '.status == "completed" and .exited_early == {step: "gate", exit_outputs: {outcome: "rejected_low_score"}}' \
+  "$OPENSOP_LOCAL_HOME/runs/$j_rid/manifest.json" >/dev/null \
+  || { echo "FAIL: P092-j exit_when should end the run completed with exit_outputs, got: $(cat "$OPENSOP_LOCAL_HOME/runs/$j_rid/manifest.json")"; exit 1; }
+jq -e 'select(.step=="slow") | .status == "skipped"' "$OPENSOP_LOCAL_HOME/runs/$j_rid/audit.jsonl" >/dev/null \
+  && jq -e 'has("slow") | not' "$OPENSOP_LOCAL_HOME/runs/$j_rid/context.json" >/dev/null \
+  && jq -e 'select(.step=="fast") | .status == "completed"' "$OPENSOP_LOCAL_HOME/runs/$j_rid/audit.jsonl" >/dev/null \
+  && ! jq -e 'select(.step=="never")' "$OPENSOP_LOCAL_HOME/runs/$j_rid/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j false condition → skipped receipt; true → runs; nothing after an exit_when"; exit 1; }
+jq '.steps[0].condition = "mode is slow"' "$p092/cond.sop.json" > "$p092/cond-bad.sop.json"
+set +e
+j_bad="$("$cli" run "$p092/cond-bad.sop.json" --json 2>/dev/null)"
+set -e
+jq -e 'select(.step=="slow") | .status == "failed" and (.output.error | contains("cannot evaluate condition"))' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$j_bad")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j an unparseable condition should fail the step"; exit 1; }
+echo "PASS: P092-j — condition skips with a receipt; exit_when ends the run completed with exit_outputs; bad condition fails"
+
+cat > "$p092/exit-loop.sop.json" <<'JSON'
+{ "name": "p092-exit-loop", "steps": [
+  { "id": "lp", "type": "loop", "loop": { "for_each": [1, 2, 3], "as": "n" },
+    "body": [ { "id": "b", "type": "shell", "run": "jq -c '{n: .loop.n}'",
+                "exit_when": "outputs.n == 2", "exit_outputs": { "stopped_at": 2 } } ] },
+  { "id": "never", "type": "noop" } ] }
+JSON
+j_l="$("$cli" run "$p092/exit-loop.sop.json" --json)"; j_lr="$(jq -r .run_id <<<"$j_l")"
+jq -e '.status == "completed" and .exited_early.exit_outputs == {stopped_at: 2}' "$OPENSOP_LOCAL_HOME/runs/$j_lr/manifest.json" >/dev/null \
+  && [ "$(jq -r .lp.iterations "$OPENSOP_LOCAL_HOME/runs/$j_lr/context.json")" = 2 ] \
+  && ! jq -e 'select(.step=="never")' "$OPENSOP_LOCAL_HOME/runs/$j_lr/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j exit_when inside a loop body should end the loop and the run"; exit 1; }
+jq '.steps[0].exit_when = "outputs.decision == '"'"'approve'"'"'" | .steps[0].exit_outputs = {outcome: "approved"}' \
+  "$p092/jd.sop.json" > "$p092/jd-exit.sop.json"
+j_s="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.1}' "$cli" run "$p092/jd-exit.sop.json" --json)"; j_sr="$(jq -r .run_id <<<"$j_s")"
+"$cli" submit "$j_sr" judge --output decision=approve --json >/dev/null
+jq -e '.status == "completed" and .exited_early == {step: "judge", exit_outputs: {outcome: "approved"}}' \
+  "$OPENSOP_LOCAL_HOME/runs/$j_sr/manifest.json" >/dev/null \
+  && ! jq -e 'select(.step=="after")' "$OPENSOP_LOCAL_HOME/runs/$j_sr/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-j exit_when on an escalated judgment should apply when a human submits"; exit 1; }
+echo "PASS: P092-j — exit_when in a loop body ends the run; exit_when applies on submit (escalated judge)"
+
+# (k) schema validation covers object / array / nested / shorthand, on the API and CLI paths alike.
+_k_run() {  # <model> <schema_json> <stub> → prints the step's status
+  jq -n --arg m "$1" --argjson sc "$2" '{name:"p092-k", steps:[{id:"ask", type:"llm", model:$m, prompt:"x",
+    retry_on_incomplete:false, expected_output_schema:$sc}]}' > "$p092/k.sop.json"
+  local o; set +e; o="$(OSL_LLM_STUB="$3" "$cli" run "$p092/k.sop.json" --json 2>/dev/null)"; set -e
+  jq -r 'select(.step=="ask") | .status' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$o")/audit.jsonl"
+}
+for m in claude-sonnet-x codex:; do
+  [ "$(_k_run "$m" '{"x":{"type":"object"}}' '{"x":"not an object"}')" = failed ] \
+    || { echo "FAIL: P092-k $m: a string must not pass type:object"; exit 1; }
+  [ "$(_k_run "$m" '{"x":{"type":"object","properties":{"n":{"type":"number","required":true}}}}' '{"x":{"n":"7"}}')" = failed ] \
+    || { echo "FAIL: P092-k $m: nested property type must be checked"; exit 1; }
+  [ "$(_k_run "$m" '{"xs":"array[number]"}' '{"xs":[1,"two"]}')" = failed ] \
+    || { echo "FAIL: P092-k $m: array[number] items must be checked"; exit 1; }
+  [ "$(_k_run "$m" '{"intent":"enum[question, task]"}' '{"intent":"rant"}')" = failed ] \
+    || { echo "FAIL: P092-k $m: enum[...] shorthand must be enforced"; exit 1; }
+  [ "$(_k_run "$m" '{"x":{"n":"number","tags":"array[string]"},"intent":"enum[question, task]"}' \
+        '{"x":{"n":7,"tags":["a"]},"intent":"task"}')" = completed ] \
+    || { echo "FAIL: P092-k $m: a valid nested shorthand object should pass"; exit 1; }
+done
+echo "PASS: P092-k — schema validation enforces object, array[<type>], nested properties and enum[...] (API and CLI paths)"
+
+# (l) a parent paused on a waiting subprocess child cannot be submitted directly.
+cat > "$p092/child.sop.json" <<'JSON'
+{ "name": "p092-child", "steps": [ { "id": "approve-it", "type": "approval" } ] }
+JSON
+jq -n --arg c "$p092/child.sop.json" '{name:"p092-parent", steps:[{id:"sub", type:"subprocess", process:$c}, {id:"after", type:"noop"}]}' \
+  > "$p092/parent.sop.json"
+l_out="$("$cli" run "$p092/parent.sop.json" --json)"; l_rid="$(jq -r .run_id <<<"$l_out")"
+l_child="$(jq -r 'select(.step=="sub" and .status=="waiting") | .child_run_id' "$OPENSOP_LOCAL_HOME/runs/$l_rid/audit.jsonl")"
+set +e
+l_err="$("$cli" submit "$l_rid" sub --output x=1 --json 2>&1 >/dev/null)"; l_rc=$?
+set -e
+[ "$l_rc" -ne 0 ] && echo "$l_err" | grep -q "$l_child" \
+  && [ "$(jq -r .status "$OPENSOP_LOCAL_HOME/runs/$l_rid/manifest.json")" = waiting ] \
+  || { echo "FAIL: P092-l submitting to a parent with a waiting child should fail naming the child, got: $l_err"; exit 1; }
+"$cli" submit "$l_child" approve-it --output decision=approve --json >/dev/null
+[ "$(jq -r .status "$OPENSOP_LOCAL_HOME/runs/$l_rid/manifest.json")" = completed ] \
+  || { echo "FAIL: P092-l submitting to the child should still continue the parent"; exit 1; }
+echo "PASS: P092-l — parent submit is refused while its subprocess child waits (error names the child run)"
+
+# (m) permission is {{ ref }}-templated (one shell step picks model + permission) and still vocabulary-checked.
+_m_run() {  # <picked permission> <permission field> → prints the ask step's receipt
+  jq -n --arg pp "$1" --arg pf "$2" '{name:"p092-m", steps:[
+    {id:"pick", type:"shell", run:("echo " + ({model:"kimi:", permission:$pp} | tojson | @sh))},
+    {id:"ask", type:"llm", model:"{{ pick.model }}", permission:$pf, prompt:"Say ok.",
+     expected_output_schema:{ok:{type:"boolean", required:true}}}]}' > "$p092/m.sop.json"
+  local o; set +e; o="$(OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/m.sop.json" --json 2>/dev/null)"; set -e
+  jq -c 'select(.step=="ask")' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$o")/audit.jsonl"
+}
+_m_run full-access '{{ pick.permission }}' | jq -e '.status == "completed" and .provider == "kimi" and .permission == "full-access"' >/dev/null \
+  || { echo "FAIL: P092-m {{ pick.permission }} = full-access should let a kimi step run"; exit 1; }
+_m_run admin '{{ pick.permission }}' | jq -e '.status == "failed" and (.output.error | contains("permission must be")) and .permission == "admin"' >/dev/null \
+  || { echo "FAIL: P092-m a rendered permission outside the vocabulary should be refused"; exit 1; }
+_m_run full-access '{{ nope.permission }}' | jq -e '.status == "failed" and (.output.error | contains("permission must be"))' >/dev/null \
+  || { echo "FAIL: P092-m an unresolved permission template should be refused, not defaulted"; exit 1; }
+_m_run workspace-write '{{ pick.permission }}' | jq -e '.status == "failed" and (.output.error | contains("kimi cannot enforce"))' >/dev/null \
+  || { echo "FAIL: P092-m a templated permission kimi cannot back should still be refused"; exit 1; }
+echo "PASS: P092-m — permission is {{ ref }}-templated from an earlier step and the rendered value is vocabulary-checked"
+
+# (n) usage + cost per CLI call land in the receipt, summed across retries, with an attempts count.
+for spec in 'claude-code:x read-only {"input_tokens":230,"output_tokens":14,"cache_read_tokens":200,"cost_usd":0.5}' \
+            'codex:x read-only {"input_tokens":100,"output_tokens":6,"cache_read_tokens":40,"cost_usd":null}' \
+            'cursor:x read-only {"input_tokens":60,"output_tokens":8,"cache_read_tokens":20,"cost_usd":null}' \
+            'kimi:x full-access {"input_tokens":null,"output_tokens":null,"cache_read_tokens":null,"cost_usd":null}'; do
+  set -- $spec
+  rm -f "$p092/bad-first"
+  n_out="$(FAKE_BAD_FIRST="$p092/bad-first" PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json)" \
+    || { echo "FAIL: P092-n $1 run should complete after one retry"; exit 1; }
+  jq -e --argjson want "$3" 'select(.step=="ask") | .usage == $want and .attempts == 2' \
+    "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_out")/audit.jsonl" >/dev/null \
+    || { echo "FAIL: P092-n $1 usage should be $3 over 2 attempts, got $(jq -c 'select(.step=="ask") | {usage, attempts}' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_out")/audit.jsonl")"; exit 1; }
+done
+n_stub="$(OSL_LLM_STUB='{"ok":true}' "$cli" run "$(_p092_proc codex:x read-only)" --json)"
+jq -e 'select(.step=="ask") | .usage == {input_tokens:null, output_tokens:null, cache_read_tokens:null, cost_usd:null} and .attempts == 1' \
+  "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$n_stub")/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-n the stub path should record null usage and attempts 1"; exit 1; }
+echo "PASS: P092-n — per-call usage (tokens, cache reads, cost) is normalized, summed across retries, with attempts, per CLI"
+
+# (o) a context over 256 KiB (past Linux's 128 KiB per-argv-string cap) inside a
+# loop body: templated model + prompt still render, the prompt reaches the CLI
+# on stdin, and a shell step runs with $OSL_CONTEXT unset (stdin carries it).
+cat > "$p092/big.sop.json" <<'JSON'
+{ "name": "p092-big", "steps": [
+  { "id": "big", "type": "shell", "run": "printf '{\"blob\":\"%s\",\"tail\":\"BIGTAIL\"}' \"$(head -c 300000 /dev/zero | tr '\\0' a)\"" },
+  { "id": "cyc", "type": "loop", "loop": { "for_each": [1, 2], "as": "n", "aggregate": { "ok": "last" } },
+    "body": [
+      { "id": "pick", "type": "shell", "run": "jq -c '{m: \"claude-code:big-model\", env: (env.OSL_CONTEXT != null), blob: (.big.blob | length)}'" },
+      { "id": "ask", "type": "llm", "model": "{{ pick.m }}", "prompt": "Item {{ loop.n }} tail {{ big.tail }} {{ big.blob }}",
+        "expected_output_schema": { "ok": { "type": "boolean", "required": true } } } ] } ] }
+JSON
+: > "$p092/argv.jsonl"
+o_out="$(OSL_LLM_ARGV_FILE="$p092/argv.jsonl" OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/big.sop.json" --json)" \
+  || { echo "FAIL: P092-o a run with a >256 KiB context should complete, got: $o_out"; exit 1; }
+o_dir="$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$o_out")"
+[ "$(wc -c < "$o_dir/loop/cyc/iter-0/context.json")" -gt 262144 ] \
+  || { echo "FAIL: P092-o the loop body's context should be over 256 KiB"; exit 1; }
+jq -se 'length == 2 and all(.[]; (.argv | index(["--model","big-model"])) and (.stdin | test("Item [12] tail BIGTAIL a") and length > 300000))' "$p092/argv.jsonl" >/dev/null \
+  || { echo "FAIL: P092-o the templated model and >256 KiB prompt should render in both iterations"; exit 1; }
+jq -e '.pick.env == false and .pick.blob == 300000' "$o_dir/loop/cyc/iter-1/context.json" >/dev/null \
+  && jq -e 'select(.step=="pick") | .stderr | test("OSL_CONTEXT unset")' "$o_dir/loop/cyc/iter-1/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P092-o a shell step should read the big context on stdin with \$OSL_CONTEXT unset (and say so)"; exit 1; }
+echo "PASS: P092-o — a >256 KiB context in a loop body renders templated model + prompt (prompt on stdin), shell steps read it on stdin"
+
+# (p) a failed template render reports the real error, never "missing model".
+# A >16 KiB prompt needs a temp file; an unusable TMPDIR makes that render fail.
+jq -n --arg p "$(printf 'x%.0s' $(seq 1 20000)) {{ x }}" '{name:"p092-rf", steps:[
+  {id:"ask", type:"llm", model:"claude-code:x", prompt:$p, expected_output_schema:{ok:{type:"boolean", required:true}}}]}' > "$p092/rf.sop.json"
+p_out="$(TMPDIR="$p092/no-such-dir" OSL_LLM_STUB='{"ok":true}' "$cli" run "$p092/rf.sop.json" --json 2>/dev/null)" \
+  && { echo "FAIL: P092-p a failed render should fail the step"; exit 1; }
+p_err="$(jq -r 'select(.step=="ask") | .output.error' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$p_out")/audit.jsonl")"
+[[ "$p_err" == "cannot render prompt: template render failed"*"too large for argv"* && "$p_err" != *"missing model"* ]] \
+  || { echo "FAIL: P092-p render failure should carry the jq error, got: $p_err"; exit 1; }
+echo "PASS: P092-p — a failed template render reports the real error, not \"missing model\""
+
+# (q) a failed CLI call records its stderr + provider message; a usage limit is
+# classified provider_limit (no retry), a plain crash is not.
+for spec in "claude-code:x read-only claude-limit" "kimi: full-access kimi-limit" "codex:x read-only crash"; do
+  set -- $spec
+  q_out="$(FAKE_FAIL="$3" PATH="$p092/bin:$PATH" "$cli" run "$(_p092_proc "$1" "$2" "$p092/work")" --json 2>/dev/null)" \
+    && { echo "FAIL: P092-q $3 should fail the run"; exit 1; }
+  q_rec="$(jq -c 'select(.step=="ask")' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$q_out")/audit.jsonl")"
+  case "$3" in
+    claude-limit) want='.output.error == "provider_limit: You'"'"'ve hit your session limit · resets 5pm" and (.output.provider_message | test("session limit"))' ;;
+    kimi-limit)   want='(.output.error | startswith("provider_limit: failed to run prompt: provider.auth_error: 403")) and (.output.stderr | test("usage limit"))' ;;
+    crash)        want='.output.error == "codex exited 2" and (.output.stderr | test("boom: worker crashed")) and .output.provider_message == ""' ;;
+  esac
+  jq -e "$want and .attempts == 1" <<<"$q_rec" >/dev/null \
+    || { echo "FAIL: P092-q $3 receipt: $q_rec"; exit 1; }
+done
+echo "PASS: P092-q — a failed CLI call records stderr + provider message; usage limits are provider_limit, crashes are not"
+
+# (r) the agent-loop examples run end to end (stubbed models) in a scratch repo,
+# leave the user's git index alone, and refuse to start without a workdir.
+r_repo="$p092/r-repo"; mkdir -p "$r_repo"
+git -C "$r_repo" init -q && echo hi > "$r_repo/a.txt" && git -C "$r_repo" add a.txt \
+  && git -C "$r_repo" -c user.name=t -c user.email=t@example.com commit -qm init
+echo staged > "$r_repo/b.txt"; git -C "$r_repo" add b.txt
+r_stub='{"plan":"p","critique":"c","units":["u1"],"report":"r","findings":"none","blocking":0,"major":0,"verdict":"accept","feedback":"ok","summary":"s"}'
+for r_p in dev-loop planner-worker; do
+  r_out="$(OSL_LLM_STUB="$r_stub" "$cli" run "$here/examples/agent-loops/$r_p.sop.json" --input workdir="$r_repo" \
+    --input request="Add a greeting" --input test_command="test -f a.txt" --json)" \
+    || { echo "FAIL: P092-r $r_p example should complete, got: $r_out"; exit 1; }
+  jq -e '.cycle == {iterations: 1, done: 1}' "$OPENSOP_LOCAL_HOME/runs/$(jq -r .run_id <<<"$r_out")/context.json" >/dev/null \
+    || { echo "FAIL: P092-r $r_p should accept in one cycle"; exit 1; }
+done
+[ "$(git -C "$r_repo" status --short)" = "A  b.txt" ] && [ -s "$r_repo/.agent-loop/full.diff" ] \
+  || { echo "FAIL: P092-r diffs.sh should write .agent-loop/full.diff (git-excluded) and leave the index alone: $(git -C "$r_repo" status --short)"; exit 1; }
+"$cli" run "$here/examples/agent-loops/planner-worker.sop.json" --input request=x --input test_command=true --json >/dev/null 2>&1 \
+  && { echo "FAIL: P092-r setup should refuse a missing workdir"; exit 1; }
+echo "PASS: P092-r — agent-loop examples (dev-loop, planner-worker) run end to end and leave the git index alone"
+
+unset FAKE_CLI_LOG
+rm -rf "$p092"
+
+# ── v0.10.0 ────────────────────────────────────────────────────────────────
+# (a) status says what an agent needs to act: run_dir, the paused step's
+# rendered description, and why a failed run failed (the step's stderr).
+# A {name: type} outputs map pauses cleanly instead of crashing the run.
+p0100="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+cat > "$p0100/check.sh" <<'SH'
+#!/bin/sh
+s="$(jq -r '.draft.summary')"; [ ${#s} -gt 3 ] && echo '{"ok":true}' || { echo "summary too short: $s" >&2; exit 1; }
+SH
+chmod +x "$p0100/check.sh"
+cat > "$p0100/p.sop.json" <<'JSON'
+{"opensop":"0.9.1","name":"p0100","version":"1.0.0","inputs":{"topic":"x"},
+ "steps":[{"id":"draft","type":"form","description":"Summarize {{ topic }}","outputs":{"summary":"string"}},
+          {"id":"check","type":"automated","run":"check.sh"}]}
+JSON
+a_id="$("$cli" run "$p0100/p.sop.json" --input topic=tides --json | jq -r .run_id)"
+"$cli" status "$a_id" --json | jq -e --arg d "$OPENSOP_LOCAL_HOME/runs/$a_id" '
+  .state == "waiting" and .run_dir == $d and .waiting.description == "Summarize tides"
+  and .waiting.expects.outputs == ["summary"] and .error == null' >/dev/null \
+  || { echo "FAIL: P0100-a waiting status: $("$cli" status "$a_id" --json)"; exit 1; }
+"$cli" submit "$a_id" draft --output summary=hi --json >/dev/null 2>&1 || true
+"$cli" status "$a_id" --json | jq -e '.state == "failed"
+  and .error == {step: "check", exit_code: 1, message: "summary too short: hi"}' >/dev/null \
+  || { echo "FAIL: P0100-a failed status: $("$cli" status "$a_id" --json)"; exit 1; }
+echo "PASS: P0100-a — status carries run_dir, the rendered waiting description and the failing step's stderr"
+rm -rf "$p0100"
+
+# (b) auto output mode is decided by the caller's stdout, not by the $(...)
+# pipe inside the CLI: in a terminal, `ps` and `steps` print their human views.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  p0100b="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100b/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+  b_id="$("$cli" run "$here/examples/greet.sop.json" --input name=b --json | jq -r .run_id)"
+  b_ps="$(cd "$here/examples" && script -qec "'$cli' ps" /dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+  printf '%s' "$b_ps" | head -1 | grep -q '^NAME ' || { echo "FAIL: P0100-b ps in a TTY is not the table: $b_ps"; exit 1; }
+  b_steps="$(script -qec "'$cli' steps $b_id" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  [ "$(printf '%s\n' "$b_steps" | head -1)" = "{" ] || { echo "FAIL: P0100-b steps in a TTY is not pretty: $b_steps"; exit 1; }
+  "$cli" ps | jq -e 'type == "array"' >/dev/null || { echo "FAIL: P0100-b piped ps is not JSON"; exit 1; }
+  echo "PASS: P0100-b — ps/steps print human views in a terminal, JSON when piped"
+  rm -rf "$p0100b"
+else
+  echo "SKIP: P0100-b — no util-linux script(1)"
+fi
+
+# (c) run enforces required inputs the way dry-run does, and the object form
+# {"x": {"type": ..., "required": true}} (what onboard scaffolds) is a typed
+# definition, not a default value. The onboard scaffold runs end to end.
+p0100c="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100c/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+cat > "$p0100c/p.sop.json" <<'JSON'
+{"name":"p0100c","inputs":{"text":{"type":"string","required":true},"n":{"type":"number"},"greeting":"hi"},
+ "steps":[{"id":"s","type":"shell","run":"jq -c '{text, greeting}'"}]}
+JSON
+c_err="$("$cli" run "$p0100c/p.sop.json" --json 2>&1 >/dev/null)" && { echo "FAIL: P0100-c run without a required input succeeded"; exit 1; }
+jq -e '.error == "usage_error" and (.message | test("required field missing: text"))' <<<"$c_err" >/dev/null \
+  || { echo "FAIL: P0100-c missing-input error: $c_err"; exit 1; }
+[ -z "$(ls "$OPENSOP_LOCAL_HOME/runs" 2>/dev/null)" ] || { echo "FAIL: P0100-c a refused run left a run dir"; exit 1; }
+"$cli" run "$p0100c/p.sop.json" --input text=a --input n=x --json >/dev/null 2>&1 && { echo "FAIL: P0100-c n=x accepted for a number"; exit 1; }
+c_id="$("$cli" run "$p0100c/p.sop.json" --input text=a --json | jq -r .run_id)"
+jq -e '.s == {text: "a", greeting: "hi"} and (has("n") | not)' "$OPENSOP_LOCAL_HOME/runs/$c_id/context.json" >/dev/null \
+  || { echo "FAIL: P0100-c typed defs leaked into context: $(cat "$OPENSOP_LOCAL_HOME/runs/$c_id/context.json")"; exit 1; }
+(cd "$p0100c" && "$cli" onboard --json >/dev/null) || { echo "FAIL: P0100-c onboard scaffold"; exit 1; }
+c_ob="$(cd "$p0100c" && OSL_LLM_STUB='{"result":"ok"}' "$cli" run my-process.sop.json --input input_text=hello --json | jq -r .run_id)"
+jq -e '.input_text == "hello" and .extract.result == "ok"' "$OPENSOP_LOCAL_HOME/runs/$c_ob/context.json" >/dev/null \
+  || { echo "FAIL: P0100-c onboard scaffold run: $(cat "$OPENSOP_LOCAL_HOME/runs/$c_ob/context.json")"; exit 1; }
+echo "PASS: P0100-c — run refuses missing/invalid inputs; typed object-form inputs are definitions; the onboard scaffold runs"
+rm -rf "$p0100c"
+
+# (d) dry-run previews loop steps whose body is an array (both agent-loop
+# examples) and steps with {name: type} outputs maps, instead of crashing.
+for f in "$here"/examples/agent-loops/*.sop.json; do
+  "$cli" dry-run "$f" --json | jq -e '.steps | length > 0' >/dev/null || { echo "FAIL: P0100-d dry-run $f"; exit 1; }
+done
+if script -qec true /dev/null >/dev/null 2>&1; then
+  d_out="$(script -qec "'$cli' dry-run '$here/examples/agent-loops/dev-loop.sop.json'" /dev/null)"
+  grep -q 'repeat until steps.judge.outputs.done == 1, body: todo, build' <<<"$d_out" \
+    || { echo "FAIL: P0100-d loop preview: $d_out"; exit 1; }
+fi
+echo "PASS: P0100-d — dry-run previews array-bodied loops (agent-loop examples)"
+
+# (e) dry-run flags step types the local engine cannot run, as run would.
+p0100e="$(mktemp -d)"
+cat > "$p0100e/p.sop.json" <<'JSON'
+{"name":"p0100e","steps":[{"id":"a","type":"frobnicate"},
+ {"id":"l","type":"loop","loop":{"for_each":"x"},"body":[{"id":"n","type":"notification"}]}]}
+JSON
+e_out="$("$cli" dry-run "$p0100e/p.sop.json" --json)" && { echo "FAIL: P0100-e dry-run exited 0"; exit 1; }
+jq -e '.valid == false and ([.validation_errors[].path] == ["steps.a.type", "steps.n.type"])' <<<"$e_out" >/dev/null \
+  || { echo "FAIL: P0100-e unsupported types: $e_out"; exit 1; }
+echo "PASS: P0100-e — dry-run reports step types the local engine cannot run"
+rm -rf "$p0100e"
+
+# (f) a failing step's stderr reaches the user: the failure line, fault.json
+# (stderr + debug_prompt) and heal all carry it.
+p0100f="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100f/home"; mkdir -p "$OPENSOP_LOCAL_HOME"
+cat > "$p0100f/p.sop.json" <<'JSON'
+{"name":"p0100f","steps":[{"id":"s","type":"shell","run":"echo noise >&2; echo the-real-reason >&2; exit 2"}]}
+JSON
+f_err="$("$cli" run "$p0100f/p.sop.json" 2>&1 >/dev/null)" && { echo "FAIL: P0100-f run succeeded"; exit 1; }
+grep -q 'stderr:.*noise' <<<"$f_err" && grep -q 'the-real-reason' <<<"$f_err" \
+  || { echo "FAIL: P0100-f failure line lacks stderr: $f_err"; exit 1; }
+f_id="$(ls "$OPENSOP_LOCAL_HOME/runs")"
+jq -e '.stderr == "noise\nthe-real-reason" and (.debug_prompt | test("the-real-reason"))' \
+  "$OPENSOP_LOCAL_HOME/runs/$f_id/fault.json" >/dev/null || { echo "FAIL: P0100-f fault.json lacks stderr"; exit 1; }
+grep -q 'the-real-reason' <<<"$("$cli" heal "$f_id")" || { echo "FAIL: P0100-f heal lacks stderr"; exit 1; }
+echo "PASS: P0100-f — a failing step's stderr is in the failure line, fault.json and heal"
+rm -rf "$p0100f"
+
+# (g) runs and show honour "JSON when piped or with --json".
+p0100g="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100g/home"
+[ "$("$cli" runs --json)" = "[]" ] || { echo "FAIL: P0100-g runs --json with no runs"; exit 1; }
+g_id="$("$cli" run "$here/examples/greet.sop.json" --input name=g --json | jq -r .run_id)"
+"$cli" runs --json | jq -e --arg id "$g_id" '.[0].run_id == $id and .[0].status == "completed" and .[0].process == "greet"' >/dev/null \
+  || { echo "FAIL: P0100-g runs --json: $("$cli" runs --json)"; exit 1; }
+"$cli" runs | jq -e 'length == 1' >/dev/null || { echo "FAIL: P0100-g piped runs is not JSON"; exit 1; }
+"$cli" show "$g_id" | jq -e '.manifest.run_id and (.steps | length) == 2' >/dev/null || { echo "FAIL: P0100-g piped show is not JSON"; exit 1; }
+echo "PASS: P0100-g — runs and show print JSON when piped or with --json"
+rm -rf "$p0100g"
+
+# (h) help names no live demo server or token.
+grep -q 'demo' <<<"$("$cli" help config 2>&1)" && { echo "FAIL: P0100-h help config mentions a demo server"; exit 1; }
+echo "PASS: P0100-h — help config uses placeholder url/token"
+
+# (i) status in a terminal: "run:" label, one row per step (latest receipt
+# wins, no null rows for heal events), and the completion time after heal.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  p0100i="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100i/home"
+  cat > "$p0100i/p.sop.json" <<JSON
+{"name":"p0100i","steps":[{"id":"a","type":"shell","run":"echo '{}'"},
+ {"id":"s","type":"shell","run":"test -f $p0100i/flag || exit 3; echo '{}'"}]}
+JSON
+  "$cli" run "$p0100i/p.sop.json" >/dev/null 2>&1 || true
+  i_id="$(ls "$OPENSOP_LOCAL_HOME/runs")"; touch "$p0100i/flag"
+  "$cli" heal "$i_id" --apply >/dev/null 2>&1 || { echo "FAIL: P0100-i heal --apply"; exit 1; }
+  i_out="$(script -qec "'$cli' status $i_id" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  i_end="$(jq -r .ended_at "$OPENSOP_LOCAL_HOME/runs/$i_id/manifest.json")"
+  grep -q "^run: *$i_id" <<<"$i_out" && grep -q "completed ($i_end)" <<<"$i_out" \
+    && [ "$(grep -c '^  ✓ s ' <<<"$i_out")" = 1 ] && ! grep -q '✗\|null' <<<"$i_out" \
+    || { echo "FAIL: P0100-i status view: $i_out"; exit 1; }
+  echo "PASS: P0100-i — status shows one row per step and the healed completion time"
+  rm -rf "$p0100i"
+fi
+
+# (j) run/submit "next" hints name the expected fields (enum values spelled
+# out); an escalated judgment says why and shows the agent's proposal.
+p0100j="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100j/home"
+cat > "$p0100j/p.sop.json" <<'JSON'
+{"name":"p0100j","steps":[{"id":"f","type":"form","outputs":{"email":"string"}},{"id":"ap","type":"approval"},
+ {"id":"jd","type":"judgment","model":"claude-haiku-4-5","prompt":"decide",
+  "judgment":{"allow_agent":true,"confidence_threshold":0.7},"outputs":{"decision":"enum[approve,reject]"}}]}
+JSON
+if script -qec true /dev/null >/dev/null 2>&1; then
+  j_out="$(script -qec "'$cli' run '$p0100j/p.sop.json'" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  j_id="$(ls "$OPENSOP_LOCAL_HOME/runs")"
+  grep -q "next:  opensop submit $j_id f --output email=\.\.\.\$" <<<"$j_out" || { echo "FAIL: P0100-j run hint: $j_out"; exit 1; }
+  j_out="$(script -qec "'$cli' submit $j_id f --output email=a@example.com" /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  grep -q -- "ap --output decision=<approve|reject>\$" <<<"$j_out" || { echo "FAIL: P0100-j approval hint: $j_out"; exit 1; }
+  j_out="$(OSL_LLM_STUB='{"decision":"approve","confidence":0.4}' script -qec "'$cli' submit $j_id ap --output decision=approve" /dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')"
+  grep -q 'escalated: the agent.s confidence (0.4) is below the threshold (0.7)' <<<"$j_out" \
+    && grep -q 'proposal: {"decision":"approve","confidence":0.4}' <<<"$j_out" \
+    && grep -q -- "jd --output decision=<approve|reject>\$" <<<"$j_out" && ! grep -q 'jq: error' <<<"$j_out" \
+    || { echo "FAIL: P0100-j escalation hint: $j_out"; exit 1; }
+  echo "PASS: P0100-j — next hints name the expected fields and explain an escalation"
+fi
+rm -rf "$p0100j"
+
+# (k) upgrade with no --pin fetches the latest GitHub release tag (not main),
+# and never "upgrades" backwards to an older release.
+p0100k="$(mktemp -d)"; mkdir -p "$p0100k/bin" "$p0100k/inst"
+cp "$cli" "$p0100k/inst/opensop"
+printf '#!/usr/bin/env bash\nreadonly OPENSOP_CLI_VERSION="99.1.0"\n' > "$p0100k/new"
+_upg_sha256 "$p0100k/new" > "$p0100k/new.sha256"
+cat > "$p0100k/bin/curl" <<CURL
+#!/usr/bin/env bash
+dest=""; url=""
+while [ \$# -gt 0 ]; do case "\$1" in -o) dest="\$2"; shift 2 ;; -*) shift ;; *) url="\$1"; shift ;; esac; done
+echo "\$url" >> "$p0100k/urls"
+case "\$url" in
+  *api.github.com/repos/opensop/opensop/releases/latest) echo "{\"tag_name\":\"\$(cat "$p0100k/tag")\"}" ;;
+  */v99.1.0/cli/bin/opensop.sha256) cp "$p0100k/new.sha256" "\$dest" ;;
+  */v99.1.0/cli/bin/opensop) cp "$p0100k/new" "\$dest" ;;
+  *) exit 22 ;;
+esac
+CURL
+chmod +x "$p0100k/bin/curl"
+echo v0.0.1 > "$p0100k/tag"
+k_out="$(PATH="$p0100k/bin:$PATH" "$p0100k/inst/opensop" upgrade 2>&1)" || { echo "FAIL: P0100-k older latest: $k_out"; exit 1; }
+grep -q 'newer than the latest release (0.0.1)' <<<"$k_out" && cmp -s "$cli" "$p0100k/inst/opensop" \
+  || { echo "FAIL: P0100-k must not downgrade: $k_out"; exit 1; }
+echo v99.1.0 > "$p0100k/tag"
+PATH="$p0100k/bin:$PATH" "$p0100k/inst/opensop" upgrade --json >/dev/null 2>&1 || { echo "FAIL: P0100-k upgrade to latest"; exit 1; }
+grep -q '99.1.0' "$p0100k/inst/opensop" && ! grep -q '/main/' "$p0100k/urls" \
+  || { echo "FAIL: P0100-k did not install the latest release tag: $(cat "$p0100k/urls")"; exit 1; }
+grep -q 'no OpenSOP server needed' <<<"$("$cli" help upgrade)" || { echo "FAIL: P0100-k help upgrade backend text"; exit 1; }
+echo "PASS: P0100-k — upgrade installs the latest release tag and never downgrades by default"
+rm -rf "$p0100k"
+
+# (l) doctor flags an opensop on PATH whose version differs from the running one.
+p0100l="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nreadonly OPENSOP_CLI_VERSION="0.0.1"\n' > "$p0100l/opensop"; chmod +x "$p0100l/opensop"
+PATH="$p0100l:$PATH" "$cli" doctor --json | jq -e '.path_version == "0.0.1" and .path_version_mismatch == true' >/dev/null \
+  || { echo "FAIL: P0100-l doctor --json mismatch"; exit 1; }
+grep -q 'is v0.0.1, but this opensop' <<<"$(PATH="$p0100l:$PATH" "$cli" doctor)" || { echo "FAIL: P0100-l doctor text"; exit 1; }
+cp "$cli" "$p0100l/opensop"
+PATH="$p0100l:$PATH" "$cli" doctor --json | jq -e '.path_version_mismatch == false' >/dev/null || { echo "FAIL: P0100-l same version flagged"; exit 1; }
+echo "PASS: P0100-l — doctor flags a different opensop version on PATH"
+rm -rf "$p0100l"
+
+# (m) info writes nothing, so it does not say "written to:".
+if script -qec true /dev/null >/dev/null 2>&1; then
+  m_out="$(script -qec "'$cli' info '$here/examples/greet.sop.json'" /dev/null)"
+  grep -q 'written to' <<<"$m_out" && { echo "FAIL: P0100-m info says written to: $m_out"; exit 1; }
+  grep -q 'file: .*greet.sop.json' <<<"$m_out" || { echo "FAIL: P0100-m info file line: $m_out"; exit 1; }
+  echo "PASS: P0100-m — info labels the file it read, not \"written to\""
+fi
+
+# (n) --remote ps / watch against a dead server exit non-zero with one error
+# (localhost port 9 refuses; nothing leaves the machine).
+p0100n="$(mktemp -d)"
+n_err="$(OPENSOP_HOME="$p0100n" "$cli" --server http://127.0.0.1:9 ps 2>&1 >/dev/null)" && { echo "FAIL: P0100-n ps exited 0"; exit 1; }
+[ "$(wc -l <<<"$n_err")" = 1 ] && grep -q 'request failed: GET' <<<"$n_err" || { echo "FAIL: P0100-n ps error: $n_err"; exit 1; }
+n_rc=0; OPENSOP_HOME="$p0100n" timeout 10 "$cli" --server http://127.0.0.1:9 watch >/dev/null 2>&1 || n_rc=$?
+[ "$n_rc" = 1 ] || { echo "FAIL: P0100-n watch on a dead server: rc=$n_rc"; exit 1; }
+echo "PASS: P0100-n — remote ps/watch fail fast on a dead server"
+rm -rf "$p0100n"
+
+# (o) fork copies the relative scripts the process's automated steps run
+# (same relative path, no-clobber), so the forked greet runs.
+p0100o="$(mktemp -d)"; o_team="$p0100o/org/team"; mkdir -p "$o_team"
+( cd "$p0100o/org" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+( cd "$o_team" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+mkdir -p "$p0100o/org/processes"
+cp "$here/examples/greet.sop.json" "$p0100o/org/processes/greet.sop.json"
+cp -r "$here/examples/steps" "$p0100o/org/processes/steps"
+mkdir -p "$o_team/processes/steps"; echo keep > "$o_team/processes/steps/other.sh"
+o_out="$(cd "$o_team" && env -u OPENSOP_LOCAL_HOME "$cli" fork greet --json)"
+jq -e --arg d "$o_team/processes/steps/build.sh" '.copied_scripts == [$d]' <<<"$o_out" >/dev/null \
+  || { echo "FAIL: P0100-o fork copied_scripts: $o_out"; exit 1; }
+[ "$(cat "$o_team/processes/steps/other.sh")" = keep ] || { echo "FAIL: P0100-o fork clobbered a file"; exit 1; }
+(cd "$o_team" && OPENSOP_LOCAL_HOME="$p0100o/home" "$cli" run greet --input name=o --json | jq -e '.status == "completed"' >/dev/null) \
+  || { echo "FAIL: P0100-o forked greet does not run"; exit 1; }
+echo "PASS: P0100-o — fork copies referenced relative scripts; the forked process runs"
+rm -rf "$p0100o"
+
+# (p) pull's default library is this repo's sops/ dir: {ref} in the base is
+# replaced by the pull ref. A file:// base with the default's shape resolves
+# the in-tree SOPs; the default itself names opensop/opensop/{ref}/sops.
+p0100p="$(mktemp -d)"; ln -s "$(cd "$here/.." && pwd)" "$p0100p/main"
+(cd "$p0100p" && OPENSOP_SOPS_BASE="file://$p0100p/{ref}/sops" "$cli" pull opensop/release-checklist --json 2>/dev/null) \
+  | jq -e '.ok == true and .name == "release-checklist"' >/dev/null || { echo "FAIL: P0100-p pull from in-tree sops/"; exit 1; }
+grep -q 'raw.githubusercontent.com/opensop/opensop/{ref}/sops' <<<"$("$cli" help)" || { echo "FAIL: P0100-p help names the default base"; exit 1; }
+mkdir -p "$p0100p/bin"; printf '#!/bin/sh\nfor a; do case "$a" in http*) echo "$a" > "%s/url" ;; esac; done; exit 22\n' "$p0100p" > "$p0100p/bin/curl"; chmod +x "$p0100p/bin/curl"
+(cd "$p0100p" && env -u OPENSOP_SOPS_BASE PATH="$p0100p/bin:$PATH" "$cli" pull opensop/x@v1 >/dev/null 2>&1) || true
+[ "$(cat "$p0100p/url")" = "https://raw.githubusercontent.com/opensop/opensop/v1/sops/opensop/x/x.sop.json" ] \
+  || { echo "FAIL: P0100-p default pull URL: $(cat "$p0100p/url")"; exit 1; }
+echo "PASS: P0100-p — pull resolves the in-tree sops/ library layout"
+rm -rf "$p0100p"
+
+# (q) bad --inputs / --inputs-file print only the CLI's error (no raw jq
+# noise); local run records --metadata in the manifest.
+p0100q="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100q/home"; echo '{x' > "$p0100q/bad.json"
+for q_args in "--inputs {bad" "--inputs-file $p0100q/bad.json" "--inputs-file $p0100q/missing.json"; do
+  for q_cmd in run dry-run; do
+    # shellcheck disable=SC2086
+    q_err="$("$cli" $q_cmd "$here/examples/greet.sop.json" $q_args 2>&1 >/dev/null)" && { echo "FAIL: P0100-q $q_cmd $q_args exited 0"; exit 1; }
+    [ "$(wc -l <<<"$q_err")" = 1 ] && ! grep -q '^jq:' <<<"$q_err" || { echo "FAIL: P0100-q $q_cmd $q_args: $q_err"; exit 1; }
+  done
+done
+"$cli" run "$here/examples/greet.sop.json" --input name=q --metadata ticket=T-1 --metadata n=2 --json \
+  | jq -e '.metadata == {ticket: "T-1", n: 2}' >/dev/null || { echo "FAIL: P0100-q --metadata not recorded"; exit 1; }
+echo "PASS: P0100-q — bad inputs JSON gives one clean error; run records --metadata"
+rm -rf "$p0100q"
+
+# (r) the embedded skill and help describe the local CLI as it is: run is
+# synchronous (no poll loop), the state is status --json .state, no "full
+# SPEC parity" claim; hermes user scope honours $HERMES_HOME like CODEX_HOME.
+r_skill="$("$cli" skill show)"
+grep -q "jq '.status'" <<<"$r_skill" && { echo "FAIL: P0100-r skill recommends show | jq .status"; exit 1; }
+grep -q 'status <run_id> --json | jq .state' <<<"$r_skill" || { echo "FAIL: P0100-r skill lacks status --json | jq .state"; exit 1; }
+grep -qi 'in a loop until' <<<"$r_skill" && { echo "FAIL: P0100-r skill still says to poll"; exit 1; }
+grep -q 'parity' <<<"$("$cli" help)" && { echo "FAIL: P0100-r help claims SPEC parity"; exit 1; }
+HERMES_HOME=/h/x "$cli" skill paths --json | jq -e '.hermes.user == "/h/x/skills"' >/dev/null || { echo "FAIL: P0100-r HERMES_HOME"; exit 1; }
+env -u HERMES_HOME HOME=/h/y "$cli" skill paths --json | jq -e '.hermes.user == "/h/y/.hermes/skills"' >/dev/null || { echo "FAIL: P0100-r hermes default"; exit 1; }
+echo "PASS: P0100-r — skill/help text match the local CLI; hermes honours HERMES_HOME"
+
+# (s) help agents points at a guide that exists (docs/AGENTS.md), by URL.
+"$cli" help agents --json | jq -e '.guides == ["https://github.com/opensop/opensop/blob/main/docs/AGENTS.md"]' >/dev/null \
+  || { echo "FAIL: P0100-s help agents --json guides"; exit 1; }
+[ -f "$here/../docs/AGENTS.md" ] || { echo "FAIL: P0100-s docs/AGENTS.md missing"; exit 1; }
+grep -q 'CLAUDE-INTEGRATION' <<<"$("$cli" help agents)$("$cli" help --json)" && { echo "FAIL: P0100-s help names a missing guide"; exit 1; }
+echo "PASS: P0100-s — help agents points at docs/AGENTS.md"
+
+# (t) onboard no longer runs bench (--stub/--n are accepted and ignored); its
+# next steps work on a curl install: no repo-relative doc paths, the cell
+# commands run as printed. bench outside a clone says how to get one.
+p0100t="$(mktemp -d)"; mkdir -p "$p0100t/inst"; cp "$cli" "$p0100t/inst/opensop"
+t_out="$(cd "$p0100t" && "$p0100t/inst/opensop" onboard --stub --n 3 2>"$p0100t/err")" || { echo "FAIL: P0100-t onboard"; exit 1; }
+grep -q 'ignored' "$p0100t/err" || { echo "FAIL: P0100-t no deprecation note for --stub/--n"; exit 1; }
+grep -qi 'bench\|reliability' <<<"$t_out" && { echo "FAIL: P0100-t onboard still mentions bench: $t_out"; exit 1; }
+grep -E '^  (docs/|EVOLUTION)' <<<"$t_out" && { echo "FAIL: P0100-t repo-relative doc path"; exit 1; }
+grep -q 'https://github.com/opensop/opensop/blob/main/docs/EVOLUTION.md' <<<"$t_out" || { echo "FAIL: P0100-t EVOLUTION URL"; exit 1; }
+grep -q 'ANTHROPIC_API_KEY' <<<"$t_out" || { echo "FAIL: P0100-t run needs no hint"; exit 1; }
+(cd "$p0100t" && OPENSOP_LOCAL_HOME="$p0100t/h" && export OPENSOP_LOCAL_HOME \
+  && eval "$(grep -m1 'opensop init &&' <<<"$t_out" | sed "s|opensop|'$p0100t/inst/opensop'|")" >/dev/null \
+  && OSL_LLM_STUB='{"result":"ok"}' "$p0100t/inst/opensop" run my-process --input input_text=x --json | jq -e '.status == "completed"' >/dev/null) \
+  || { echo "FAIL: P0100-t the printed cell commands do not work"; exit 1; }
+t_err="$("$p0100t/inst/opensop" bench --json 2>&1)" && { echo "FAIL: P0100-t bench outside a clone exited 0"; exit 1; }
+jq -e '.hint == "git clone https://github.com/opensop/opensop && cd opensop && cli/bin/opensop bench"' <<<"$t_err" >/dev/null \
+  || { echo "FAIL: P0100-t bench error: $t_err"; exit 1; }
+echo "PASS: P0100-t — onboard has no bench step; its next steps work on a curl install"
+rm -rf "$p0100t"
+
+# (u) remote status in a terminal renders without touching local-only state
+# (it used to hit `run_dir: unbound variable`). A loopback stub serves the run.
+if command -v script >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  p0100u="$(mktemp -d)"
+  printf 'r-1\tdemo\n' > "$p0100u/instances.tsv"
+  cat > "$p0100u/srv.py" <<'PY'
+import http.server, json, sys
+body = json.dumps({"id": "r-1", "process": {"name": "demo"}, "state": "completed",
+                   "steps": [{"step_id": "a", "type": "automated", "state": "completed"}]}).encode()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
+PY
+  python3 "$p0100u/srv.py" > "$p0100u/port" & u_pid=$!
+  for _ in $(seq 50); do [ -s "$p0100u/port" ] && break; sleep 0.1; done
+  u_rc=0; u_out="$(OPENSOP_HOME="$p0100u" script -qec "'$cli' --server http://127.0.0.1:$(cat "$p0100u/port") status r-1" /dev/null 2>&1)" || u_rc=$?
+  kill "$u_pid" 2>/dev/null; wait "$u_pid" 2>/dev/null || true
+  [ "$u_rc" = 0 ] && grep -q completed <<<"$u_out" && ! grep -q unbound <<<"$u_out" \
+    || { echo "FAIL: P0100-u remote TTY status (rc=$u_rc): $u_out"; exit 1; }
+  echo "PASS: P0100-u — remote status renders in a terminal"
+  rm -rf "$p0100u"
+fi
+
+# (v) fork also copies scripts that `shell` steps run.
+p0100v="$(mktemp -d)"; v_team="$p0100v/org/team"; mkdir -p "$v_team" "$p0100v/org/processes/steps"
+( cd "$p0100v/org" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+( cd "$v_team" && env -u OPENSOP_LOCAL_HOME "$cli" init --json >/dev/null )
+printf '#!/bin/sh\necho "{\\"ok\\":true}"\n' > "$p0100v/org/processes/steps/check.sh"; chmod +x "$p0100v/org/processes/steps/check.sh"
+echo '{"opensop":"0.9.1","name":"chk","version":"1","steps":[{"id":"c","type":"shell","run":"steps/check.sh"}]}' > "$p0100v/org/processes/chk.sop.json"
+v_out="$(cd "$v_team" && env -u OPENSOP_LOCAL_HOME "$cli" fork chk --json)"
+jq -e --arg d "$v_team/processes/steps/check.sh" '.copied_scripts == [$d]' <<<"$v_out" >/dev/null \
+  || { echo "FAIL: P0100-v fork shell script: $v_out"; exit 1; }
+echo "PASS: P0100-v — fork copies the scripts shell steps run"
+rm -rf "$p0100v"
+
+# (w) status follows a failed loop iteration / subprocess child down to the step
+# that really failed; typed boolean inputs accept false.
+p0100w="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100w/home"
+echo '{"opensop":"0.9.1","name":"wl","version":"1","inputs":{"xs":[1]},"steps":[{"id":"lp","type":"loop","loop":{"for_each":"process.inputs.xs"},"body":[{"id":"bad","type":"shell","run":"echo loop-detail >&2; exit 7"}]}]}' > "$p0100w/l.sop.json"
+w_id="$({ "$cli" run "$p0100w/l.sop.json" --json 2>/dev/null || true; } | jq -r .run_id)"
+"$cli" status "$w_id" --json | jq -e '.error.message | test("→ bad \\(exit 7\\): loop-detail$")' >/dev/null \
+  || { echo "FAIL: P0100-w loop error: $("$cli" status "$w_id" --json | jq -c .error)"; exit 1; }
+echo '{"opensop":"0.9.1","name":"wc","version":"1","steps":[{"id":"cbad","type":"shell","run":"echo child-detail >&2; exit 3"}]}' > "$p0100w/child.sop.json"
+jq -n --arg c "$p0100w/child.sop.json" '{opensop:"0.9.1",name:"wp",version:"1",steps:[{id:"call",type:"subprocess",process:$c}]}' > "$p0100w/parent.sop.json"
+w_id="$({ "$cli" run "$p0100w/parent.sop.json" --json 2>/dev/null || true; } | jq -r .run_id)"
+"$cli" status "$w_id" --json | jq -e '.error.message | test("→ cbad \\(exit 3\\): child-detail$")' >/dev/null \
+  || { echo "FAIL: P0100-w subprocess error: $("$cli" status "$w_id" --json | jq -c .error)"; exit 1; }
+echo '{"opensop":"0.9.1","name":"wb","version":"1","inputs":[{"name":"enabled","type":"boolean","required":true}],"steps":[{"id":"s","type":"noop"}]}' > "$p0100w/b.sop.json"
+"$cli" run "$p0100w/b.sop.json" --input enabled=false --json | jq -e '.status == "completed" and .inputs.enabled == false' >/dev/null \
+  || { echo "FAIL: P0100-w --input enabled=false should be boolean false"; exit 1; }
+echo "PASS: P0100-w — status names the nested step that failed; boolean inputs accept false"
+rm -rf "$p0100w"
+
+# (x) a run with a manifest but no audit.jsonl yet (first step still running, or
+# killed during it) must still give valid JSON from status/show/diff (jq 1.8
+# prints [] AND exits 2 on a missing slurp file, which used to double the output).
+p0100x="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100x"
+for x_id in rx1 rx2; do
+  mkdir -p "$p0100x/runs/$x_id"
+  jq -n --arg id "$x_id" '{run_id:$id, process:"px", status:"running", started_at:"2026-01-01T00:00:00Z", inputs:{}}' > "$p0100x/runs/$x_id/manifest.json"
+done
+"$cli" status rx1 --json | jq -e '.state == "running" and .steps == []' >/dev/null || { echo "FAIL: P0100-x status without audit.jsonl"; exit 1; }
+"$cli" show rx1 --json | jq -e '.steps == []' >/dev/null || { echo "FAIL: P0100-x show without audit.jsonl"; exit 1; }
+"$cli" diff rx1 rx2 --json | jq -e 'type == "object"' >/dev/null || { echo "FAIL: P0100-x diff without audit.jsonl"; exit 1; }
+"$cli" steps rx1 --json | jq -e '.steps == []' >/dev/null || { echo "FAIL: P0100-x steps without audit.jsonl"; exit 1; }
+echo "PASS: P0100-x — status/show/diff/steps give valid JSON before the first receipt"
+rm -rf "$p0100x"
+
+# (y) a run killed mid-step is "interrupted": the step's process tree is
+# stopped, status names heal/cancel as next, heal --apply re-runs the step it
+# was on and continues, and cancel accepts an interrupted run.
+p0100y="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100y/h"
+jq -n --arg d "$p0100y" '{opensop:"0.9.1",name:"yi",version:"1",steps:[
+  {id:"a",type:"shell",run:"echo {}"},
+  {id:"slow",type:"shell",run:("if [ -f " + $d + "/marker ]; then echo {}; else touch " + $d + "/marker; sleep 30 & echo $! > " + $d + "/child.pid; wait; fi")},
+  {id:"c",type:"shell",run:"echo {}"}]}' > "$p0100y/p.sop.json"
+y_start() {
+  rm -f "$p0100y/child.pid"
+  "$cli" run "$p0100y/p.sop.json" --json >/dev/null 2>&1 & y_pid=$!
+  for _ in $(seq 100); do [ -s "$p0100y/child.pid" ] && break; sleep 0.1; done
+  [ -s "$p0100y/child.pid" ] || { echo "FAIL: P0100-y step never started"; exit 1; }
+  kill -TERM "$y_pid"; wait "$y_pid" 2>/dev/null || true
+}
+y_start
+y_id="$(ls "$p0100y/h/runs" | head -1)"
+y_alive=false
+for _ in $(seq 20); do kill -0 "$(cat "$p0100y/child.pid")" 2>/dev/null && y_alive=true || { y_alive=false; break; }; sleep 0.1; done
+if command -v setsid >/dev/null 2>&1; then
+  $y_alive && { echo "FAIL: P0100-y the interrupted step's child is still running"; exit 1; }
+fi
+"$cli" status "$y_id" --json | jq -e --arg id "$y_id" '.state == "interrupted" and .interrupted.step == "slow"
+  and .next == ["opensop heal \($id) --apply", "opensop cancel \($id)"]' >/dev/null \
+  || { echo "FAIL: P0100-y status: $("$cli" status "$y_id" --json)"; exit 1; }
+"$cli" heal "$y_id" --json | jq -e '.interrupted and .step.id == "slow"' >/dev/null || { echo "FAIL: P0100-y heal diagnosis"; exit 1; }
+"$cli" heal "$y_id" --apply --json 2>/dev/null | jq -e '.status == "completed"' >/dev/null || { echo "FAIL: P0100-y heal --apply"; exit 1; }
+"$cli" show "$y_id" --json | jq -e '[.steps[] | select(.status == "completed") | .step] == ["a", "slow", "c"]' >/dev/null \
+  || { echo "FAIL: P0100-y receipts after heal: $("$cli" show "$y_id" --json | jq -c '[.steps[] | {step, status}]')"; exit 1; }
+rm -f "$p0100y/marker"; rm -rf "$p0100y/h/runs"; y_start
+y_id="$(ls "$p0100y/h/runs" | head -1)"
+"$cli" cancel "$y_id" --json | jq -e '.state == "cancelled"' >/dev/null || { echo "FAIL: P0100-y cancel interrupted"; exit 1; }
+kill "$(cat "$p0100y/child.pid")" 2>/dev/null || true
+echo "PASS: P0100-y — an interrupted run stops its step, heals from that step, and cancels"
+rm -rf "$p0100y"
+
+# (z) init writes .opensop/.gitignore with runs/ (receipts hold process inputs).
+p0100z="$(mktemp -d)"
+( cd "$p0100z" && "$cli" init --json >/dev/null )
+[ "$(cat "$p0100z/.opensop/.gitignore" 2>/dev/null)" = "runs/" ] || { echo "FAIL: P0100-z .opensop/.gitignore"; exit 1; }
+echo "PASS: P0100-z — init gitignores .opensop/runs/"
+rm -rf "$p0100z"
+
+# (aa) --input keeps the raw string for an input declared type string (array
+# and object-form defs); undeclared and non-string inputs are still JSON-parsed.
+p0100aa="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100aa/h"
+echo '{"opensop":"0.9.1","name":"aa","version":"1","inputs":[{"name":"zip","type":"string"},{"name":"n","type":"number"}],"steps":[{"id":"s","type":"noop"}]}' > "$p0100aa/a.sop.json"
+echo '{"opensop":"0.9.1","name":"ao","version":"1","inputs":{"test_command":{"type":"string"},"flag":true},"steps":[{"id":"s","type":"noop"}]}' > "$p0100aa/o.sop.json"
+"$cli" run "$p0100aa/a.sop.json" --input zip=02134 --input n=5 --input extra=7 --json | jq -e '.inputs == {zip: "02134", n: 5, extra: 7}' >/dev/null \
+  || { echo "FAIL: P0100-aa array-form string input"; exit 1; }
+"$cli" run "$p0100aa/o.sop.json" --input test_command=false --input flag=false --json | jq -e '.inputs == {test_command: "false", flag: false}' >/dev/null \
+  || { echo "FAIL: P0100-aa object-form string input"; exit 1; }
+echo "PASS: P0100-aa — --input keeps declared string inputs verbatim"
+rm -rf "$p0100aa"
+
+# (ab) newcomer papercuts: status JSON carries the next command; a bare file
+# name runs; a missing name says "process not found"; YAML gets a clear error;
+# init makes processes/.
+p0100ab="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100ab/home"
+echo '{"name":"ab","version":"1","steps":[{"id":"check","type":"shell","run":"echo {}"},{"id":"approve","type":"approval"}]}' > "$p0100ab/ab.json"
+ab_id="$(cd "$p0100ab" && "$cli" run ab.json --json | jq -r .run_id)"
+"$cli" status "$ab_id" --json | jq -e --arg id "$ab_id" '.next == ["opensop submit \($id) approve --output decision=<approve|reject>"]' >/dev/null \
+  || { echo "FAIL: P0100-ab status next: $("$cli" status "$ab_id" --json | jq -c .next)"; exit 1; }
+ab_err="$( (cd "$p0100ab" && "$cli" run nosuch --json) 2>&1 || true)"
+grep -q 'process not found' <<<"$ab_err" || { echo "FAIL: P0100-ab not-found wording: $ab_err"; exit 1; }
+printf 'name: y\nsteps: []\n' > "$p0100ab/y.yaml"
+ab_err="$("$cli" run "$p0100ab/y.yaml" --json 2>&1 || true)"
+grep -q 'is YAML' <<<"$ab_err" || { echo "FAIL: P0100-ab yaml run: $ab_err"; exit 1; }
+mkdir -p "$p0100ab/cell"; (cd "$p0100ab/cell" && env -u OPENSOP_LOCAL_HOME "$cli" init --json | jq -e '.processes_dir | endswith("/processes")' >/dev/null) \
+  && [ -d "$p0100ab/cell/processes" ] || { echo "FAIL: P0100-ab init processes/"; exit 1; }
+echo "PASS: P0100-ab — newcomer paths: next in status JSON, bare file names, clear not-found/YAML errors, init makes processes/"
+rm -rf "$p0100ab"
+
+# (ac) a run resumed from another directory runs its script steps where it was
+# started, so "finish from anywhere" holds; a relative OPENSOP_LOCAL_HOME still works.
+p0100ac="$(mktemp -d)"; mkdir -p "$p0100ac/proj" "$p0100ac/elsewhere"; touch "$p0100ac/proj/marker"
+echo '{"name":"ac","version":"1","steps":[{"id":"change","type":"form"},{"id":"tests","type":"shell","run":"test -f marker && echo {}"}]}' > "$p0100ac/proj/ac.json"
+ac_id="$(cd "$p0100ac/proj" && OPENSOP_LOCAL_HOME=h "$cli" run ac.json --json | jq -r .run_id)"
+(cd "$p0100ac/proj" && OPENSOP_LOCAL_HOME=h "$cli" submit "$ac_id" change --json >/dev/null 2>&1 || true)
+[ "$(cd "$p0100ac/proj" && OPENSOP_LOCAL_HOME=h "$cli" status "$ac_id" --json | jq -r .state)" = completed ] \
+  || { echo "FAIL: P0100-ac relative home"; exit 1; }
+export OPENSOP_LOCAL_HOME="$p0100ac/home"
+ac_id="$(cd "$p0100ac/proj" && "$cli" run ac.json --json | jq -r .run_id)"
+(cd "$p0100ac/elsewhere" && "$cli" submit "$ac_id" change --json >/dev/null 2>&1 || true)
+[ "$("$cli" status "$ac_id" --json | jq -r .state)" = completed ] \
+  || { echo "FAIL: P0100-ac submit from another dir: $("$cli" status "$ac_id" --json | jq -c '{state,error}')"; exit 1; }
+echo "PASS: P0100-ac — resumed runs execute script steps in the run's own directory"
+rm -rf "$p0100ac"
+
+# (ad) a script step's receipt records the script's sha256, and status lists
+# steps only (a heal event is not a step row).
+p0100ad="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100ad/h"
+printf '#!/bin/sh\ntest -f ok && echo {}\n' > "$p0100ad/t.sh"
+echo '{"name":"ad","version":"1","steps":[{"id":"t","type":"automated","run":"t.sh"}]}' > "$p0100ad/ad.json"
+ad_id="$( (cd "$p0100ad" && "$cli" run ad.json --json 2>/dev/null) | jq -r .run_id || true)"
+touch "$p0100ad/ok"; (cd "$p0100ad" && "$cli" heal "$ad_id" --apply --json >/dev/null 2>&1 || true)
+ad_sha="$(sha256sum "$p0100ad/t.sh" | cut -c1-64)"
+jq -s -e --arg s "$ad_sha" '[.[] | select(.step=="t" and .status != null) | .script_sha256] == [$s, $s]' "$p0100ad/h/runs/$ad_id/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P0100-ad script_sha256"; exit 1; }
+"$cli" status "$ad_id" --json | jq -e '[.steps[].state] == ["failed","completed"]' >/dev/null \
+  || { echo "FAIL: P0100-ad status rows: $("$cli" status "$ad_id" --json | jq -c '[.steps[].state]')"; exit 1; }
+echo "PASS: P0100-ad — script receipts carry script_sha256; status has no heal pseudo-rows"
+rm -rf "$p0100ad"
+
+# (ae) a wall clock that steps backwards (NTP, VM host sync) never yields a
+# negative duration_ms. The fake `date` returns 1s less on every ms query.
+p0100ae="$(mktemp -d)"; export OPENSOP_LOCAL_HOME="$p0100ae/h"; mkdir -p "$p0100ae/bin"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "$1" = "+%s%3N" ]; then' \
+  '  n=$(cat "$AE_DIR/n" 2>/dev/null || echo 2000000000000); echo $((n - 1000)) > "$AE_DIR/n"; echo "$n"' \
+  'else exec "$AE_REAL_DATE" "$@"; fi' > "$p0100ae/bin/date"
+chmod +x "$p0100ae/bin/date"
+echo '{"name":"ae","version":"1","steps":[{"id":"a","type":"shell","run":"echo {}"},{"id":"b","type":"form"}]}' > "$p0100ae/ae.json"
+ae_id="$( (cd "$p0100ae" && AE_DIR="$p0100ae" AE_REAL_DATE="$(command -v date)" PATH="$p0100ae/bin:$PATH" "$cli" run ae.json --json 2>/dev/null) | jq -r .run_id || true)"
+jq -s -e 'length == 2 and all(.[]; .duration_ms >= 0)' "$p0100ae/h/runs/$ae_id/audit.jsonl" >/dev/null \
+  || { echo "FAIL: P0100-ae negative duration: $(jq -c .duration_ms "$p0100ae/h/runs/$ae_id/audit.jsonl" | tr '\n' ' ')"; exit 1; }
+echo "PASS: P0100-ae — a backwards clock never records a negative duration_ms"
+rm -rf "$p0100ae"
 
 # Cleanup.
 unset OPENSOP_SOPS_BASE

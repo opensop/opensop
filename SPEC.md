@@ -324,7 +324,7 @@ required_if: "status == 'rejected'"
 exit_when: "outputs.score < 0.4"
 ```
 
-Evaluated by `Opensop::ConditionEvaluator` (server) or jq (CLI local engine).
+Evaluated by the server's condition evaluator or by jq (CLI local engine).
 No `eval`, no arbitrary code — the evaluator handles `==`, `!=`, `>=`, `<=`, `>`, `<` against literal scalars.
 
 ---
@@ -749,20 +749,20 @@ exists and the instance transitions to a terminal/waiting state, but the core
 business logic is not implemented. "Not in profile" means the step type is not
 dispatched or recognized in that profile.
 
-| Step type | Server profile | Local profile (CLI v0.6) | Primary waiting reason |
+| Step type | Server profile | Local profile (CLI v0.10.0) | Primary waiting reason |
 |---|---|---|---|
 | `automated` | Working | Working | — (synchronous) |
 | `shell` | Not in profile | Working (local-only extension) | — (synchronous) |
 | `noop` | Not in profile | Working (local-only extension) | — (synchronous) |
 | `form` | Working | Working | `waiting_for_input` |
 | `approval` | Working | Working (pause) | `waiting_for_approval` |
-| `llm` | Working | Not in profile (falls to unsupported) | — |
-| `judgment` | Stubbed — escalates to human | Not in profile | `escalated` |
-| `webhook` | Working (sync + callback); poll stubbed | Not in profile | `waiting_for_callback` |
-| `subprocess` | Stubbed — pauses instance | Not in profile | `waiting_for_callback` |
+| `llm` | Working | Working — Anthropic API for `claude*`, plus CLI providers (local extension, §3.8) | — |
+| `judgment` | Stubbed — escalates to human | Working — agent via the `llm` path when `allow_agent`; escalates otherwise (§3.9) | `escalated` |
+| `webhook` | Working (sync + callback); poll stubbed | Working (sync + callback, resumed by `submit`); poll unsupported | `waiting_for_callback` |
+| `subprocess` | Stubbed — pauses instance | Working — runs the child locally; a paused child pauses the parent | `waiting_for_callback` |
 | `notification` | Stubbed — returns `{notified: true}` immediately | Not in profile | — |
-| `wait` | Partial — `wait.seconds` returns immediately; `wait.until` pauses | Not in profile | `waiting_for_callback` |
-| `loop` | Working (`for_each` / `repeat_until` / `while`) | Not in profile | — |
+| `wait` | Partial — `wait.seconds` returns immediately; `wait.until` pauses | Partial — same as server | `waiting_for_callback` |
+| `loop` | Working (`for_each` / `repeat_until` / `while`) | Working — body steps cannot pause (§3.14) | — |
 
 > **"Not in profile" in the local engine** means the step falls to the `*` arm of
 > the dispatch case in `_local_step_loop`, which sets `rc=2` and fails the step
@@ -775,7 +775,7 @@ dispatched or recognized in that profile.
 |---|---|---|
 | `id` | Yes | Step identifier. Pattern: `[a-z0-9][a-z0-9_-]*`. |
 | `name` | No | Human-readable label. |
-| `type` | Yes | One of the 10 types listed in §3.1. |
+| `type` | Yes | One of the types listed in §3.1. |
 | `inputs` | No | Array of field references resolved at runtime. |
 | `outputs` | No | Declared output fields (name, type, optional schema). |
 | `condition` | No | Boolean expression; step is skipped when false. |
@@ -931,7 +931,52 @@ Events: `step.llm.requested`, `step.llm.responded`, `step.llm.retry`.
 
 **`expected_output_schema` mini-grammar:** `string | number | boolean | enum[a,b,c] | object (nested) | array[<type>]`.
 
-**Local engine:** not dispatched. Falls to unsupported arm, fails with `rc=2`.
+**Local engine:** dispatched. `prompt`/`prompt_file` and `model` are rendered
+with `{{ ref }}` substitution over the run context (§2.5 references, e.g.
+`{{ steps.pick.outputs.model }}` or `{{ pick.model }}`), so an earlier step can
+choose the model. Schema validation and the corrective retry loop are as above.
+The provider is chosen by the model string:
+
+| `model` | Provider |
+|---|---|
+| `claude*` | Anthropic HTTP API (`ANTHROPIC_API_KEY`) |
+| `claude-code:<model>` | `claude -p` |
+| `codex:<model>` | `codex exec` |
+| `cursor:<model>` | `cursor-agent -p` |
+| `kimi:<model>` | `kimi -p` |
+| anything else | fails: no provider configured |
+
+An empty `<model>` after the colon means the CLI's own default. A CLI provider
+receives the schema instruction and the rendered prompt as one prompt, runs
+non-interactively, and only its final text is validated. Two local-extension
+fields apply to CLI providers:
+
+| Field | Values | Default |
+|---|---|---|
+| `workdir` | Directory the CLI runs in; `{{ ref }}`-templated | The directory the run was started from (`manifest.cwd`), also after a resume |
+| `timeout` | Wall-clock bound per CLI attempt: seconds, or `30s` / `2m` / `1h`. A timeout fails the step | None (unbounded) |
+| `permission` | `read-only` \| `workspace-write` \| `full-access` (the §2.9.2 `filesystem` vocabulary); `{{ ref }}`-templated, and the rendered value must be one of these | `read-only` |
+
+`permission` is mapped onto each CLI's own sandbox or permission flags. A CLI
+that cannot enforce the declared value fails the step instead of running with
+more access (§2.9.2: half-enforcement is not). For example, `kimi -p` has no
+sandbox, so a `kimi:` step must declare `full-access`:
+
+```yaml
+# Pass: codex enforces read-only through its sandbox.
+- { id: review, type: llm, model: "codex:", permission: read-only, prompt: "Review the diff." }
+# Fail: kimi cannot back read-only, so the step is refused rather than run unconfined.
+- { id: review, type: llm, model: "kimi:", permission: read-only, prompt: "Review the diff." }
+```
+
+The step receipt records `provider`, `model`, `permission` and the CLI's
+`cli_version`, plus `attempts` and `usage: {input_tokens, output_tokens,
+cache_read_tokens, cost_usd}` summed over all attempts. `input_tokens` counts
+every input token processed, with `cache_read_tokens` as its cached subset. A
+field the provider does not report is `null` (only `claude-code:` reports a
+dollar cost; `kimi:` reports no usage). Validation covers the full mini-grammar recursively for every
+provider: `object` (nested `properties`, or an object of field specs as
+shorthand), `array[<type>]` (each item checked), `enum[a,b]`, and the scalars.
 
 ---
 
@@ -962,7 +1007,19 @@ emits a `step.escalated` event with `reason: "llm_router_not_implemented"` and
 returns `{waiting: "escalated"}`. The instance waits for a human to submit via
 the API.
 
-**Local engine:** not dispatched.
+**Local engine:** dispatched. When `judgment.allow_agent` is `true` and the step
+has `model` and `prompt`/`prompt_file`, the agent is called through the `llm`
+path (§3.8: same providers, `workdir`, `permission`). Its answer is validated
+against the step's `outputs` (each required unless it declares `required_if` or
+`required: false`; `enum` values enforced) plus `confidence: number`. The step
+then pauses with reason `escalated` when `require_human_review` is `true` or
+`confidence` is below `confidence_threshold` (no threshold, no confidence
+check). Otherwise it completes with the agent's outputs. Without
+`allow_agent`, it escalates immediately, as the server does. The waiting
+receipt records `escalation` (`no_agent`, `require_human_review` or
+`low_confidence`) and, when an agent answered, its `proposal`. Resume with
+`opensop submit <run> <step> --output decision=...`, validated against the
+declared outputs.
 
 ---
 
@@ -1110,7 +1167,24 @@ anything. The instance advances.
 
 **Server status:** Working.
 
-**Local engine:** not dispatched.
+**Local engine:** dispatched. `body` is an array of steps run in order through
+the same dispatcher (`loop.body` is accepted too), one sub-run per iteration
+with its own receipts under `<run_dir>/loop/<step-id>/iter-<n>/`. Body steps and
+the predicate see the run context plus `loop.<as>` (default `as`: `item`) and
+`loop.index` (0-based). `for_each` takes a reference (an optional trailing
+`[*]` is ignored) or a literal array. `repeat_until` is checked after each
+iteration; `while` runs while its predicate is true, checked before each
+iteration. Predicates use the §2.6 grammar. Each iteration starts from the
+previous iteration's context, so a body can read the last round's outputs.
+Body outputs reach the parent only through `aggregate`: output `<k>` takes
+field `<k>` from the last body step output that has it. The step outputs
+`{iterations: <n>, <k>: <aggregated>...}`. `max_iterations` defaults to 100.
+Reaching it with the predicate unsatisfied fails the step (a `for_each` with
+more items than `max_iterations` fails up front).
+
+Limitation: a body step that would pause (`form`, `approval`, escalated
+`judgment`, `wait.until`, webhook callback, paused `subprocess`) fails the loop
+step. A local loop cannot resume mid-body.
 
 ---
 
@@ -1134,6 +1208,14 @@ If the predicate is true after step completion, the process terminates
 immediately with `instance.exited_early` and the literal `exit_outputs`. Not
 an error — `instance.state` becomes `"completed"`.
 
+**Local engine:** `condition` is evaluated before a step runs. False skips it
+with a `skipped` receipt and no output; an expression that does not parse fails
+the step. `exit_when` is evaluated after a step completes, over the run context
+plus `outputs` (this step's output). That includes a step resumed by `submit`,
+such as an escalated `judgment`. True ends the run as `completed` and records
+`manifest.exited_early = {step, exit_outputs}`. An `exit_when` inside a `loop`
+body ends the loop and the run.
+
 ---
 
 ## 4. The Server Runtime
@@ -1142,13 +1224,13 @@ an error — `instance.state` becomes `"completed"`.
 
 | Component | Responsibility |
 |---|---|
-| **Definition Registry** (`Opensop::Registry`) | Loads `.sop.yaml` from `processes/`, upserts into `sop_processes`. `bin/rails opensop:load_processes` re-syncs. _(Illustrative of a server implementation; not a command of this repo, and no maintained server implements it today.)_ |
-| **Instance Executor** (`Opensop::InstanceExecutor`) | Orchestrates an instance: resolves inputs, evaluates conditions, dispatches step executors, handles early exit. |
-| **Step Executors** (`Opensop::StepExecutors::*`) | One class per step type. See §3. |
-| **Condition Evaluator** (`Opensop::ConditionEvaluator`) | The only safe path for user-authored expressions. No `eval`, no `instance_eval`. |
-| **Input Resolver** (`Opensop::InputResolver`) | Resolves `from:` references against instance state. |
-| **LLM Provider** (`Opensop::LlmProviders::Anthropic`) | Calls Anthropic for `llm` steps. Provider resolved by model name prefix (`claude-*`). |
-| **API Gateway** | Rails controllers under `/sop/*`. Auto-generated from process definitions. |
+| **Definition Registry** | Loads `.sop.yaml` from `processes/`, upserts into `sop_processes`, and can re-sync on demand. _(Illustrative of a server implementation; no maintained server implements it today.)_ |
+| **Instance Executor** | Orchestrates an instance: resolves inputs, evaluates conditions, dispatches step executors, handles early exit. |
+| **Step Executors** | One executor per step type. See §3. |
+| **Condition Evaluator** | The only safe path for user-authored expressions. No `eval`, no dynamic code execution. |
+| **Input Resolver** | Resolves `from:` references against instance state. |
+| **LLM Provider** | Calls the model provider for `llm` steps (e.g. Anthropic). Provider resolved by model name prefix (`claude-*`). |
+| **API Gateway** | HTTP handlers under `/sop/*`. Auto-generated from process definitions. |
 
 ### 4.2 Server HTTP API
 
@@ -1670,6 +1752,12 @@ The `_local_step_loop` function dispatches on step type:
 | `noop` | Returns `{}` immediately. |
 | `form` | Pauses run. Appends `{status:"waiting", reason:"waiting_for_input"}` to `audit.jsonl`. Returns `"waiting:<index>"`. |
 | `approval` | Pauses run. Appends `{status:"waiting", reason:"waiting_for_approval"}` to `audit.jsonl`. Returns `"waiting:<index>"`. |
+| `wait` | `wait.seconds` (or no block) completes immediately; `wait.until` pauses with `waiting_for_callback`. |
+| `llm` | Calls the provider chosen by `model` (§3.8): the Anthropic API for `claude*`, or a CLI provider (`claude-code:`, `codex:`, `cursor:`, `kimi:`) under its `permission`. Validates against `expected_output_schema` with corrective retries. |
+| `judgment` | Agent via the `llm` path when `judgment.allow_agent`; pauses with reason `escalated` on `require_human_review`, low confidence, or no agent (§3.9). |
+| `loop` | Runs `body` steps per iteration through this same dispatcher; `for_each` / `repeat_until` / `while`; `aggregate` (§3.14). A pausing body step fails the loop. |
+| `webhook` | `sync` returns the parsed 2xx response; `callback` fires, then pauses with `waiting_for_callback`; `poll` is unsupported. |
+| `subprocess` | Runs the child process locally (depth limit 16); a paused child pauses the parent with `waiting_for_callback`. |
 | anything else | Sets `rc=2`, fails step with "unsupported step type for local execution: \<type\>". Run fails unless `continue_on_error: true`. |
 
 The `executor` field (see §6) is resolved to a default value for audit recording but
@@ -1961,7 +2049,7 @@ A process has exactly one of these states at any moment:
 | State | Meaning |
 |---|---|
 | `open` | Declared and available on-demand; no active scheduler is watching it. Starts when called explicitly (`opensop run`, `POST /sop/:name/start`, or a webhook trigger). A process with a trigger configured but no active scheduler is also `open` (see derivation rules below). |
-| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: the Rails dispatcher is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved — not yet implemented) is active and watching the process. |
+| `scheduled` | A trigger is configured **and** an active scheduler will fire it. For the server: its scheduler is running and an enabled schedule row exists. For local: the `opensop serve` daemon (A3, reserved — not yet implemented) is active and watching the process. |
 | `running` | One or more instances are currently active (state `running` per §4.3). A process can be both `scheduled` and `running` simultaneously; when displaying, `running` takes precedence as the visible state. |
 
 A process with an `interval` or cron trigger declared in its definition but **no active scheduler** must be reported as `open`, not `scheduled`. Implementations may surface the configured trigger as an informational field (e.g. `"configured_trigger": "interval"` / `null`) alongside the `open` state so that tooling can distinguish "open with no trigger" from "open with a trigger pending a scheduler."
@@ -2073,9 +2161,8 @@ scheduler (A3) is active.
 Each run produces a receipt. This section defines the additional per-run fields
 that every conforming implementation must capture to support reproducibility
 comparison and cost visibility. These fields extend the existing local run
-receipt (§5.6, `audit.jsonl`) and are already present in the reference server's
-`sop_llm_calls` table (the Rails `Sop::LlmCall` model captures `model`,
-`input_tokens`, `output_tokens`, `duration_ms`).
+receipt (§5.6, `audit.jsonl`); a server typically already records them per LLM
+call (`model`, `input_tokens`, `output_tokens`, `duration_ms`).
 
 ### 10.2 Per-run captured fields
 
@@ -2141,7 +2228,7 @@ This is complementary to the pre-pause `duration_ms` already in the waiting
 event; analysis tools may sum both segments for total active time across a pause.
 
 **Note:** this is a CLI-local receipt contract. A server implementation
-tracks step timing separately in `sop_llm_calls` and step records; the exact
+tracks step timing separately in its LLM-call and step records; the exact
 server-side API for resumed-completion metrics is part of the observability
 terminal (G1/A2, reserved — not yet implemented).
 
@@ -2181,8 +2268,8 @@ fields (§10.2). Do not rely on a `manifest.metrics` object on current receipts.
 
 ### 10.4 Server — no new columns required
 
-The Rails reference server already captures `model`, `input_tokens`,
-`output_tokens`, and timing in `sop_llm_calls`. Conforming servers must expose
+A server that already records `model`, `input_tokens`, `output_tokens`, and
+timing per LLM call needs no new storage. Conforming servers must expose
 these fields on the instance event stream once §10 is implemented. The exact
 server API for querying per-run metrics is reserved — not yet implemented; it lands with
 the observability terminal (G1/A2).

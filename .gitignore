@@ -4,26 +4,9 @@
 # belong in git's global ignore instead:
 # `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`
 
-# Ignore bundler config.
-/.bundle
-
 # Ignore all environment files except the committed example template.
 /.env*
 !/.env.example
-
-# Ignore all logfiles and tempfiles.
-/log/*
-/tmp/*
-!/log/.keep
-!/tmp/.keep
-
-# Ignore pidfiles, but keep the directory.
-/tmp/pids/*
-!/tmp/pids/
-!/tmp/pids/.keep
-
-# Ignore key files for decrypting credentials and more.
-/config/*.key
 
 # macOS
 .DS_Store
@@ -35,22 +18,11 @@
 # Coverage
 /coverage/
 
-/app/assets/builds/*
-!/app/assets/builds/.keep
-
-# Swarm session state (local only)
-/.swarm/
-
-# Playwright MCP local cache
-/.playwright-mcp/
-
 # Private process libraries and tools in downstream forks.
 # These directories exist only in private forks (e.g., a company's fork
 # with their internal processes). Reserve the names here so public clones
 # never accidentally track them.
-/processes/coba/
 /processes/private/
-/tools/denchclaw-bridge/
 /tools/private/
 
 # Agent/session working state and worktrees (local only — can carry private

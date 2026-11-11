@@ -9,6 +9,73 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-11
+
+This release makes the local engine run agent loops end to end. `judgment` and `loop` now run locally. `llm` and `judgment` steps can call Claude Code, Codex, Cursor or Kimi as CLI-backed providers with mapped permissions, and each call writes its token usage and cost to the receipt. Two agent-loop examples (`planner-worker`, `dev-loop`) are included. The release also fixes a set of first-run problems. Pretty output works in a terminal again. `run` validates inputs like `dry-run`, and `dry-run` handles loops and step types the engine cannot run. A failing step's stderr reaches you. `status` and the `next` hints say exactly what to submit. `upgrade` installs the latest release, `pull` works out of the box, `fork` copies the scripts a process runs, and `onboard` drops its bench step so every next step works on a curl install.
+
+### Added
+
+- **`script_sha256` in `automated` receipts**: the hash of the script that ran, so a script changed mid-run shows in the audit.
+- **Newcomer paths.** `status --json` carries `next` (the exact command) for waiting and failed runs; `opensop run ship.json` runs a file in the current directory without `./`; a missing name says "process not found" and how to fix it; a YAML file gets a clear "local runs take JSON" error (and `schema validate` notes it); `init` creates `processes/` and says where processes go; `OSL_LLM_STUB` is documented for trying llm steps without a key.
+- **CLI-backed `llm` providers (local extension, SPEC §3.8).** A `model` of `claude-code:<model>`, `codex:<model>`, `cursor:<model>` or `kimi:<model>` runs that CLI non-interactively (`claude -p --output-format json`, `codex exec --json -o <file>`, `cursor-agent -p --output-format json`, `kimi -p`). An empty `<model>` means the CLI's default. Only the CLI's final text is captured and then goes through the existing fence-strip, schema validation and retry loop. `claude*` models still use the Anthropic API unchanged. Unknown prefixes still fail with "no provider configured". New step fields: `workdir` (`{{ var }}`-templated; default: the run's cwd) and `permission` (`read-only` default, `workspace-write`, `full-access`). `permission` maps onto each CLI's own sandbox/permission flags. A permission the CLI cannot enforce fails the step instead of running with more access (SPEC §2.9.2). `kimi -p` has no sandbox, so kimi accepts only `full-access`. The receipt records `provider`, `model`, `permission` and `cli_version`. New test seam: `OSL_LLM_ARGV_FILE` logs the argv each CLI attempt would run. `OSL_LLM_STUB` still skips every CLI call, including `--version`.
+- **`model` and `permission` are `{{ var }}`-templated**, so an earlier step can choose both per spawn. The rendered `permission` must still be `read-only`, `workspace-write` or `full-access`; an unresolved token is refused, not defaulted. `{{ ref }}` substitution (prompts, `model`, `workdir`, `max_iterations`) now resolves dotted SPEC §2.5 references (`{{ pick.model }}`, `{{ steps.pick.outputs.model }}`, `{{ process.inputs.x }}`, `{{ loop.item }}`). Previously it resolved only bare top-level keys.
+- **Local `judgment` (SPEC §3.9).** With `judgment.allow_agent` plus `model` and `prompt`/`prompt_file`, the agent runs through the `llm` path against the step's outputs plus `confidence:number`. It pauses with reason `escalated` on `require_human_review` or a confidence below `confidence_threshold`; otherwise it completes. Without `allow_agent` it escalates immediately. The waiting receipt records `escalation` and the agent's `proposal`. Resume with `opensop submit <run> <step> --output decision=...`.
+- **Local `loop` (SPEC §3.14).** Supports `for_each` (+ `as`), `repeat_until` and `while`. `max_iterations` is a literal or `{{ process.inputs.x }}` (default 100), and `aggregate` takes `sum`, `concat` or `last`. `body` steps run through the same dispatcher, one receipted sub-run per iteration, and see `loop.<as>` and `loop.index`. Each iteration starts from the previous iteration's context. Hitting `max_iterations` with the predicate unsatisfied fails the step. Nested loops work. Limitation: a body step that would pause fails the loop step.
+- **Per-call usage and cost in the llm/judgment receipt**: `usage: {input_tokens, output_tokens, cache_read_tokens, cost_usd}` summed across retries, plus `attempts`. Inputs are normalized to include cached tokens, with `cache_read_tokens` as the cached subset. claude-code supplies tokens and `total_cost_usd`; codex (from its `--json` `turn.completed` events) and cursor (from `--output-format json`) supply tokens only; kimi reports none; the Anthropic API path supplies tokens. Unknown fields are `null`.
+- A minimal SPEC §2.6 condition evaluator (`<ref> <op> <literal>`) for loop predicates, `condition` and `exit_when`.
+- **`condition` and `exit_when` + `exit_outputs` (SPEC §3.2, §3.15) in the local engine.** A false `condition` skips the step with a `skipped` receipt. A true `exit_when`, evaluated over the context plus `outputs`, ends the run as completed and records `manifest.exited_early`. It applies after `submit` (e.g. an escalated judgment) and from inside a loop body. An unparseable expression fails the step.
+- **`timeout` bounds each CLI-provider attempt** (coreutils `timeout`, TERM then KILL to the CLI's process group). A timeout fails the step with a clear error, and the codex `-o` temp file is removed on every outcome. Without `timeout`, calls stay unbounded.
+- `manifest.cwd` records where the run was started; a CLI step's default `workdir` uses it, including after `submit`, parent continuation, and inside loop bodies and subprocess children.
+- **Agent-loop examples** in `cli/examples/agent-loops/`: `planner-worker` (plan, workers, test gate, fresh reviewer, repeat) and `dev-loop` (plan, fresh critique, revise, workers, gate, adversarial review, fresh rating, delta-judged fix rounds). Both run on local CLI providers against a git checkout; see its README.
+- **`status --json` says what an agent needs to act**: `run_dir`, the paused step's rendered `waiting.description`, and `error {step, exit_code, message}` with the failing step's stderr. The terminal view prints the receipts path and the exact next command.
+
+### Changed
+
+- **`expected_output_schema` is validated recursively against the full mini-grammar** (`object` with nested `properties`, `array[<type>]`, `enum[...]` shorthand, nested shorthand objects) for the API and every CLI provider. Before, `{x: {type: object}}` accepted a string. This is stricter: e.g. the shipped `meeting-action-items` SOP now fails when the model returns a non-array `items`.
+- **`submit` to a parent paused on a still-waiting subprocess child is refused**, and the error names the child run and step to submit to. Before, it bypassed the child.
+- **No unbounded value travels as one argv string any more.** Linux caps one argv/env string at 128 KiB (MAX_ARG_STRLEN), and a long loop's context outgrew it: jq failed to exec, the `model` template rendered empty, and the step failed with a misleading "llm step is missing model". The engine's `jq` wrapper now moves every `--arg`/`--argjson` value over 16 KiB into a temp file (`--rawfile`/`--slurpfile`). The CLI-provider prompt goes on stdin for claude-code, codex (`-`) and cursor; kimi still takes it as `-p <prompt>`, so a kimi prompt keeps the 128 KiB cap. The Anthropic API and webhook request bodies go to curl on stdin. `$OSL_CONTEXT` is left unset (with a note in the step's `stderr`) when the context is over 128 KiB; stdin always carries it.
+- **A failed CLI-provider call records why.** The step output carries `stderr` (first 1 KiB + last 3 KiB) and `provider_message`, the CLI's own error text: claude's `is_error` `.result` (claude reports a usage limit on stdout and exits 1), codex's `turn.failed` event, kimi's `error:` stderr line, cursor's first stderr line. A usage, quota or rate limit sets `error` to `provider_limit: <message>`, so a caller can tell a limit from a crash. The engine does not retry it.
+- A failed `{{ ref }}` render (`model`, `permission`, `workdir`, `prompt`, `loop.max_iterations`) fails the step with `cannot render <field>: <jq error>` instead of continuing with an empty value.
+- claude-code `workspace-write` maps to `--permission-mode auto` (acceptEdits blocked Bash under `-p`, so Claude workers could not run tests).
+- The four copies of the waiting-reason/expects logic (run, submit, heal, parent continuation) are now one helper, which also knows `escalated`. A paused judgment expects its declared `outputs`, not its `inputs`.
+- `onboard` accepts `judgment` and `loop` steps. `help`, the README step table and the embedded build-harness skill now describe local `llm`/`judgment`/`loop`.
+- **`onboard` no longer runs `bench`.** `bench` needs the repo's `bench/` fixtures, so on a curl install that step always failed, and with `--stub` its "reliability gain" was hard-coded fixtures. `--stub` and `--n` are still accepted for old scripts and ignored with a note. `--json` drops `bench_result_or_skipped`/`bench_result` and adds `next` (commands to run) and `requires` (e.g. `ANTHROPIC_API_KEY` for the scaffold's `claude-*` model). The printed next steps all work on a curl install: guide links are GitHub URLs, there is no bare `fork`, and the cell setup (`opensop init && mkdir -p processes && mv …`) runs as printed. When the scaffold's model needs an API key, onboard says so and names the `claude-code:`/`codex:` alternative.
+- `bench` outside a git clone fails with `bench runs from a git clone` and the clone command as the hint.
+
+### Fixed
+
+- `duration_ms` is never negative when the wall clock steps backwards (NTP or VM host time sync); it is clamped at 0.
+- `status` lists steps only; a `heal` event no longer shows as an empty step row (`show` and `history` still have it).
+- A run resumed with `submit` or `heal` from another directory runs its `automated` and `shell` steps in the directory the run was started in, as the docs say, so "finish from anywhere" holds. A relative `OPENSOP_LOCAL_HOME` is made absolute.
+- `help agents` and `help agents --json` point to `docs/AGENTS.md` (as a GitHub URL, so it works on a curl install). They named `docs/CLAUDE-INTEGRATION.md`, which does not exist.
+- **The embedded `opensop` skill and `help` match the local CLI.** Local `run` is synchronous, so the skill no longer says to poll `status` in a loop. Its example `opensop show <id> --json | jq '.status'` (always `null`) is now `opensop status <id> --json | jq .state`. `help` drops the "full SPEC parity" claim from the local step-types header.
+- **`skill install --runtime hermes --scope user` honours `$HERMES_HOME`** (default `~/.hermes`), the way codex honours `$CODEX_HOME`; `skill paths` and `doctor` show the resolved path.
+- A bad `--inputs`/`--inputs-file` (or `--outputs`/`--outputs-file`) prints only the CLI's own error, without jq's raw parse error before it.
+- **Local `run --metadata k=v` is recorded** under `manifest.metadata`. Before, it was silently dropped.
+- **`opensop pull opensop/<slug>` works out of the box.** The default library is now the `sops/` directory of this repo (`https://raw.githubusercontent.com/opensop/opensop/{ref}/sops`); the old default, `github.com/opensop/sops`, only had a template. `{ref}` in `OPENSOP_SOPS_BASE` is replaced by the pull ref. A base without `{ref}` gets `/<ref>` appended as before, so existing overrides and `file://` mirrors keep working.
+- **`fork` copies the scripts a process runs.** Relative `run:` paths of its `automated` steps (loop bodies included) are copied alongside the `.sop.json` at the same relative path, without overwriting existing files; `--json` lists them as `copied_scripts`. Before, a forked `greet` failed with "step script not found".
+- **`--remote ps` and `--remote watch` fail on an unreachable server** (exit 1, one `network_error` line that includes curl's reason). Before, `ps` printed an empty result and exited 0, and `watch` retried forever.
+- `info` labels the file it read `file:` instead of `written to:` (it writes nothing).
+- **`doctor` flags two installs**: when the `opensop` on PATH is a different version from the one running, it says so; `--json` gains `path_version` and `path_version_mismatch`.
+- **`upgrade` installs the latest GitHub release**, as it says, instead of whatever is on `main`. It asks the GitHub API for the latest release tag, and when the running CLI is already newer it says so instead of "upgrading" backwards. `--pin X.Y.Z` is unchanged and can still downgrade. The downloaded binary's embedded version must match the tag either way. `help` labels local commands "no OpenSOP server needed" (it said "no curl", which is wrong for `upgrade` and `pull`).
+- **`run`/`submit`/`heal` "next" hints name the fields to submit** (`--output email=...`, `--output decision=<approve|reject>`) instead of `--output k=v`. For an escalated judgment they say why (low confidence vs. threshold, required human review, no agent) and show the agent's proposal.
+- A `judgment` with a `{name: type}` outputs map no longer prints a jq error; the map is used as the agent's output schema.
+- **`status` in a terminal** labels the id `run:`, shows one row per step with its latest state (it replayed the audit log, so a resumed step showed a waiting and a completed row, and cancel/heal events showed `null` rows), and after `heal --apply` shows the new completion time.
+- `help config` examples use a placeholder server URL and token instead of a demo server.
+- **`runs` and `show` follow the output contract**: JSON with `--json` or when piped, human text in a terminal. `runs --json` is an array of `{run_id, status, process, started_at}` (it printed TSV); piped `show` prints `{manifest, steps}` (it printed prose).
+- **A failing step's stderr reaches you.** The terminal failure line shows its last lines (it used to print `failed (exit 2): ` and nothing else), and `fault.json` gains `stderr` (last 4 KiB), which the `debug_prompt` and `heal` also show.
+- **`dry-run` reports step types the local engine cannot run** (e.g. `notification`, or a typo), including inside loop bodies, as `valid: false` with a `steps.<id>.type` error. Before, it said `valid: true` and `run` then failed.
+- **`dry-run` no longer crashes on a `loop` whose `body` is an array** (both agent-loop examples hit it) or on a `{name: type}` outputs map. The loop preview names its `for_each`/`repeat_until`/`while` and every body step.
+- **`run` refuses missing or invalid inputs** with the same required/type/enum/format checks as `dry-run` (exit 1, `usage_error`), before a run directory is created. Declared defaults count as supplied.
+- **Object-form typed inputs** (`"inputs": {"x": {"type": "string", "required": true}}`, what `onboard` scaffolds) are definitions, not default values. Before, the definition object itself was fed to the steps as the value of `x`. An object value without a `type` key is still a default.
+- **Pretty output in a terminal works again.** The TTY check ran inside `$(...)`, where stdout is always a pipe, so `ps`, `steps`, `watch` and every other auto-mode view printed compact JSON even in a terminal. Whether stdout is a terminal is now decided once at startup.
+- A `{name: type}` outputs map on a pausing step is read as the SPEC field list instead of crashing the run.
+- **`status`, `show`, `diff` and `steps` work before a run has its first receipt** (first step still running, or the run killed during it). With jq 1.8 they failed with `invalid JSON text passed to --argjson`: jq prints `[]` for a missing slurped file and exits non-zero, so the fallback doubled the output.
+- **A run interrupted mid-step can be resumed or closed.** `heal --apply` accepts an `interrupted` run (the CLI was killed by SIGTERM, SIGINT or a timeout): it re-runs the first step without a completed receipt and continues; the `--force-effects` rule still applies to a step with `effects`. `cancel` accepts `interrupted`. `status` names the step and `next: opensop heal <id> --apply` / `opensop cancel <id>` (`--json` adds `interrupted: {step}` and a `next` array). Before, `heal` said "is 'interrupted', not 'failed'" and `cancel` said "unexpected status".
+- **Killing `opensop run` no longer orphans the running step.** Script steps (`automated`, `shell`) run in their own process group (`setsid`, where available), and the interrupted-run handler stops the step loop and that group. Before, the step and its children kept running, and the step loop could keep executing later steps. Without `setsid` (macOS) only the step process itself is stopped.
+- **`init` writes `.opensop/.gitignore` containing `runs/`.** Run receipts and `context.json` hold process inputs, so they are no longer committed by accident.
+- **`--input` keeps the raw string for an input the process declares as `type: string`** (array or object-form definitions), in `run`, `dry-run` and `heal --apply`. Before, `--input zip=02134` became the number `2134` and `--input test_command=false` the boolean `false`. Undeclared and non-string inputs are still parsed as JSON.
+
 ## [0.9.1] — 2026-09-23
 
 ### Added
@@ -937,7 +1004,7 @@ work; v0.6 features only activate inside a cell.
 - **Multi-word `search` and `suggest`** — queries are now tokenized on
   whitespace and scored per-token, with hyphenated process names also
   tokenized on `-`/`_`. `search "morning briefing"` now correctly
-  matches `darwin-morning-briefing`. Single-word queries unchanged.
+  matches `team-morning-briefing`. Single-word queries unchanged.
 
 ### Changed
 
@@ -945,7 +1012,7 @@ work; v0.6 features only activate inside a cell.
   `outputs_summary` (already in the `/sop/` discovery response, just
   unused) are now indexed alongside name + description + tags.
   Expected ~30% recall lift on "what produces X?" / "I want Y"
-  intent queries. Reported by the Darwin agent.
+  intent queries. Reported by an agent user.
 
 ---
 
@@ -1040,6 +1107,7 @@ work; v0.6 features only activate inside a cell.
 - `X-SOP-Token` auth header support.
 - `NO_COLOR` support.
 
+[0.10.0]: https://github.com/opensop/opensop/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/opensop/opensop/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/opensop/opensop/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/opensop/opensop/compare/v0.7.0...v0.8.0
